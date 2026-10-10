@@ -43,17 +43,39 @@ sideloads the extension into the profile, and launches LibreWolf with
   file.
 - The extension connects with the add-on id the host expects, over the real
   native messaging wire, and the host's loopback endpoint answers.
-- `read` returns the attached page's visible text out of the live DOM, and
-  `structure` returns a DOM-derived outline (a heading and a link, in the fixture).
-- A new document — the fixture page leaves for another one on its own — ends the
-  attachment, and both `status` and `read` refuse afterwards.
-- A second attach works, and `detach` ends it with the reason reported.
+- `read` returns the enabled page's visible text out of the live DOM, and
+  `structure` returns a DOM-derived outline (a heading and a link, in the fixture),
+  with refs.
+- The inventory lists every tab by title and id with the enabled one marked, and
+  nothing else about it.
+- A ref names the snapshot it came from, so a ref from an outline taken before a
+  navigation is refused rather than acted on.
+- A new document on the *same origin* — the fixture pages leave for one another on
+  their own — keeps the enablement and moves the document's identity, so a ref
+  taken before the navigation is refused rather than acted on.
+- A read of a page whose visible text is empty comes back empty, and a script's
+  secret does not come with it.
+- `detach` disables that tab by id, and later reads say why.
 - Stopping the browser takes the host with it: the port stops answering and no
   host process is left behind.
 
 ### What it is NOT evidence of
 
-**The toolbar click and the `activeTab` grant it creates.** A headless browser has
+**Cross-origin.** A tab that *lands* on another origin is asserted: its
+enablement is revoked, the origin it left is named, and a read against it refused.
+A redirect chain that leaves the origin and comes *back* is asserted too — the run
+fails if the tab is still enabled — and it was the measurement that found the
+problem: before the commit latch, one run ended the enablement and another left it
+enabled (a race between the page and the `onUpdated` URL); after it, every run
+ended it. The *copy* this harness runs carries `webNavigation` and records every
+navigation event (into the host's revocation reason) so a failure prints what the
+browser reported rather than a claim about it. Not covered: a server-side redirect
+chain with no foreign document load or commit (the boundary the operator set; see
+the plugin README), what a foreign *host* does — this fixture's second origin is
+another port on the same host, because Firefox match patterns cannot name a port —
+and what a person's toolbar click does.
+
+**The toolbar click, the site-permission doorhanger it opens, and the `activeTab` grant.** A headless browser has
 no toolbar, so there is no click to make. The harness *substitutes* the click: it
 appends a test-only script to a **copy** of the extension, which attaches the
 active tab when asked, and it gives that copy a host permission for the local test
@@ -79,7 +101,7 @@ with a fake `browser` and a fake DOM, and the code strings it injects (`readCode
 `structureCode`, `identityCode`) are actually run against that DOM — so this is the
 browser half under test, not a Rust stand-in and not a mock of the extraction.
 
-Its **65 checks** (11 of them witnesses) cover: the outline's names and what it must never contain (a password
+Its checks and regression witnesses cover: the outline's names and what it must never contain (a password
 value, a hidden CSRF token, a value or a link inside `display:none`, a
 `hidden`-attribute link, a `visibility:hidden` link, a textarea's content, an
 ordinary input's value); `read` returning the rendered text and *not* the

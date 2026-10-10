@@ -64,7 +64,18 @@ const EXPECTED_ADDON: &str = "librewolf-bridge@eidolon.local";
 /// the host manifest file in the browser's `native-messaging-hosts` directory.
 const HOST_NAME: &str = "eidolon_librewolf";
 
-const METHODS: [&str; 4] = ["status", "read", "structure", "detach"];
+const METHODS: [&str; 10] = [
+    "status",
+    "tabs",
+    "read",
+    "structure",
+    "click",
+    "type",
+    "scroll",
+    "navigate",
+    "back",
+    "detach",
+];
 
 const USAGE: &str = "\
 eidolon-librewolf — the librewolf bridge host
@@ -205,9 +216,15 @@ async fn call(
     // stays answerable while a read is outstanding.
     let result = match method {
         "status" => app.bridge.status(),
+        "tabs" => app.bridge.tabs().await,
         "read" => app.bridge.read(&args).await,
         "structure" => app.bridge.structure(&args).await,
-        "detach" => app.bridge.detach().await,
+        "click" => app.bridge.click(&args).await,
+        "type" => app.bridge.type_text(&args).await,
+        "scroll" => app.bridge.scroll(&args).await,
+        "navigate" => app.bridge.navigate(&args).await,
+        "back" => app.bridge.back(&args).await,
+        "detach" => app.bridge.detach(&args).await,
         _ => unreachable!("METHODS is the list this matches on"),
     };
     let reply = match result {
@@ -481,7 +498,7 @@ fn print_host_manifest() -> Result<(), String> {
     let exe = exe.canonicalize().unwrap_or(exe);
     let manifest = json!({
         "name": HOST_NAME,
-        "description": "The librewolf bridge: reads the tab a person attached in LibreWolf",
+        "description": "The librewolf bridge: works with the tabs a person enables in LibreWolf",
         "path": exe.display().to_string(),
         "type": "stdio",
         "allowed_extensions": [EXPECTED_ADDON],

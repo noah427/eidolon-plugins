@@ -1,15 +1,21 @@
-// `librewolf_detach`: end the attachment. The extension is told first so it can
-// let go of the grant it holds; the bridge's own record is cleared either way,
-// because a page-facing half that refuses must not leave the assistant believing
-// it still has a tab.
+// `librewolf_detach`: disable one enabled tab. The extension is told first so it
+// can let go of the site permission it holds; the bridge's own record is cleared
+// either way, because a page-facing half that refuses must not leave the
+// assistant believing it still has that tab.
 pub fn manifest() {
     #{
         name: "librewolf_detach",
-        description: "End the attachment to the LibreWolf tab: the extension stops using it and the bridge's record is cleared, so later reads are refused until a person clicks the toolbar button again. There is no API that withdraws the browser's own temporary activeTab grant — what this ends is the bridge's use of it, and every read path refuses without an attachment. Reversible by clicking once more, which is why this is mutating rather than destructive: it changes the bridge's state and nothing on the page.",
+        description: "Disable one enabled LibreWolf tab: the extension stops using it and lets go of the site permission it asked for, and the bridge's record for that tab is cleared, so later calls against it are refused until a person clicks the extension's toolbar button on it again. Other enabled tabs are untouched — there is no blanket enablement to end. Reversible by clicking once more, which is why this is mutating rather than destructive: it changes the bridge's state and nothing on the page.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
-            "properties": #{},
+            "properties": #{
+                "tab_id": #{
+                    "type": "integer",
+                    "description": "The id of an enabled tab, from librewolf_tabs or librewolf_status.",
+                },
+            },
+            "required": ["tab_id"],
         },
     }
 }
@@ -17,7 +23,6 @@ pub fn manifest() {
 pub async fn call(input) {
     call_service("detach", input).await
 }
-
 // Everything below is the same in every librewolf_*.rn: upstream eidolon
 // compiles each tool file on its own, and a tool file is meant to be handed
 // over whole.

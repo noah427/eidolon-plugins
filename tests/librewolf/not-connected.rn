@@ -45,11 +45,21 @@ pub async fn run(input) {
     text + "not-connected: " + `${out.len()}` + " checks hold"
 }
 
+// Every verb this plugin ships, with the input its own schema requires — a call
+// that failed the schema would be refused for that reason and would say nothing
+// about the bridge. `tab_id` is a tab that is not enabled here (nothing is), which
+// is the state this harness runs in.
 fn calls() {
     [
         #{ name: "librewolf_status", args: #{} },
-        #{ name: "librewolf_read", args: #{} },
-        #{ name: "librewolf_structure", args: #{} },
-        #{ name: "librewolf_detach", args: #{} },
+        #{ name: "librewolf_tabs", args: #{} },
+        #{ name: "librewolf_read", args: #{ "tab_id": 7 } },
+        #{ name: "librewolf_structure", args: #{ "tab_id": 7 } },
+        #{ name: "librewolf_click", args: #{ "tab_id": 7, "ref": "e1-ab12cd34" } },
+        #{ name: "librewolf_type", args: #{ "tab_id": 7, "ref": "e1-ab12cd34", "text": "x" } },
+        #{ name: "librewolf_scroll", args: #{ "tab_id": 7, "dy": 1 } },
+        #{ name: "librewolf_navigate", args: #{ "tab_id": 7, "url": "https://example.test/" } },
+        #{ name: "librewolf_back", args: #{ "tab_id": 7 } },
+        #{ name: "librewolf_detach", args: #{ "tab_id": 7 } },
     ]
 }

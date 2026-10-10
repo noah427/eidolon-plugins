@@ -41,7 +41,7 @@ mkdir -p "$(dirname "$token")"
 (umask 077 && head -c 24 /dev/urandom | base64 > "$token")
 run_eidolon() { XDG_CONFIG_HOME=$XDG_CONFIG_HOME "$eidolon" "$@"; }
 run_eidolon plugins trust librewolf >/dev/null
-for v in status read structure detach; do
+for v in status tabs read structure click type scroll navigate back detach; do
     run_eidolon plugins grant "librewolf_$v" "file:~/.config/eidolon/librewolf.token" >/dev/null
 done
 

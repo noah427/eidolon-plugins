@@ -4,8 +4,8 @@
 pub fn manifest() {
     #{
         name: "librewolf",
-        version: "0.1.0",
-        description: "read the one tab a person attaches in their own LibreWolf session, by clicking the extension's toolbar button on it",
+        version: "0.2.0",
+        description: "work with the tabs a person enables in their own LibreWolf session by clicking the extension's toolbar button on each one: an inventory of every tab by title and id, and read, outline, click, type, scroll, navigate and go back on an enabled one",
         // No `service:` block, on purpose. The process that has to be running is
         // the native messaging host LibreWolf spawns because the extension names
         // it — and `eidolon plugins service start` cannot start a browser. What
@@ -13,7 +13,10 @@ pub fn manifest() {
         // `api_request` endpoint and the "answers with the reason it isn't there"
         // error; the plugin's README says what an operator has to do instead.
         claims: #{
-            tools: ["status", "read", "structure", "detach"],
+            tools: [
+                "status", "tabs", "read", "structure", "click", "type", "scroll",
+                "navigate", "back", "detach",
+            ],
             grants: ["file:~/.config/eidolon/librewolf.token"],
         },
     }

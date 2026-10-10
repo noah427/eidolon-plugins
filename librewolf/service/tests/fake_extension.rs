@@ -136,24 +136,65 @@ impl Host {
     }
 
     fn hello(&mut self) {
-        self.send(json!({"v": 1, "type": "hello", "addon": ADDON, "ext_version": "0.1.0"}));
+        self.send(json!({"v": 2, "type": "hello", "addon": ADDON, "ext_version": "0.2.0"}));
     }
 
-    fn attached(&mut self, generation: u64, url: &str, time_origin: f64) {
-        self.send(json!({"v": 1, "type": "state", "attached": {
-            "tab_id": 7, "url": url, "title": "A page", "generation": generation,
-            "time_origin": time_origin, "nonce": format!("nonce-of-generation-{generation}"),
-            "attached_at_ms": 1,
-        }}));
+    /// The whole enabled set, the way the extension pushes it: a snapshot, not a
+    /// diff. `revoked` is the reason for the last change when there was one.
+    fn state(&mut self, tabs: Value, revoked: Value) {
+        self.send(json!({"v": 2, "type": "state", "tabs": tabs, "revoked": revoked}));
     }
 
-    /// The same attachment, but claiming a different document.
-    fn attached_in_another_document(&mut self, generation: u64, url: &str, time_origin: f64) {
-        self.send(json!({"v": 1, "type": "state", "attached": {
-            "tab_id": 7, "url": url, "title": "A page", "generation": generation,
-            "time_origin": time_origin, "nonce": "a-nonce-from-somewhere-else",
-            "attached_at_ms": 1,
-        }}));
+    /// One enabled tab, by id, at a generation, with the document it is showing.
+    fn enabled_tab(&mut self, tab_id: i64, generation: u64, url: &str, time_origin: f64) {
+        self.state(
+            json!([{
+                "tab_id": tab_id, "url": url, "title": "A page",
+                "origin": origin_of(url), "generation": generation,
+                "time_origin": time_origin, "nonce": format!("nonce-of-generation-{generation}"),
+                "confirmed": true, "enabled_at_ms": 1,
+            }]),
+            Value::Null,
+        );
+    }
+
+    /// Tab 7 enabled, which is what most of these tests work against.
+    fn enabled(&mut self, generation: u64, url: &str, time_origin: f64) {
+        self.enabled_tab(7, generation, url, time_origin);
+    }
+
+    /// The same tab, offering a different document at the same generation.
+    fn enabled_in_another_document(&mut self, generation: u64, url: &str, time_origin: f64) {
+        self.state(
+            json!([{
+                "tab_id": 7, "url": url, "title": "A page", "origin": origin_of(url),
+                "generation": generation, "time_origin": time_origin,
+                "nonce": "a-nonce-from-somewhere-else", "confirmed": true, "enabled_at_ms": 1,
+            }]),
+            Value::Null,
+        );
+    }
+
+    /// The same document, withdrawn: the tab is loading something and has no
+    /// usable document until a probe identifies it.
+    fn loading(&mut self, generation: u64, url: &str, time_origin: f64) {
+        self.state(
+            json!([{
+                "tab_id": 7, "url": url, "title": "A page", "origin": origin_of(url),
+                "generation": generation, "time_origin": time_origin,
+                "nonce": format!("nonce-of-generation-{}", generation - 1),
+                "confirmed": false, "enabled_at_ms": 1,
+            }]),
+            Value::Null,
+        );
+    }
+
+    /// Nothing enabled any more, with the reason.
+    fn disabled(&mut self, reason: &str, url: &str) {
+        self.state(
+            json!([]),
+            json!({"tab_id": 7, "reason": reason, "url": url}),
+        );
     }
 
     /// The next frame the host sent that is a command for the extension.
@@ -187,18 +228,26 @@ impl Host {
         serde_json::from_str(&body).unwrap()
     }
 
-    /// Wait until the host has recorded an attachment, so a test does not race
+    /// Wait until the host has recorded an enabled tab, so a test does not race
     /// the `state` frame it just wrote.
-    fn wait_attached(&self) {
+    fn wait_enabled(&self) {
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
-            if self.health()["attached"] == json!(true) {
+            if self.health()["enabled_tabs"] == json!(1) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("the host never recorded the attachment");
+        panic!("the host never recorded the enabled tab");
     }
+}
+
+/// The origin of a url the way the real extension reads it — scheme://authority.
+/// Only ever used on the plain absolute urls these tests write.
+fn origin_of(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    format!("{}://{}", scheme.to_lowercase(), rest[..end].to_lowercase())
 }
 
 impl Drop for Host {
@@ -276,14 +325,17 @@ fn health_answers_and_the_call_endpoint_wants_the_token() {
 #[test]
 fn a_wrong_add_on_id_is_refused_so_the_endpoint_stays_dark() {
     let mut host = Host::start();
-    host.send(json!({"v": 1, "type": "hello", "addon": "somebody-else@example.com"}));
+    host.send(json!({"v": 2, "type": "hello", "addon": "somebody-else@example.com"}));
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(host.health()["browser_connected"], json!(false));
 
+    // The status payload is a report, not a refusal: nothing enabled, and the
+    // hint naming the one act that would connect a browser to this host.
     let reply = host.call("status", json!({}));
-    assert_eq!(reply["ok"], json!(false));
+    assert_eq!(reply["ok"], json!(true));
+    assert_eq!(reply["result"]["tabs"].as_array().unwrap().len(), 0);
     assert!(
-        reply["error"]
+        reply["result"]["hint"]
             .as_str()
             .unwrap()
             .contains("has not connected"),
@@ -292,20 +344,23 @@ fn a_wrong_add_on_id_is_refused_so_the_endpoint_stays_dark() {
 }
 
 #[test]
-fn before_any_attachment_a_read_names_the_click_and_returns_no_text() {
+fn before_any_enablement_a_read_names_the_click_and_returns_no_text() {
     let mut host = Host::start();
     host.hello();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(host.health()["browser_connected"], json!(true));
-    assert_eq!(host.health()["attached"], json!(false));
+    assert_eq!(host.health()["enabled_tabs"], json!(0));
 
-    let reply = host.call("read", json!({}));
+    let reply = host.call("read", json!({"tab_id": 7}));
     assert_eq!(reply["ok"], json!(false));
     let err = reply["error"].as_str().unwrap();
     assert!(
         err.contains("click the librewolf bridge extension's toolbar button"),
         "{err}"
     );
+    // A request that names no tab at all says what to pass instead.
+    let reply = host.call("read", json!({}));
+    assert!(reply["error"].as_str().unwrap().contains("which tab?"), "{reply}");
     // Nothing was asked of the extension: an unattached call is refused here.
     assert!(
         host.inbox.try_recv().is_err(),
@@ -317,14 +372,17 @@ fn before_any_attachment_a_read_names_the_click_and_returns_no_text() {
 fn a_read_is_answered_and_the_host_truncates_it_itself() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
     let status = host.call("status", json!({}));
     assert_eq!(status["ok"], json!(true));
-    assert_eq!(status["result"]["tab_id"], json!(7));
-    assert_eq!(status["result"]["url"], json!("https://example.com/a"));
-    assert_eq!(status["result"]["generation"], json!(1));
+    let tab = &status["result"]["tabs"][0];
+    assert_eq!(tab["tab_id"], json!(7));
+    assert_eq!(tab["url"], json!("https://example.com/a"));
+    assert_eq!(tab["origin"], json!("https://example.com"));
+    assert_eq!(tab["generation"], json!(1));
+    assert_eq!(tab["confirmed"], json!(true));
 
     let port = host.port;
     let token = host.token.clone();
@@ -334,7 +392,7 @@ fn a_read_is_answered_and_the_host_truncates_it_itself() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "read", "args": {"max": 20}}).to_string()),
+            Some(&json!({"method": "read", "args": {"tab_id": 7, "max": 20}}).to_string()),
         )
     });
     let cmd = host.command();
@@ -343,7 +401,7 @@ fn a_read_is_answered_and_the_host_truncates_it_itself() {
     assert_eq!(cmd["time_origin"], json!(100.0));
     assert_eq!(cmd["args"]["max"], json!(20));
     let id = cmd["id"].as_u64().unwrap();
-    host.send(json!({"v": 1, "type": "result", "id": id, "ok": true,
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 7,
                      "generation": 1, "time_origin": 100.0, "nonce": "nonce-of-generation-1",
                      "result": {"url": "https://example.com/a", "title": "A page",
                                 "text": "x".repeat(50), "truncated": false}}));
@@ -360,8 +418,8 @@ fn a_read_is_answered_and_the_host_truncates_it_itself() {
 fn a_same_url_reload_is_refused_even_though_no_revocation_event_arrived() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/same", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/same", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -371,7 +429,7 @@ fn a_same_url_reload_is_refused_even_though_no_revocation_event_arrived() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "read", "args": {}}).to_string()),
+            Some(&json!({"method": "read", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let cmd = host.command();
@@ -379,7 +437,7 @@ fn a_same_url_reload_is_refused_even_though_no_revocation_event_arrived() {
     // The tab reloaded at the same URL: the extension's own check caught it and
     // it answers with the *new* document's time origin, having revoked nothing
     // this host has heard about yet.
-    host.send(json!({"v": 1, "type": "result", "id": id, "ok": true,
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 7,
                      "generation": 1, "time_origin": 999.0,
                      "result": {"url": "https://example.com/same", "title": "A page",
                                 "text": "the new document's text", "truncated": false}}));
@@ -395,8 +453,8 @@ fn a_same_url_reload_is_refused_even_though_no_revocation_event_arrived() {
 fn a_revocation_that_races_the_read_wins_and_the_text_is_dropped() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -406,16 +464,15 @@ fn a_revocation_that_races_the_read_wins_and_the_text_is_dropped() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "read", "args": {}}).to_string()),
+            Some(&json!({"method": "read", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let cmd = host.command();
     let id = cmd["id"].as_u64().unwrap();
-    // The tab navigates while the read is in flight. The extension revokes
-    // first, then answers about the document it read.
-    host.send(json!({"v": 1, "type": "state", "attached": null,
-                     "reason": "a new document began loading", "url": "https://example.com/b"}));
-    host.send(json!({"v": 1, "type": "result", "id": id, "ok": true,
+    // The tab navigates while the read is in flight. The extension pushes the
+    // tab out of the enabled set first, then answers about the document it read.
+    host.disabled("a new document began loading", "https://example.com/b");
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 7,
                      "generation": 1, "time_origin": 100.0, "nonce": "nonce-of-generation-1",
                      "result": {"url": "https://example.com/a", "title": "A page",
                                 "text": "text from the document that is gone", "truncated": false}}));
@@ -424,24 +481,33 @@ fn a_revocation_that_races_the_read_wins_and_the_text_is_dropped() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["ok"], json!(false));
     assert!(
-        v["error"].as_str().unwrap().contains("no tab is attached"),
+        v["error"].as_str().unwrap().contains("not enabled"),
         "{v}"
     );
     assert!(!body.contains("that is gone"), "{body}");
 
-    // And the revoked generation cannot be re-offered, so caching it would not
-    // resurrect the authority either.
-    host.attached(1, "https://example.com/a", 100.0);
-    std::thread::sleep(Duration::from_millis(150));
-    assert_eq!(host.health()["attached"], json!(false));
+    // Nothing but the extension pushing a record can enable a tab again — this
+    // host has no path that invents one — and the reason it ended stays until
+    // that push arrives.
+    assert_eq!(host.health()["enabled_tabs"], json!(0));
+    let status = host.call("status", json!({}));
+    assert_eq!(status["ok"], json!(true));
+    assert_eq!(status["result"]["tabs"].as_array().unwrap().len(), 0);
+    assert!(
+        status["result"]["revocation"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("a new document began loading"),
+        "{status}"
+    );
 }
 
 #[test]
-fn a_reply_about_another_attachment_is_refused() {
+fn a_reply_about_another_generation_is_refused() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -451,12 +517,12 @@ fn a_reply_about_another_attachment_is_refused() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "read", "args": {}}).to_string()),
+            Some(&json!({"method": "read", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let cmd = host.command();
     let id = cmd["id"].as_u64().unwrap();
-    host.send(json!({"v": 1, "type": "result", "id": id, "ok": true,
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 7,
                      "generation": 99, "time_origin": 100.0, "nonce": "nonce-of-generation-1",
                      "result": {"url": "https://example.com/a", "title": "A page",
                                 "text": "text", "truncated": false}}));
@@ -467,7 +533,7 @@ fn a_reply_about_another_attachment_is_refused() {
         v["error"]
             .as_str()
             .unwrap()
-            .contains("answered about attachment 99"),
+            .contains("answered about generation 99"),
         "{v}"
     );
 }
@@ -477,8 +543,8 @@ fn a_reply_from_another_document_is_refused_even_with_the_same_url_and_clock() {
     // The case a timestamp cannot see: same URL, same time origin, a different document.
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/same", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/same", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -488,13 +554,13 @@ fn a_reply_from_another_document_is_refused_even_with_the_same_url_and_clock() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "read", "args": {}}).to_string()),
+            Some(&json!({"method": "read", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let cmd = host.command();
     assert_eq!(cmd["nonce"], json!("nonce-of-generation-1"));
     let id = cmd["id"].as_u64().unwrap();
-    host.send(json!({"v": 1, "type": "result", "id": id, "ok": true,
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 7,
                      "generation": 1, "time_origin": 100.0,
                      "nonce": "a-nonce-from-the-replacement-document",
                      "result": {"url": "https://example.com/same", "title": "A page",
@@ -510,38 +576,36 @@ fn a_reply_from_another_document_is_refused_even_with_the_same_url_and_clock() {
 }
 
 #[test]
-fn an_attachment_claiming_another_document_is_refused() {
+fn an_enablement_claiming_another_document_does_not_lower_the_record() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
-    // Same generation, same URL, same clock, a different document.
-    host.attached_in_another_document(1, "https://example.com/a", 100.0);
+    // Same generation, same URL, same clock, a different document. The record
+    // already held stands — a push cannot lower it — and the tab keeps the
+    // document this host verified rather than the one it was offered.
+    host.enabled_in_another_document(1, "https://example.com/a", 100.0);
     std::thread::sleep(std::time::Duration::from_millis(200));
     assert_eq!(
-        host.health()["attached"],
-        json!(false),
-        "the host must not hold it"
+        host.health()["enabled_tabs"],
+        json!(1),
+        "the held record stands"
     );
 
     let reply = host.call("status", json!({}));
-    assert_eq!(reply["ok"], json!(false));
-    assert!(
-        reply["error"]
-            .as_str()
-            .unwrap()
-            .contains("two different documents"),
-        "{reply}"
-    );
+    assert_eq!(reply["ok"], json!(true));
+    let tab = &reply["result"]["tabs"][0];
+    assert_eq!(tab["nonce"], json!("nonce-of-generation-1"));
+    assert_eq!(tab["generation"], json!(1));
 }
 
 #[test]
 fn an_extension_refusal_reaches_the_caller_with_its_reason() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -551,13 +615,13 @@ fn an_extension_refusal_reaches_the_caller_with_its_reason() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "structure", "args": {}}).to_string()),
+            Some(&json!({"method": "structure", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let cmd = host.command();
     assert_eq!(cmd["op"], json!("structure"));
     let id = cmd["id"].as_u64().unwrap();
-    host.send(json!({"v": 1, "type": "result", "id": id, "ok": false,
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": false, "tab_id": 7,
                      "generation": 1, "time_origin": 100.0, "nonce": "nonce-of-generation-1",
                      "error": "this page cannot be read (restricted or privileged page)"}));
     let (_, body) = caller.join().unwrap();
@@ -576,8 +640,8 @@ fn an_extension_refusal_reaches_the_caller_with_its_reason() {
 fn detach_clears_the_record_even_when_the_extension_refuses() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -587,13 +651,13 @@ fn detach_clears_the_record_even_when_the_extension_refuses() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "detach", "args": {}}).to_string()),
+            Some(&json!({"method": "detach", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let cmd = host.command();
     assert_eq!(cmd["op"], json!("detach"));
     let id = cmd["id"].as_u64().unwrap();
-    host.send(json!({"v": 1, "type": "result", "id": id, "ok": false,
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": false, "tab_id": 7,
                      "generation": 1, "time_origin": 100.0, "nonce": "nonce-of-generation-1", "error": "cannot reach the tab"}));
     let (_, body) = caller.join().unwrap();
     let v: Value = serde_json::from_str(&body).unwrap();
@@ -602,15 +666,15 @@ fn detach_clears_the_record_even_when_the_extension_refuses() {
         v["error"].as_str().unwrap().contains("dropped here anyway"),
         "{v}"
     );
-    assert_eq!(host.health()["attached"], json!(false));
+    assert_eq!(host.health()["enabled_tabs"], json!(0));
 
-    let after = host.call("read", json!({}));
+    let after = host.call("read", json!({"tab_id": 7}));
     assert_eq!(after["ok"], json!(false));
     assert!(
         after["error"]
             .as_str()
             .unwrap()
-            .contains("the assistant detached the tab"),
+            .contains("the assistant disabled the tab"),
         "{after}"
     );
 }
@@ -619,8 +683,8 @@ fn detach_clears_the_record_even_when_the_extension_refuses() {
 fn closing_the_native_port_clears_the_attachment_and_fails_the_waiting_read() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -630,7 +694,7 @@ fn closing_the_native_port_clears_the_attachment_and_fails_the_waiting_read() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "read", "args": {}}).to_string()),
+            Some(&json!({"method": "read", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let _cmd = host.command();
@@ -794,9 +858,10 @@ fn the_right_launch_arguments_open_the_endpoint_and_a_hello_is_still_required() 
     let body = json!({"method": "status", "args": {}}).to_string();
     let reply: Value =
         serde_json::from_str(&request(port, "POST", "/call", Some(&token), Some(&body)).1).unwrap();
-    assert_eq!(reply["ok"], json!(false));
+    assert_eq!(reply["ok"], json!(true));
+    assert_eq!(reply["result"]["tabs"].as_array().unwrap().len(), 0);
     assert!(
-        reply["error"]
+        reply["result"]["hint"]
             .as_str()
             .unwrap()
             .contains("has not connected"),
@@ -1010,8 +1075,8 @@ fn the_host_manifest_names_the_extension_and_this_binary() {
 fn a_slow_extension_does_not_hold_the_endpoint_shut() {
     let mut host = Host::start();
     host.hello();
-    host.attached(1, "https://example.com/a", 100.0);
-    host.wait_attached();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
 
     let port = host.port;
     let token = host.token.clone();
@@ -1021,13 +1086,13 @@ fn a_slow_extension_does_not_hold_the_endpoint_shut() {
             "POST",
             "/call",
             Some(&token),
-            Some(&json!({"method": "read", "args": {}}).to_string()),
+            Some(&json!({"method": "read", "args": {"tab_id": 7}}).to_string()),
         )
     });
     let _cmd = host.command();
     // While the read is outstanding, status and health still answer: the record
     // is locked only around the read and the write of it, never across the wait.
-    assert_eq!(host.health()["attached"], json!(true));
+    assert_eq!(host.health()["enabled_tabs"], json!(1));
     assert_eq!(host.call("status", json!({}))["ok"], json!(true));
     drop(caller);
 }
@@ -1063,7 +1128,7 @@ fn a_silent_extension_is_taken_for_a_dead_browser_and_the_host_exits() {
     assert!(wait_listening(port), "the host never listened");
     write_frame(
         stdin.as_mut().unwrap(),
-        &json!({"v": 1, "type": "hello", "addon": ADDON}),
+        &json!({"v": 2, "type": "hello", "addon": ADDON}),
     );
     assert_eq!(
         request(port, "POST", "/call", Some(&token), Some("{}")).0,
@@ -1119,7 +1184,7 @@ fn a_diagnostic_on_a_broken_stderr_does_not_stop_the_host_from_exiting() {
     assert!(wait_listening(port), "the host never listened");
     write_frame(
         stdin.as_mut().unwrap(),
-        &json!({"v": 1, "type": "hello", "addon": ADDON}),
+        &json!({"v": 2, "type": "hello", "addon": ADDON}),
     );
 
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -1137,5 +1202,211 @@ fn a_diagnostic_on_a_broken_stderr_does_not_stop_the_host_from_exiting() {
     assert!(
         exited,
         "a host whose stderr has broken must still reach its own shutdown, not wedge in a panicking log line"
+    );
+}
+
+// --- the enabled set, one tab at a time -------------------------------------
+
+#[test]
+fn a_tab_that_is_loading_a_new_document_is_refused_here() {
+    let mut host = Host::start();
+    host.hello();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
+
+    // The extension withdrew the document the moment the browser said the tab was
+    // loading: the enablement is still there, the document is not.
+    host.loading(2, "https://example.com/b", 100.0);
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(host.health()["enabled_tabs"], json!(1));
+    let status = host.call("status", json!({}));
+    assert_eq!(status["result"]["tabs"][0]["confirmed"], json!(false), "{status}");
+
+    let read = host.call("read", json!({"tab_id": 7}));
+    assert_eq!(read["ok"], json!(false));
+    assert!(
+        read["error"].as_str().unwrap().contains("loading a new document"),
+        "{read}"
+    );
+    // Nothing was asked of the extension for it: a tab with no identified document
+    // has nothing to issue a request against.
+    assert!(host.inbox.try_recv().is_err(), "no command should have been sent");
+}
+
+#[test]
+fn the_inventory_is_listed_with_nothing_enabled_and_enables_nothing() {
+    let mut host = Host::start();
+    host.hello();
+    std::thread::sleep(Duration::from_millis(100));
+
+    let port = host.port;
+    let token = host.token.clone();
+    let caller = std::thread::spawn(move || {
+        let body = json!({"method": "tabs", "args": {}}).to_string();
+        request(port, "POST", "/call", Some(&token), Some(&body))
+    });
+    // The inventory names no tab: the command carries none, and it is asked of a
+    // host that has nothing enabled.
+    let cmd = host.command();
+    assert_eq!(cmd["op"], json!("tabs"));
+    assert_eq!(cmd["tab_id"], Value::Null);
+    assert_eq!(cmd["generation"], Value::Null);
+    let id = cmd["id"].as_u64().unwrap();
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": null,
+                     "result": {"tabs": [
+                         {"tab_id": 3, "title": "A background tab", "enabled": false},
+                         {"tab_id": 7, "title": "The other one", "enabled": false}
+                     ], "note": "an inventory"}}));
+    let (_, body) = caller.join().unwrap();
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], json!(true));
+    assert_eq!(v["result"]["tabs"].as_array().unwrap().len(), 2);
+    assert_eq!(v["result"]["tabs"][0]["tab_id"], json!(3));
+    assert_eq!(v["result"]["tabs"][0]["enabled"], json!(false));
+    // Listing a tab is not enabling one: the record is exactly as empty as it
+    // was, and every verb that needs a tab still refuses.
+    assert_eq!(host.health()["enabled_tabs"], json!(0));
+    let read = host.call("read", json!({"tab_id": 3}));
+    assert_eq!(read["ok"], json!(false));
+    assert!(read["error"].as_str().unwrap().contains("not enabled"), "{read}");
+}
+
+#[test]
+fn two_enabled_tabs_are_two_boundaries() {
+    let mut host = Host::start();
+    host.hello();
+    let origin_a = origin_of("https://example.com/a");
+    let origin_b = origin_of("https://other.example/b");
+    host.state(
+        json!([
+            {"tab_id": 1, "url": "https://example.com/a", "title": "A", "origin": origin_a,
+             "generation": 1, "time_origin": 10.0, "nonce": "nonce-of-generation-1",
+             "confirmed": true, "enabled_at_ms": 1},
+            {"tab_id": 2, "url": "https://other.example/b", "title": "B", "origin": origin_b,
+             "generation": 2, "time_origin": 20.0, "nonce": "nonce-of-generation-2",
+             "confirmed": true, "enabled_at_ms": 2},
+        ]),
+        Value::Null,
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(host.health()["enabled_tabs"], json!(2));
+
+    let port = host.port;
+    let token = host.token.clone();
+    let caller = std::thread::spawn(move || {
+        let body = json!({"method": "read", "args": {"tab_id": 2}}).to_string();
+        request(port, "POST", "/call", Some(&token), Some(&body))
+    });
+    // The command names the tab it is for, and the document that tab has — not
+    // the other enabled tab's.
+    let cmd = host.command();
+    assert_eq!(cmd["tab_id"], json!(2));
+    assert_eq!(cmd["generation"], json!(2));
+    assert_eq!(cmd["nonce"], json!("nonce-of-generation-2"));
+    assert_eq!(cmd["time_origin"], json!(20.0));
+    let id = cmd["id"].as_u64().unwrap();
+    // An answer that names the *other* tab is refused, whatever it says.
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 1,
+                     "generation": 2, "time_origin": 20.0, "nonce": "nonce-of-generation-2",
+                     "result": {"url": "https://other.example/b", "title": "B",
+                                "text": "text", "truncated": false}}));
+    let (_, body) = caller.join().unwrap();
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["error"].as_str().unwrap().contains("answered about tab 1"), "{v}");
+
+    // Disabling the other tab leaves this one exactly as it was.
+    let port = host.port;
+    let token = host.token.clone();
+    let caller = std::thread::spawn(move || {
+        let body = json!({"method": "detach", "args": {"tab_id": 1}}).to_string();
+        request(port, "POST", "/call", Some(&token), Some(&body))
+    });
+    let cmd = host.command();
+    assert_eq!(cmd["op"], json!("detach"));
+    assert_eq!(cmd["tab_id"], json!(1));
+    let id = cmd["id"].as_u64().unwrap();
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 1,
+                     "generation": 1, "time_origin": 10.0, "nonce": "nonce-of-generation-1",
+                     "result": {"detached": true}}));
+    let (_, body) = caller.join().unwrap();
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], json!(true));
+    let status = host.call("status", json!({}));
+    let tabs = status["result"]["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 1, "{status}");
+    assert_eq!(tabs[0]["tab_id"], json!(2));
+    assert_eq!(tabs[0]["nonce"], json!("nonce-of-generation-2"));
+    // And a request for the disabled tab is refused here, without asking.
+    let read = host.call("read", json!({"tab_id": 1}));
+    assert_eq!(read["ok"], json!(false));
+    assert!(read["error"].as_str().unwrap().contains("tab 1 is not enabled"), "{read}");
+}
+
+#[test]
+fn a_cross_origin_navigation_ends_the_enablement_before_anything_is_asked() {
+    let mut host = Host::start();
+    host.hello();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
+
+    // The tab is gone from the enabled set, with the origin it left — the
+    // extension latches that crossing and pushes it.
+    host.disabled(
+        "the tab left https://example.com (the browser reported https://other.example/b)",
+        "https://other.example/b",
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(host.health()["enabled_tabs"], json!(0));
+
+    let read = host.call("read", json!({"tab_id": 7}));
+    assert_eq!(read["ok"], json!(false));
+    let err = read["error"].as_str().unwrap();
+    assert!(err.contains("left https://example.com"), "{err}");
+    assert!(err.contains("toolbar button"), "{err}");
+    // Nothing was asked of the extension for it: an enablement ends before a
+    // read, not after one.
+    assert!(host.inbox.try_recv().is_err(), "no command should have been sent");
+}
+
+#[test]
+fn an_acting_op_carries_the_tab_and_the_document_it_is_issued_for() {
+    let mut host = Host::start();
+    host.hello();
+    host.enabled(1, "https://example.com/a", 100.0);
+    host.wait_enabled();
+
+    let port = host.port;
+    let token = host.token.clone();
+    let caller = std::thread::spawn(move || {
+        let body = json!({"method": "click", "args": {"tab_id": 7, "ref": "e3"}}).to_string();
+        request(port, "POST", "/call", Some(&token), Some(&body))
+    });
+    let cmd = host.command();
+    assert_eq!(cmd["op"], json!("click"));
+    assert_eq!(cmd["tab_id"], json!(7));
+    assert_eq!(cmd["generation"], json!(1));
+    assert_eq!(cmd["nonce"], json!("nonce-of-generation-1"));
+    assert_eq!(cmd["time_origin"], json!(100.0));
+    assert_eq!(cmd["args"]["ref"], json!("e3"));
+    let id = cmd["id"].as_u64().unwrap();
+    // The tab re-identified its document while the click was out — a same-origin
+    // navigation, which keeps the enablement and moves the generation. An answer
+    // about the old document is refused even though the tab is still enabled.
+    host.state(
+        json!([{"tab_id": 7, "url": "https://example.com/a", "title": "A page",
+                "origin": "https://example.com", "generation": 2, "time_origin": 100.0,
+                "nonce": "nonce-of-generation-1", "confirmed": true, "enabled_at_ms": 1}]),
+        Value::Null,
+    );
+    host.send(json!({"v": 2, "type": "result", "id": id, "ok": true, "tab_id": 7,
+                     "generation": 1, "time_origin": 100.0, "nonce": "nonce-of-generation-1",
+                     "result": {"clicked": true}}));
+    let (_, body) = caller.join().unwrap();
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(
+        v["error"].as_str().unwrap().contains("generation 1 to 2"),
+        "{v}"
     );
 }

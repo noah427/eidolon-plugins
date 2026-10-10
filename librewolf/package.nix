@@ -12,7 +12,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "eidolon-librewolf";
-  version = "0.1.0";
+  version = "0.2.0";
 
   src = lib.fileset.toSource {
     root = ../.;
@@ -33,9 +33,13 @@ rustPlatform.buildRustPackage {
   # eidolon-browser, and `.#browser` would carry this one. One package, one program.
   cargoBuildFlags = [ "-p" "eidolon-librewolf" ];
 
-  # The tests that need a browser are the ones in tests/librewolf/, not these:
-  # everything cargo test runs here is a fake extension on the other end of a
-  # pipe. `cargo test -p eidolon-librewolf` builds and runs them.
+  # The same scope for the check phase, and it has to be said out loud: without
+  # it `cargo test` runs every workspace member's tests — claude's and browser's
+  # included — and this package fails on tests that are not its own (and would
+  # report their verdict as its build's). `cargo test -p eidolon-librewolf` is
+  # what runs here, and what a person runs by hand. `doCheck = false` would have
+  # hidden the problem instead of scoping it.
+  cargoTestFlags = [ "-p" "eidolon-librewolf" ];
 
   meta = {
     description = "The native messaging host behind eidolon's librewolf_* tools";

@@ -1,10 +1,11 @@
-// `librewolf_status`: the attachment the toolbar click created. This call
-// reports it; nothing here can create or renew one, which is the point — the
-// click is the consent, and `activeTab` is granted to that click alone.
+// `librewolf_status`: the tabs a person enabled with the extension's toolbar
+// button, with the document each one is showing. This call reports them; nothing
+// here can enable one, which is the point — the click is the consent, and the
+// site permission it asks for is granted to that click.
 pub fn manifest() {
     #{
         name: "librewolf_status",
-        description: "Report the one tab a person attached in their own LibreWolf session by clicking the librewolf bridge extension's toolbar button on it: its tab id, url, title, attachment generation, and the nonce and time origin that name the document it is for. Nothing here can attach a tab — the click is the only thing that does, and Firefox's temporary activeTab grant dies with the next document. Use it to see whether a read is possible before reaching for librewolf_read, and to learn why the last attachment ended.",
+        description: "Report the tabs a person enabled in their own LibreWolf session by clicking the librewolf bridge extension's toolbar button on each one: every enabled tab's id, url, title, origin, the generation and the nonce and time origin that name the document it is showing, and whether that document has been identified yet (a tab loading a new one has none, and every call against it is refused until it settles). It also says why the last enablement ended — a second click on that tab, the tab closing, a cross-origin navigation, the browser going away. Nothing here can enable a tab: the click is the only thing that does. Use it to see which tabs are usable before reaching for the other verbs, and librewolf_tabs for every tab in the browser whether enabled or not.",
         approval: "read_only",
         input_schema: #{
             "type": "object",
@@ -16,7 +17,6 @@ pub fn manifest() {
 pub async fn call(input) {
     call_service("status", input).await
 }
-
 // Everything below is the same in every librewolf_*.rn: upstream eidolon
 // compiles each tool file on its own, and a tool file is meant to be handed
 // over whole.
