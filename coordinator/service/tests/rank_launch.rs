@@ -14,6 +14,31 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Serialises the fixture's **write-to-exec window** against every other spawn
+/// in this binary.
+///
+/// `Text file busy` is not a permissions problem: `execve` refuses a file that
+/// *any* process holds open for writing, and `fork` hands the child a copy of
+/// every open descriptor until that child execs. `recording_child` writes the
+/// script and `prepare` immediately execs it for the `chat --help` capability
+/// probe, so a sibling test forking between that write and that exec is one
+/// interleaving that makes the probe fail with `ETXTBSY` — even though the
+/// writer closed its own handle before returning.
+///
+/// **A possible interleaving, not a measured one.** The failure was seen once,
+/// in a `nix build`. Reverting this fix and rebuilding passed, so neither the
+/// window's width nor the reason it surfaced there rather than here is
+/// established; nothing in this comment is a measurement, and the serialisation
+/// should not be read as a diagnosed timing behaviour.
+///
+/// Serialising the four tests removes that window at its cause. A retry loop
+/// around the probe would hide it instead, and would make a transient `ETXTBSY`
+/// indistinguishable from a genuinely busy executable **at the point of
+/// failure** — a retry does eventually tell the two apart; what it cannot do is
+/// attribute the cause where it happened.
+static FIXTURE: Mutex<()> = Mutex::new(());
 
 use eidolon_coordinator::{
     rank::Blocks,
@@ -129,6 +154,9 @@ fn argv_of(record: &Path) -> Vec<String> {
 
 #[test]
 fn the_launch_argv_carries_the_generic_flag_and_a_file_of_the_hashed_bytes() {
+    // Hold the fixture window: no sibling test may fork while this script is
+    // written and exec'd. See `FIXTURE`.
+    let _fixture = FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let root = tmpdir("argv");
     let ranks = root.join("ranks");
     let miles = block(&root, "miles", "Hold the flank; report the count.\n");
@@ -191,6 +219,9 @@ fn the_launch_argv_carries_the_generic_flag_and_a_file_of_the_hashed_bytes() {
 
 #[test]
 fn a_rank_with_no_block_adds_nothing_and_still_starts() {
+    // Hold the fixture window: no sibling test may fork while this script is
+    // written and exec'd. See `FIXTURE`.
+    let _fixture = FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let root = tmpdir("noblock");
     let ranks = root.join("ranks");
     std::fs::create_dir_all(&ranks).unwrap();
@@ -215,6 +246,9 @@ fn a_rank_with_no_block_adds_nothing_and_still_starts() {
 
 #[test]
 fn bytes_changed_between_the_bound_request_and_the_spawn_are_refused() {
+    // Hold the fixture window: no sibling test may fork while this script is
+    // written and exec'd. See `FIXTURE`.
+    let _fixture = FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let root = tmpdir("changed");
     let ranks = root.join("ranks");
     let miles = block(&root, "miles", "the text the operation was bound to\n");
@@ -248,6 +282,9 @@ fn bytes_changed_between_the_bound_request_and_the_spawn_are_refused() {
 
 #[test]
 fn a_harness_whose_chat_lacks_the_flag_is_refused_by_name_not_started_unranked() {
+    // Hold the fixture window: no sibling test may fork while this script is
+    // written and exec'd. See `FIXTURE`.
+    let _fixture = FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let root = tmpdir("noflag");
     let ranks = root.join("ranks");
     block(&root, "miles", "Hold the flank.\n");
