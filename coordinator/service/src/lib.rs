@@ -32,9 +32,12 @@
 //! [`store`]. It is passed in rather than reached for, so a failure to persist can
 //! be injected exactly where it matters: before the send, and before the ack.
 
+pub mod ancestry;
+pub mod launch;
 pub mod store;
 pub mod managed_start;
 pub mod process_host;
+pub mod rank;
 
 use crate::store::SaveError;
 use serde::{Deserialize, Serialize};
