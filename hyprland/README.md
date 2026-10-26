@@ -56,7 +56,7 @@ hl.permission(".*/grim", "screencopy", "allow")
 ## Install
 
 ```bash
-eidolon plugins install dxcently/eidolon-plugins hyprland
+eidolon plugins install noah427/eidolon-plugins hyprland
 eidolon plugins trust hyprland
 ```
 

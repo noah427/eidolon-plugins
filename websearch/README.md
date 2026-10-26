@@ -29,7 +29,7 @@ plugin ships no fetch verb of its own.
 ## Install
 
 ```bash
-eidolon plugins install dxcently/eidolon-plugins websearch
+eidolon plugins install noah427/eidolon-plugins websearch
 eidolon plugins trust websearch
 ```
 

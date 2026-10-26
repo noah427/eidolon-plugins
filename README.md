@@ -1,25 +1,38 @@
 # eidolon-plugins
 
 Plugins for [eidolon](https://github.com/noah427/eidolon). Each folder is
-one plugin, installed with `eidolon plugins install dxcently/eidolon-plugins
+one plugin, installed with `eidolon plugins install noah427/eidolon-plugins
 <name>` or by an agent reading its README. This repo is the curated
 collection, not the only source: any git repo with a `plugin.rn` folder
 installs the same way.
+
+**This is a fork, and the install lines say so.** The collection originated at
+`dxcently/eidolon-plugins`; this repository is a fork of it, and crediting that
+upstream is not the same as installing from it. Every install line below names
+the fork deliberately: the fork is what these plugins ship from, and pointing a
+reader at upstream would fetch a tree that is not this one.
 
 ## The plugins
 
 | plugin | gives eidolon | runs alongside | install |
 |---|---|---|---|
-| [`browser/`](browser/) | `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_read`, `browser_back`, `browser_state`; workflows `page_walk`, `page_watch` | `eidolon-browser`, a Rust service driving one headless Chromium | `eidolon plugins install dxcently/eidolon-plugins browser` — see its README for the service |
-| [`subagent/`](subagent/) | `subagent_spawn`, `subagent_pick`, `subagent_plan`, `subagent_list`, `subagent_trace`, `subagent_steer`, `subagent_cancel` (models picked per kind, formations, budgets, spend); workflows `fanout`, `door` | `eidolon run`, child sessions in the background | `eidolon plugins install dxcently/eidolon-plugins subagent`, then `eidolon plugins trust subagent` |
-| [`coordinator/`](coordinator/) | `coordinator_adopt`, `coordinator_release`, `coordinator_adoptions`, `coordinator_notices` | `eidolon-coordinator`, a monitor that watches the workers a coordinator adopted and sends one notice per observed halt | `eidolon plugins install dxcently/eidolon-plugins coordinator`, then `eidolon plugins trust coordinator` — see its README |
-| [`jev/`](jev/) | automation graphs as workflows: `find-related`, `ctf-juice-recon`, `triage-linux`, `triage-wsl`, `triage-botforge`, `wiki-hop`, `selftest`; tools `jev_graph`, `jev_mark`, `jev_choose`, `jev_entail` and eleven one-command recon tools (`jev_os_release`, ... `jev_juice_robots`) | for the chooser graphs, the jev service (Python and torch, not shipped here) | `eidolon plugins install dxcently/eidolon-plugins jev`, then `eidolon plugins trust jev` |
+| [`browser/`](browser/) | `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_read`, `browser_back`, `browser_state`; workflows `page_walk`, `page_watch` | `eidolon-browser`, a Rust service driving one headless Chromium | `eidolon plugins install noah427/eidolon-plugins browser` — see its README for the service |
+| [`subagent/`](subagent/) | `subagent_spawn`, `subagent_pick`, `subagent_plan`, `subagent_list`, `subagent_trace`, `subagent_steer`, `subagent_cancel` (models picked per kind, formations, budgets, spend); workflows `fanout`, `door` | `eidolon run`, child sessions in the background | `eidolon plugins install noah427/eidolon-plugins subagent`, then `eidolon plugins trust subagent` |
+| [`coordinator/`](coordinator/) | `coordinator_adopt`, `coordinator_release`, `coordinator_adoptions`, `coordinator_notices` | `eidolon-coordinator`, a monitor that watches the workers a coordinator adopted and sends one notice per observed halt | `eidolon plugins install noah427/eidolon-plugins coordinator`, then `eidolon plugins trust coordinator` — see its README |
+| [`jev/`](jev/) | automation graphs as workflows: `find-related`, `ctf-juice-recon`, `triage-linux`, `triage-wsl`, `triage-botforge`, `wiki-hop`, `selftest`; tools `jev_graph`, `jev_mark`, `jev_choose`, `jev_entail` and eleven one-command recon tools (`jev_os_release`, ... `jev_juice_robots`) | for the chooser graphs, the jev service (Python and torch, not shipped here) | `eidolon plugins install noah427/eidolon-plugins jev`, then `eidolon plugins trust jev` |
 
 All need eidolon with the plugin runtime (upstream `master`); `jev` also needs workflows.
 
-**Web search** isn't here on purpose: eidolon ships it as the built-in
-`search` tool, tied to the session's own key. To read a result, use `fetch`,
-or `browser_open` + `browser_read` for pages that need a real browser.
+The table above names four of them with their verbs spelled out. The tree also carries
+[`claude/`](claude/), [`godot/`](godot/), [`hyprland/`](hyprland/), [`librewolf/`](librewolf/)
+and [`websearch/`](websearch/) — each with its own README and install line — plus the
+[`libs/`](libs/) tier for shared library declarations.
+
+**Web search** arrives two ways, and the difference matters. eidolon ships a
+built-in `search` tool tied to the session's own key; [`websearch/`](websearch/)
+is an optional plugin that reaches Ollama's hosted search API instead — for an
+eidolon on a host with no browser to search with. To read a result, use `fetch`, or
+`browser_open` + `browser_read` for pages that need a real browser.
 
 ## Installing one
 

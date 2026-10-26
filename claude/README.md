@@ -170,13 +170,15 @@ here can stand behind.
 ## Install
 
 ```sh
-eidolon plugins install dxcently/eidolon-plugins claude
+eidolon plugins install noah427/eidolon-plugins claude
 eidolon plugins service approve claude     # the step that matters; there are no verbs to trust
 eidolon plugins service start claude
 ```
 
 The record the install writes names the source and the ref —
-`dxcently/eidolon-plugins#claude@main` — and the listing reads `record managed`.
+`noah427/eidolon-plugins#claude@main` — and the listing reads `record managed`.
+
+*(This repository is a fork of `dxcently/eidolon-plugins`; the ref above names the fork, because the fork is where this plugin ships from.)*
 
 From a checkout instead — the path the rest of this file was tested against:
 

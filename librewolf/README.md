@@ -55,7 +55,7 @@ wider than the boundary the bridge enforces: the bridge's origin is scheme, host
 - The host binary, either way:
 
   ```bash
-  nix build .#librewolf          # or: nix profile install github:dxcently/eidolon-plugins#librewolf
+  nix build .#librewolf          # or: nix profile install github:noah427/eidolon-plugins#librewolf
   cargo install --path librewolf/service
   ```
 
@@ -91,7 +91,9 @@ wider than the boundary the bridge enforces: the bridge's origin is scheme, host
 2. The plugin directory:
 
    ```bash
-   eidolon plugins install dxcently/eidolon-plugins librewolf
+   eidolon plugins install noah427/eidolon-plugins librewolf
+
+*(This repository is a fork of `dxcently/eidolon-plugins`; the install line above names the fork, because the fork is where this plugin ships from.)*
    eidolon plugins trust librewolf
    for v in status tabs read structure field_value click type select set_checked \
             submit screenshot download events watch scroll navigate back detach; do

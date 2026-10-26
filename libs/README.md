@@ -26,7 +26,7 @@ pub fn manifest() {
         name: "myplugin",
         libraries: [
             #{
-                repo: "dxcently/eidolon-plugins",
+                repo: "noah427/eidolon-plugins",
                 path: "libs/regex/regex.rn",
                 pin: "sha256:…",
             },
@@ -39,9 +39,10 @@ The pin is the **content's sha256** — the house spelling, the way `jev`'s
 graphs pin. The install verifies it and refuses, naming both hashes, when
 the bytes at the source are not the bytes the manifest reviewed. A library
 that moved and a manifest that still pins the old bytes install nothing;
-change the library and re-pin in the same commit, the discipline
-`tests/jev/pin.sh` keeps for graphs and `tests/libsfixture/pin.sh` keeps
-for this tier.
+change the library and re-pin in the same commit — the discipline
+`tests/jev/pin.sh` keeps for graphs. No libs pin fixture ships in this tree:
+`tests/libsfixture/pin.sh`, cited by the upstream README, is absent at this
+pin.
 
 A plugin cannot vendor over a file its own tree carries, and two declared
 libraries cannot vendor under one name: two sources for one file is a
