@@ -602,6 +602,179 @@ pub fn addresses_established(rows: &[Row]) -> bool {
     rows.iter().any(|r| r.session.as_deref().is_some_and(|s| !s.is_empty()))
 }
 
+/// Where the destination came from, so a caller reports the number rather than
+/// asserting it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Destination {
+    /// The workspace the window belongs on: the Imperator's, plus one.
+    pub workspace: i64,
+    /// The session the number is relative to — the **chain root** the walk
+    /// stopped at. That it is an Imperator is a convention, not something these
+    /// records establish.
+    pub root: String,
+    /// The window address it was read from.
+    pub window: String,
+}
+
+/// **Where a visible worker belongs, for this caller** — a seam, so the
+/// resolve-once rule can be tested with a compositor that answers differently
+/// every time it is asked.
+pub trait Resolver: Send + Sync {
+    fn destination(
+        &self,
+        caller: &str,
+        store: &Store,
+        rows: &[Row],
+    ) -> Result<Destination, String>;
+}
+
+/// **The chain of starts, walked to its root.**
+///
+/// **What a walk that stops proves, and only that:** the chain ends there. It does
+/// **not** prove the session is an Imperator — the store carries several rootless
+/// callers from different nights — so the destination this feeds is
+/// *"beside the chain root"*, and the assumption that a rootless caller is the
+/// Imperator is a **named convention** resting on rank discipline, not a fact these
+/// records establish.
+///
+/// The caller is not assumed to be the Imperator: a Legatus starting a Tribunus
+/// must still land on the Imperator's workspace plus one. So the walk goes up
+/// through the start records, each of which binds a child `session` to the
+/// `caller` that started it, and stops at the **first session with no record of
+/// its own**.
+///
+/// Every managed child has a record, so a caller **with** a record is somebody's
+/// child and the walk continues; a caller with **none** is a root, and the walk
+/// stops. It uses only durable, harness-derived data — `request.caller` is never
+/// model input — and it cannot be claimed by a session that merely says so about
+/// itself, which is why there is no tag here to spoof.
+///
+/// **The consequence worth naming, as a convention:** a session started outside
+/// this store is, by these records, indistinguishable from an Imperator, and the
+/// store does not pretend otherwise. Rank discipline is what keeps a rootless Miles
+/// from being treated as one. A caller that is neither recorded nor a roster row is
+/// a refusal, never a fallback.
+///
+/// A link that is missing (no roster row, so no live process to read a window
+/// from), a cycle, or a chain longer than the bound is a refusal naming where it
+/// stopped. There is deliberately **no** fallback to the caller's own workspace.
+pub fn chain_root(
+    starts: &[managed_start::StartRecord],
+    rows: &[Row],
+    caller: &str,
+) -> Result<String, String> {
+    let mut current = caller.to_string();
+    for _ in 0..8 {
+        let row = rows
+            .iter()
+            .find(|r| r.session.as_deref() == Some(current.as_str()))
+            .ok_or_else(|| {
+                format!(
+                    "the roster carries no row for `{current}`, so the chain has no live process to \
+                     read a window from: a root named only by a record is not a session on this machine"
+                )
+            })?;
+        // The root has to be *live*, and a roster row alone does not say so: what
+        // says so is the read of its own presence record and its pid through
+        // `/proc`, which the resolver does immediately after this and which refuses
+        // when the pid has gone. `reached` is only the doorbell; it is not required,
+        // because a silent door with a live pid is still a live process.
+        let _ = row.reached;
+        match starts.iter().find(|r| r.session.as_deref() == Some(current.as_str())) {
+            Some(record) => current = record.request.caller.clone(),
+            // No record of its own: a root, and the only stop there is.
+            None => return Ok(current),
+        }
+    }
+    Err(format!(
+        "the chain of starts from `{caller}` did not reach a root within 8 links: it is longer than \
+         that, or it loops, and either way there is no workspace to be underneath"
+    ))
+}
+
+/// **The destination, resolved exactly once per operation and then pinned.**
+///
+/// Three states, and they are not the same:
+///
+/// - the operation is **already recorded**: its destination is the one admitted,
+///   taken from the record and never re-resolved. A retry after the Imperator's
+///   workspace has moved therefore reuses the original number — which is what
+///   keeps the immutable input immutable, since a re-resolution would produce a
+///   different request and be refused as changed input;
+/// - a **new** `Terminal` operation with no destination: the resolver runs, once,
+///   and the value it returns goes into the request **before** the intent
+///   checkpoint, so the record and the launch agree;
+/// - anything else (a headless launch, or a terminal one that already carries a
+///   destination from a record) resolves nothing.
+///
+/// Returns `Some` only when the resolver ran, so a caller can say whether this
+/// attempt resolved or reconciled — a distinction the tests depend on.
+pub fn destination_for_operation(
+    store: &Store,
+    rows: &[Row],
+    resolver: &dyn Resolver,
+    caller: &str,
+    request: &mut managed_start::Request,
+) -> Result<Option<Destination>, String> {
+    if let Some(record) = store
+        .starts
+        .iter()
+        .find(|r| r.request.caller == caller && r.request.operation == request.operation)
+    {
+        // Pinned: the record is the answer, and asking the compositor again
+        // would be a second, different answer to a question already answered.
+        request.destination = record.request.destination;
+        return Ok(None);
+    }
+    if request.shape != managed_start::LaunchShape::Terminal || request.destination.is_some() {
+        return Ok(None);
+    }
+    let resolved = resolver.destination(caller, store, rows)?;
+    request.destination = Some(resolved.workspace);
+    Ok(Some(resolved))
+}
+
+/// **The managed-start input boundary**, in one place so it can be tested.
+///
+/// `visible` is the caller's only say about shape: the model may ask for a
+/// visible launch, and may never choose the workspace or claim a shape directly.
+/// `shape` and `destination` are therefore **refused as caller inputs** — they
+/// are the service's to determine, and accepting them would let a caller put a
+/// window anywhere while the convention said otherwise.
+pub fn request_from_args(args: &serde_json::Value) -> Result<managed_start::Request, String> {
+    if args.get("shape").is_some_and(|v| !v.is_null()) {
+        return Err(
+            "`shape` is not a caller's input: a caller asks for a visible launch with `visible`, and \
+             the service decides the shape. Naming a shape directly would let a caller claim a terminal \
+             launch the destination rule never applied to"
+                .into(),
+        );
+    }
+    if args.get("destination").is_some_and(|v| !v.is_null()) {
+        return Err(
+            "`destination` is not a caller's input: the workspace is decided by the service from the \
+             Imperator's own window, once per operation, and pinned in the record. A caller that could \
+             name it could put a worker anywhere"
+                .into(),
+        );
+    }
+    let visible = match args.get("visible") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(v)) => *v,
+        Some(other) => {
+            return Err(format!(
+                "`visible` must be true or false, not {other}: a launch shape is not a string to be guessed at"
+            ))
+        }
+    };
+    let mut request: managed_start::Request = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid managed-start request: {e}"))?;
+    if visible {
+        request.shape = managed_start::LaunchShape::Terminal;
+    }
+    Ok(request)
+}
+
 /// Where the roster of live sessions comes from.
 pub trait Roster: Send + Sync {
     fn rows(&self) -> Result<Vec<Row>, String>;

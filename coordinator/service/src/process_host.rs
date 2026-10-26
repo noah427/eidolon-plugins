@@ -13,7 +13,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use crate::rank::Blocks;
-use crate::{Roster, managed_start::{BriefTransport, CancelHost, CancelRosterEvidence, Correlated, ExitEvidence, Host, LaunchState, Request}};
+use crate::{Delivery, Roster, managed_start::{BriefTransport, CancelHost, CancelRosterEvidence, Correlated, ExitEvidence, Host, LaunchState, Request}};
 
 struct Launch {
     request: Request,
@@ -98,6 +98,13 @@ fn abort_held(launch: &mut Launch, why: String, budget: Duration) -> String {
     }
 }
 
+/// **The refusal a visible launch gets when no no-focus capability is in force.**
+///
+/// One sentence, in one place: the guard below returns it, and the service returns
+/// it **before the resolver runs**, so a refusal never depends on what a
+/// compositor answered — and never requires contacting one.
+pub const NO_FOCUS_REFUSAL: &str = "this host cannot establish a no-focus map, so it will not start a visible child: a launch that takes the operator's keyboard is not permitted, and no observation of the no-focus rule has been recorded for this compositor instance";
+
 pub struct ProcessHost {
     executable: PathBuf,
     logs: PathBuf,
@@ -167,9 +174,11 @@ impl ProcessHost {
         self
     }
 
-    /// Establish no-focus maps through this capability. Nothing in this tree
-    /// implements it: the mechanism is unresolved, so no real host can offer
-    /// one yet, and a visible launch refuses without it.
+    /// Establish no-focus maps through this capability. There is exactly one
+    /// production implementation (`ancestry::AttestedNoFocus`) and it establishes
+    /// an *attestation*, not a mechanism; the host's own construction attaches it
+    /// only when a dated observation of the running compositor instance was
+    /// supplied at start. Without it a visible launch refuses.
     pub fn with_no_focus(mut self, no_focus: std::sync::Arc<dyn crate::ancestry::NoFocus>) -> Self {
         self.no_focus = Some(no_focus);
         self
@@ -348,17 +357,15 @@ impl Host for ProcessHost {
                 return Err("a terminal launch needs a destination workspace".into());
             }
             // **The no-focus precondition, checked before anything is started.**
-            // Nothing in this tree establishes a no-focus map, so no real host
-            // can pass this check today, and every visible launch on one is
-            // refused here — rather than spawning a window that might take the
-            // operator's keyboard while the code merely disclaims the promise.
+            // The capability is attached by the host's construction only when a
+            // dated observation of the running instance was supplied; absent, this
+            // refuses — rather than spawning a window that might take the operator's
+            // keyboard while the code merely disclaims the promise. The same
+            // sentence is returned by the service's pre-resolution check
+            // ([`NO_FOCUS_REFUSAL`]), so a caller reads one answer whether the
+            // refusal came from here or from before the resolver ran.
             if no_focus.is_none() {
-                return Err(
-                    "this host cannot establish a no-focus map, so it will not start a visible \
-                     child: a launch that takes the operator's keyboard is not permitted, and \
-                     the compositor mechanism for avoiding it is unresolved"
-                        .into(),
-                );
+                return Err(NO_FOCUS_REFUSAL.into());
             }
         }
 
@@ -615,6 +622,16 @@ impl Host for ProcessHost {
         // `Unsupported` or `Unknown` answer is reported as itself.
         self.briefs.send_correlated(session, delivery_key, binding_digest, &request.brief)
     }
+
+    fn wake(&mut self, request: &Request, session: &str, text: &str) -> Result<Delivery, String> {
+        if !matches!(self.inspect(request)?, LaunchState::Running { session: s } if s == session) {
+            return Err("wake target is not the verified running child".into());
+        }
+        // Ordinary inbox mail on the harness's own door, with `--wake`: the one
+        // thing a correlated delivery may not be, and deliberately a different
+        // seam from `send_correlated` so the brief cannot travel down it.
+        self.briefs.wake(session, text)
+    }
 }
 
 impl ProcessHost {
@@ -743,6 +760,101 @@ fn a_terminal_launch_without_its_inputs_is_refused_before_spawning() {
     let _ = std::fs::remove_dir_all(&logs);
 }
 
+/// **Adapter integration proof for a visible launch — NOT real focus proof, and not a
+/// window appearing.**
+///
+/// The seam the success path needed is on the *adapter* side, not in front of
+/// `spawn`: a real child process stands in for the terminal (a script with a shebang,
+/// so its pid and `/proc` identity are genuine), it answers the barrier with a held
+/// receipt naming itself, and a **mocked compositor adapter** stands where
+/// `placement.place` calls through. Nothing contacts Hyprland and no window is created
+/// or moved.
+///
+/// What it proves is the adapter path end to end: every visible gate passes, the spawn
+/// command carries the app-id the no-focus map was asked for, placement is called with
+/// the child's **real** pid and the requested destination, the workspace the adapter
+/// reports is checked, and the launch is admitted with the session the receipt named.
+/// Real focus suppression and real placement stay live-unverified.
+#[test]
+fn a_visible_launch_reaches_the_placement_adapter_with_the_childs_real_pid() {
+    let _serial = PROCESS_TEST_LOCK.lock().unwrap();
+
+    /// **The conforming adapter** — reports the window where the caller asked for it.
+    /// The success test's claims rest on *this* contract, and it is deliberately a
+    /// different type from `ElsewhereAdapter` below, so a reader can see which contract
+    /// is being assumed and which is being checked.
+    struct ConformingAdapter(Arc<Mutex<Vec<(u32, i64)>>>);
+    impl crate::ancestry::Placement for ConformingAdapter {
+        fn place(&self, pid: u32, destination: i64) -> Result<crate::ancestry::Placed, String> {
+            self.0.lock().unwrap().push((pid, destination));
+            Ok(crate::ancestry::Placed {
+                workspace_id: destination,
+                client: crate::ancestry::Client {
+                    address: "0xfeedface".into(),
+                    pid,
+                    workspace_id: destination,
+                    workspace_name: destination.to_string(),
+                    class: "eidolon-worker-fake".into(),
+                    title: "stand-in terminal".into(),
+                },
+            })
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("eidolon-adapter-{}", std::process::id()));
+    let workspace = root.join("ws");
+    let logs = root.join("logs");
+    let argv_file = root.join("argv");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = stand_in_terminal(&root);
+
+    let asked = Arc::new(Mutex::new(None));
+    let placed = Arc::new(Mutex::new(Vec::new()));
+    let mut host = ProcessHost::new(
+        PathBuf::from("/bin/true"),
+        logs.clone(),
+        Box::new(Rows(Arc::new(Mutex::new(Vec::new())))),
+        Box::new(NoBriefs),
+    )
+    .with_terminal(script.display().to_string())
+    .with_placement(Arc::new(ConformingAdapter(placed.clone())))
+    .with_no_focus(Arc::new(Recorder(asked.clone())));
+
+    let request = Request {
+        operation: "visible-adapter-1".into(),
+        caller: "fixture".into(),
+        workspace: workspace.display().to_string(),
+        model: "mock".into(),
+        persona: None,
+        brief: "bounded task".into(),
+        rank: None,
+        rank_digest: None,
+        shape: crate::managed_start::LaunchShape::Terminal,
+        destination: Some(11),
+    };
+    host.register_fresh(&request).unwrap();
+
+    host.prepare(&request).expect("a visible launch with every capability must proceed");
+
+    let argv = std::fs::read_to_string(&argv_file).expect("the stand-in terminal recorded its argv");
+    let launch = host.launch(&request).unwrap();
+    let app_id = format!("{}{}", crate::launch::APP_ID_PREFIX, launch.instance);
+    assert!(argv.contains(&format!("--app-id={app_id}")), "the window class the rule matches: {argv}");
+    assert!(argv.contains("--title=Meli — worker · mock"), "the title a person reads: {argv}");
+    assert!(argv.contains(&format!("--working-directory={}", workspace.display())), "{argv}");
+    assert!(argv.contains("tui"), "the visible subcommand, not `chat`: {argv}");
+    assert!(argv.contains("--managed-start-fd"), "the same barrier as a headless launch: {argv}");
+    assert_eq!(asked.lock().unwrap().as_deref(), Some(app_id.as_str()),
+        "the no-focus map is asked for exactly the app-id the spawn command carries");
+    assert_eq!(launch.session.as_deref(), Some("fake-visible-session"), "the receipt named the child");
+    assert!(launch.attempted, "the launch is admitted");
+    let seen = placed.lock().unwrap().clone();
+    let child = launch.child.as_ref().unwrap().id();
+    assert_eq!(seen, vec![(child, 11)], "placement is called once, with the child's real pid and the destination");
+    finish(&mut host, &request);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A no-focus capability that claims to work and does nothing, used only to
 /// prove the refusal order: with it present the launch reaches the *next*
 /// guard, which is how we know the no-focus check is in the path rather than in
@@ -761,6 +873,117 @@ impl crate::ancestry::NoFocus for DeclaredNoFocus {
 struct DeclaredGuard;
 
 impl crate::ancestry::NoFocusGuard for DeclaredGuard {}
+
+/// Records the app-id it was asked to establish; `DeclaredGuard` establishes nothing.
+/// Shared by the visible-launch tests, both of which assert on the app-id alone.
+struct Recorder(Arc<Mutex<Option<String>>>);
+
+impl crate::ancestry::NoFocus for Recorder {
+    fn establish(&self, app_id: &str) -> Result<Box<dyn crate::ancestry::NoFocusGuard>, String> {
+        *self.0.lock().unwrap() = Some(app_id.to_string());
+        Ok(Box::new(DeclaredGuard))
+    }
+}
+
+/// A stand-in terminal for the visible-launch tests: it records its own argv, answers the
+/// barrier with a held receipt naming itself and its **real** pid, then stays alive on the
+/// stdin the host holds — the shape of a terminal, with nothing of a terminal in it.
+/// `#!/usr/bin/env bash` because this host has no `/bin/bash`.
+fn stand_in_terminal(root: &std::path::Path) -> PathBuf {
+    let argv = root.join("argv");
+    let script = root.join("fake-terminal");
+    std::fs::write(&script, format!(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{argv}'\nfd=\"\"; op=\"\"; inst=\"\"\n\
+         while [ $# -gt 0 ]; do case \"$1\" in \
+         --managed-start-fd) fd=\"$2\"; shift 2;; \
+         --managed-operation) op=\"$2\"; shift 2;; \
+         --managed-instance) inst=\"$2\"; shift 2;; \
+         *) shift;; esac; done\n\
+         printf '{{\"state\":\"held\",\"operation\":\"%s\",\"instance\":\"%s\",\"session\":\"fake-visible-session\",\"pid\":%d}}\\n' \
+         \"$op\" \"$inst\" \"$$\" >&\"$fd\"\ncat > /dev/null\n",
+        argv = argv.display(),
+    )).unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    script
+}
+
+/// **The arm at `process_host.rs:561-570`, asserted.** An adapter that answers `Ok` with a
+/// workspace other than the requested destination is refused, the held child is aborted,
+/// and no worker is admitted — because a host that trusts an adapter's contract is one
+/// refactor away from reporting the intended workspace, which is the class of claim this
+/// feature exists to avoid.
+///
+/// The shipped adapter already returns its own error for an unconfirmed window, so this
+/// arm is unreachable in production. That is exactly why it needs a committed test: a
+/// hand-run mutation is not coverage. `ElsewhereAdapter` is deliberately a different type
+/// from the `ConformingAdapter` the success test assumes.
+#[test]
+fn a_launch_whose_adapter_reports_the_wrong_workspace_is_refused_and_aborted() {
+    let _serial = PROCESS_TEST_LOCK.lock().unwrap();
+
+    /// **The non-conforming adapter** — answers `Ok`, with a workspace nobody asked for.
+    struct ElsewhereAdapter(Arc<Mutex<Vec<(u32, i64)>>>);
+    impl crate::ancestry::Placement for ElsewhereAdapter {
+        fn place(&self, pid: u32, destination: i64) -> Result<crate::ancestry::Placed, String> {
+            self.0.lock().unwrap().push((pid, destination));
+            Ok(crate::ancestry::Placed {
+                workspace_id: destination + 1,
+                client: crate::ancestry::Client {
+                    address: "0xfeedface".into(),
+                    pid,
+                    workspace_id: destination + 1,
+                    workspace_name: (destination + 1).to_string(),
+                    class: "eidolon-worker-fake".into(),
+                    title: "stand-in terminal".into(),
+                },
+            })
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("eidolon-elsewhere-{}", std::process::id()));
+    let workspace = root.join("ws");
+    let logs = root.join("logs");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = stand_in_terminal(&root);
+    let asked = Arc::new(Mutex::new(None));
+    let placed = Arc::new(Mutex::new(Vec::new()));
+    let mut host = ProcessHost::new(
+        PathBuf::from("/bin/true"),
+        logs.clone(),
+        Box::new(Rows(Arc::new(Mutex::new(Vec::new())))),
+        Box::new(NoBriefs),
+    )
+    .with_terminal(script.display().to_string())
+    .with_placement(Arc::new(ElsewhereAdapter(placed.clone())))
+    .with_no_focus(Arc::new(Recorder(asked.clone())));
+
+    let request = Request {
+        operation: "visible-elsewhere-1".into(),
+        caller: "fixture".into(),
+        workspace: workspace.display().to_string(),
+        model: "mock".into(),
+        persona: None,
+        brief: "bounded task".into(),
+        rank: None,
+        rank_digest: None,
+        shape: crate::managed_start::LaunchShape::Terminal,
+        destination: Some(11),
+    };
+    host.register_fresh(&request).unwrap();
+
+    let refused = host.prepare(&request).expect_err("a window on the wrong workspace is not a launch");
+    assert!(refused.contains("the window is on workspace 12, not 11"), "{refused}");
+    assert!(refused.contains("the held child was aborted"), "the child is closed, never left held: {refused}");
+    assert_eq!(placed.lock().unwrap().len(), 1, "placement was called once, and its answer is what refused the launch");
+    let launch = host.launch(&request).unwrap();
+    assert_eq!(launch.session.as_deref(), Some("fake-visible-session"),
+        "the receipt was read before placement, so the refusal is about the workspace alone");
+    // Nothing is admitted: no held and no running child exists for the caller, so
+    // `managed_start::start` has nothing it could adopt.
+    assert!(matches!(host.inspect(&request), Ok(LaunchState::Unknown(_))),
+        "an aborted launch must not report Held or Running");
+    let _ = std::fs::remove_dir_all(&root);
+}
 
 /// A compositor that must never be called: these refusals are all upstream of
 /// placement, and a placement that runs would mean a child had been started.
@@ -783,6 +1006,9 @@ impl crate::ancestry::Placement for UnreachableCompositor {
         fn send_correlated(&self, _: &str, _: &str, _: &str, _: &str) -> Result<Correlated, String> {
             panic!("cancel must not send a correlated brief")
         }
+        fn wake(&self, _: &str, _: &str) -> Result<Delivery, String> {
+            panic!("cancel must not wake a worker")
+        }
     }
     fn fixture(slow: bool) -> (ProcessHost, Request, Arc<Mutex<Vec<Row>>>) {
         let rows = Arc::new(Mutex::new(Vec::new()));
@@ -803,6 +1029,80 @@ impl crate::ancestry::Placement for UnreachableCompositor {
         launch.child = Some(child);
         (host, request, rows)
     }
+    /// **The wake's refusal must send nothing**, and the assertion has to be that
+    /// nothing was sent — not merely that an error came back. Every other test of this
+    /// branch's neighbourhood goes through a fake host or the happy path, so this is
+    /// the only failing case behind the one new production refusal.
+    ///
+    /// The last case is what stops it passing by refusing everything: the verified
+    /// target is accepted, and only then is one wake counted.
+    #[test]
+    fn wake_refuses_anything_that_is_not_the_verified_running_child_and_sends_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _serial = PROCESS_TEST_LOCK.lock().unwrap();
+
+        /// A transport that counts rather than panics, so "nothing was sent" is a
+        /// number and not an inference from a landmine.
+        struct Counting(Arc<AtomicUsize>);
+        impl BriefTransport for Counting {
+            fn send_correlated(&self, _: &str, _: &str, _: &str, _: &str) -> Result<Correlated, String> {
+                panic!("a wake must never send a correlated brief")
+            }
+            fn wake(&self, _: &str, _: &str) -> Result<Delivery, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Delivery { outcome: crate::Outcome::Delivered, words: "delivered".into() })
+            }
+        }
+
+        let rows = Arc::new(Mutex::new(Vec::new()));
+        let sent = Arc::new(AtomicUsize::new(0));
+        let mut host = ProcessHost::new(
+            PathBuf::new(), PathBuf::new(), Box::new(Rows(rows.clone())), Box::new(Counting(sent.clone())),
+        );
+        let request = Request { operation: "wake-fixture".into(), caller: "fixture".into(), workspace: ".".into(),
+            model: "mock".into(), persona: None, brief: "no turns".into(),
+            rank: None, rank_digest: None,
+            shape: crate::managed_start::LaunchShape::Headless, destination: None };
+        host.register_fresh(&request).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "process_host::tests::child_entry"])
+            .env("COORDINATOR_CANCEL_TEST_CHILD", "normal")
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        {
+            let launch = host.launch(&request).unwrap();
+            launch.attempted = true;
+            launch.session = Some("fixture-child".into());
+            launch.input = child.stdin.take();
+            launch.child = Some(child);
+        }
+
+        // Held: no release has been attempted, so there is no running child to wake.
+        let refused = host.wake(&request, "fixture-child", "you have mail").unwrap_err();
+        assert!(refused.contains("wake target is not the verified running child"), "{refused}");
+        assert_eq!(sent.load(Ordering::SeqCst), 0, "a held child must not be woken");
+
+        // Released and reached — but the wake names a different session than the one
+        // this launch bound. The child is running; the *target* is not verified.
+        rows.lock().unwrap().push(Row { id: "locator".into(), session: Some("fixture-child".into()),
+            state: "idle".into(), last: "unknown".into(), outcome_at: None, outcome_observed: None,
+            started_ms: None, reached: true });
+        {
+            let launch = host.launch(&request).unwrap();
+            launch.release_attempted = true;
+            launch.release_acknowledged = true;
+        }
+        let refused = host.wake(&request, "1793000000000", "you have mail").unwrap_err();
+        assert!(refused.contains("wake target is not the verified running child"), "{refused}");
+        assert_eq!(sent.load(Ordering::SeqCst), 0, "a mismatched target must not be woken");
+
+        // And the verified target IS woken, so the refusals above are about the
+        // target rather than about a branch that refuses everything.
+        host.wake(&request, "fixture-child", "you have mail").expect("the verified running child is woken");
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+
+        finish(&mut host, &request);
+    }
+
     fn finish(host: &mut ProcessHost, request: &Request) {
         let launch = host.launch(request).unwrap();
         drop(launch.input.take());

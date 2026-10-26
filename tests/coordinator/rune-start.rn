@@ -1,0 +1,88 @@
+// tests/coordinator/rune-start.rn — forces the plugin's `tools/start.rn` to be
+// compiled and run by the harness, which is the one thing a `cargo test` cannot do.
+//
+// Copied into the disposable config's copy of the plugin by
+// `tests/coordinator/live-rune-start.sh`; not shipped in the plugin's own
+// `workflows/`.
+//
+// Three calls against ONE operation, and the shape of each answer is the point:
+//
+//   1. the first start — the brief journaled as a correlated record, and the one
+//      ordinary wake after it, since a journaled record starts no turn;
+//   2. the same immutable input again — `Existing`, and *nothing* sent: no second
+//      brief, no second wake;
+//   3. the same operation with a different brief — refused, because an operation
+//      id is bound to one immutable input and a retry may not re-tell it.
+//
+// Then `coordinator_adoptions`, so the adoption the start made is seen through a
+// second tool rather than inferred from the first one's own report.
+
+pub fn workflow() {
+    #{
+        name: "rune-start",
+        description: "Drive `coordinator_start` three times against one operation, then read the adoptions back. args: {operation, workspace, model, brief, changed_brief}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The idempotency key, one operation" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child" },
+                "model": #{ "type": "string", "description": "The child's model key, e.g. mock-text" },
+                "brief": #{ "type": "string", "description": "The assignment, journaled not inboxed" },
+                "changed_brief": #{ "type": "string", "description": "A different brief for the same operation, which must be refused" },
+            },
+            "required": ["operation", "workspace", "model", "brief", "changed_brief"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-start needs \`${key}\``),
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    let changed = needed(args, "changed_brief")?;
+    let out = "";
+
+    let first = #{ "operation": operation, "workspace": workspace, "model": model, "brief": brief };
+    match eidolon::tool_call("coordinator_start", first).await {
+        Ok(t) => out += `START-1-OK: ${t}\n`,
+        Err(e) => out += `START-1-ERR: ${e}\n`,
+    }
+
+    let again = #{ "operation": operation, "workspace": workspace, "model": model, "brief": brief };
+    match eidolon::tool_call("coordinator_start", again).await {
+        Ok(t) => out += `START-2-OK: ${t}\n`,
+        Err(e) => out += `START-2-ERR: ${e}\n`,
+    }
+
+    let re_told = #{ "operation": operation, "workspace": workspace, "model": model, "brief": changed };
+    match eidolon::tool_call("coordinator_start", re_told).await {
+        Ok(t) => out += `START-3-OK: ${t}\n`,
+        Err(e) => out += `START-3-ERR: ${e}\n`,
+    }
+
+    // The union's half: the merged manifest also carries `visible`. A visible launch
+    // refuses here — no terminal is configured and no compositor is contactable in the
+    // private namespace — and a refusal must produce NO wake, since nothing was adopted
+    // and nothing was journaled for it.
+    let visible = #{ "operation": `${operation}-visible`, "workspace": workspace, "model": model, "brief": brief, "visible": true };
+    match eidolon::tool_call("coordinator_start", visible).await {
+        Ok(t) => out += `START-4-OK: ${t}\n`,
+        Err(e) => out += `START-4-ERR: ${e}\n`,
+    }
+
+    match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(t) => out += `ADOPTIONS-OK: ${t}\n`,
+        Err(e) => out += `ADOPTIONS-ERR: ${e}\n`,
+    }
+
+    Ok(out)
+}
