@@ -22,11 +22,11 @@ pub fn manifest() {
         // it questions, so nothing here needs a session to be awake.
         service: #{
             command: "eidolon-coordinator",
-            readiness: #{ port: 8092, health: "/health" },
+            readiness: #{ port: 8095, health: "/health" },
             ready_timeout_s: 15,
         },
         claims: #{
-            tools: ["adopt", "release", "adoptions", "notices"],
+            tools: ["adopt", "release", "adoptions", "notices", "start", "cancel"],
             grants: ["file:~/.config/eidolon/coordinator.token"],
         },
     }

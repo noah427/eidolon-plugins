@@ -257,8 +257,12 @@ mod tests {
 
     #[test]
     fn a_second_writer_is_refused() {
+        let _serial = crate::process_host::PROCESS_TEST_LOCK.lock().unwrap();
         let dir = tmpdir("lock");
         let first = own(&dir).expect("the first writer takes the lock");
+        // Rust's OpenOptions must keep the ownership lock out of exec'd children.
+        let flags = unsafe { libc::fcntl(first._file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "store lock must be close-on-exec");
         let e = own(&dir).unwrap_err();
         assert!(e.contains("already writing this store"), "{e}");
         drop(first);

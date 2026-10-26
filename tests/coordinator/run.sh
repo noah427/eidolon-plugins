@@ -31,6 +31,8 @@ require_temp_config || exit 2
 : "${XDG_STATE_HOME:?set XDG_STATE_HOME to a temp dir}"
 : "${XDG_DATA_HOME:?set XDG_DATA_HOME to a temp dir}"
 
+
+
 fail=0
 say() { printf '%s\n' "$*"; }
 check() { # check <name> <haystack> <needle>
@@ -50,6 +52,22 @@ check_absent() { # check_absent <name> <haystack> <needle>
         say "ok   $1"
     fi
 }
+
+# Every door a coordinator tool dials, the port the plugin declares, and the
+# port the monitor defaults to must be the same number. A mixed pair passes
+# every test that exercises only the tools on one side of the split, and fails
+# in service with "not answering" against a monitor that is running fine.
+declared_port=$(sed -n 's/.*readiness: #{ port: \([0-9]*\).*/\1/p' "$repo/coordinator/plugin.rn" | head -1)
+default_port=$(grep -oE 'unwrap_or\([0-9]{4}\)' "$repo/coordinator/service/src/main.rs" | head -1 | tr -dc '0-9')
+for tool in "$repo"/coordinator/tools/*.rn; do
+    dialed=$(sed -n 's/.*base_url: "http:\/\/127\.0\.0\.1:\([0-9]*\)".*/\1/p' "$tool" | head -1)
+    [ -z "$dialed" ] && continue
+    if [ "$dialed" != "$declared_port" ] || [ "$dialed" != "$default_port" ]; then
+        say "FAIL: $(basename "$tool") dials $dialed, plugin declares ${declared_port:-none}, monitor defaults to ${default_port:-none}"
+        fail=$((fail + 1))
+    fi
+done
+say "every coordinator tool, the declaration and the monitor default agree on port ${declared_port:-none}"
 check_count() { # check_count <name> <haystack> <expected> <pattern>
     local got
     got=$(printf '%s' "$2" | grep -c -- "$4" || true)
@@ -64,7 +82,7 @@ check_count() { # check_count <name> <haystack> <expected> <pattern>
 
 # ---- the monitor's own port: never the operator's. -------------------------
 service_port=
-for p in 8092 8094 8095 8096 8097 8098; do
+for p in 8095 8094 8095 8096 8097 8098; do
     if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; then
         service_port=$p
         break
@@ -333,6 +351,21 @@ else
     check "and they say they will not parse prose" "$out" "will not parse"
     check "and they never invent an address" "$out" "will not invent one"
 fi
+
+# Smoke: every verb the plugin ships reaches the monitor it declares, and the
+# two new ones answer with a typed refusal rather than a dial failure. This is
+# deliberately shallow — it proves the route, not the feature.
+for method in adopt adoptions notices release start cancel; do
+    body=$(call "$method" "{\"caller\":\"$coordinator\"}" 2>/dev/null || true)
+    case $body in
+    \{*\}) check "the $method door answers JSON (route and method exist)" yes yes ;;
+    *) check "the $method door answers JSON (route and method exist)" "$body" "{" ;;
+    esac
+done
+started=$(call start "{\"caller\":\"$coordinator\",\"operation\":\"smoke\",\"workspace\":\"$work\",\"model\":\"mock\",\"brief\":\"smoke\"}" | result)
+check "start refuses with a typed stage, not a dial failure" "$started" "held launch unconfirmed"
+cancelled=$(call cancel "{\"caller\":\"$coordinator\",\"operation\":\"absent\",\"reason\":\"smoke\"}" | result)
+check "cancel refuses a missing operation by name" "$cancelled" "exactly one existing owned start operation"
 
 say ""
 if [ "$fail" -eq 0 ]; then

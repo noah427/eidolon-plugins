@@ -33,6 +33,8 @@
 //! be injected exactly where it matters: before the send, and before the ack.
 
 pub mod store;
+pub mod managed_start;
+pub mod process_host;
 
 use crate::store::SaveError;
 use serde::{Deserialize, Serialize};
@@ -217,6 +219,8 @@ pub struct Store {
     pub records: Vec<Adoption>,
     #[serde(default)]
     pub notices: Vec<Notice>,
+    #[serde(default)]
+    pub starts: Vec<managed_start::StartRecord>,
 }
 
 /// The store and its poison, behind the one order that is safe.
@@ -829,6 +833,14 @@ pub fn release_adoption(
     save: &mut dyn FnMut(&Store) -> Result<(), SaveError>,
     load: &mut dyn FnMut() -> Result<Store, String>,
 ) -> Result<String, String> {
+    if store.starts.iter().any(|start| {
+        start.request.caller == caller && start.session.as_deref() == Some(worker)
+            && start.cancellation.as_ref().is_some_and(|c| c.outcome == managed_start::CancelOutcome::Attempted)
+            && store.records.iter().any(|r| r.coordinator == caller && r.worker == worker
+                && Some(r.epoch) == start.adoption_epoch && r.released_at_ms.is_none())
+    }) {
+        return Err("cancellation exit is unconfirmed; supervision must remain until exit is durably observed".into());
+    }
     let mut next = store.clone();
     let out = release(&mut next.records, &mut next.notices, caller, worker, reason, now)?;
     match save(&next) {

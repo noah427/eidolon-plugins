@@ -53,7 +53,7 @@ check() { # check <name> <actual> <expected>
 }
 
 port=
-for p in 8092 8094 8095 8096 8097 8098; do
+for p in 8095 8094 8095 8096 8097 8098; do
     if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; then port=$p; break; fi
 done
 [ -n "$port" ] || { say "FAIL no free port"; exit 1; }

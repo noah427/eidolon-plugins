@@ -40,8 +40,9 @@ rustPlatform.buildRustPackage {
     longDescription = ''
       Holds the explicit adoption records, watches the workers they name over the
       harness's structured roster, and sends one notice per observed halt through
-      `eidolon send`. It never resumes, steers or cancels anything, and it never
-      claims a delivery the transport did not report.
+      `eidolon send`. The periodic scan never resumes, steers or cancels anything;
+      the only acts it performs are the explicitly admitted, bounded ones its doors
+      name, and it never claims a delivery the transport did not report.
     '';
     license = lib.licenses.mit;
     mainProgram = "eidolon-coordinator";

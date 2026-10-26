@@ -14,14 +14,71 @@ nothing about adoption gives a coordinator authority over anybody.
 
 | tool | file | does |
 |---|---|---|
+| `coordinator_cancel` | `tools/cancel.rn` | separately admitted cancellation of an owned child before any release attempt; exit observation, not retirement |
+| `coordinator_start` | `tools/start.rn` | one admitted held launch + durable adoption + release; explicit partial/ambiguous outcomes |
 | `coordinator_adopt` | `tools/adopt.rn` | adopt one worker, by durable address, as this session |
 | `coordinator_release` | `tools/release.rn` | end one adoption: monitoring stops, unsent notices are cancelled, the record stays as history |
 | `coordinator_adoptions` | `tools/adoptions.rn` | what this session has adopted, and what each worker is doing now |
 | `coordinator_notices` | `tools/notices.rn` | every notice owed to this session, and what the transport reported for each |
 
-The four tools are thin doors. The `coordinator` service — `eidolon-coordinator`,
+The tools are thin doors. The `coordinator` service — `eidolon-coordinator`,
 built by `package.nix` — holds the records, does the watching and sends the notices,
 so no session has to be awake for a halt to be noticed.
+
+## Managed start (isolated implementation; activation is separate)
+
+`coordinator_start` takes an operation id, existing workspace, explicit model,
+optional persona and brief. The registry dispatcher admits the call; its Rune
+wrapper derives the caller from the roster, never from model input. The service
+uses the same authenticated API boundary as adoption, not a second admission
+mechanism. Token possession is transport auth, not proof of a caller's role.
+`EIDOLON_COORDINATOR_BIN` must name a harness with the enforced startup hold.
+The current child is persistent headless chat, not a desktop-visibility claim.
+
+Durable intent precedes launch; durable adoption precedes release. Brief send has
+its own write-ahead Attempted/Accepted record. Accepted is the transport's word,
+not consumption or execution proof. An ambiguous attempt is never blindly resent.
+Retry the same immutable operation to reconcile; never change its input under the
+same id. After monitor restart, missing process/channel receipts mean Unknown,
+not permission to respawn. Monitor death closes the chat's owned stdin; the child
+exits at its input boundary and journals the closure. No automatic recovery budget,
+context compaction, retirement policy or live deployment is implied.
+
+### Current operational limits
+
+The registry tool derives the caller from the roster; the service authenticates
+transport, not the caller's identity. Its API must remain behind the admitted tool
+path for agent use. Starts are serialized under the store Gate and process-host
+lock: one start can delay other mutations and monitor scans while awaiting a child.
+
+`coordinator_cancel` is narrower than termination: it closes only the private
+channel/stdin of this service instance's still-owned child, and refuses any release
+attempt (including an uncertain ACK), a reached session, changed/inactive adoption,
+or lost ownership after restart. No PID reacquisition, signal, force-kill or automatic
+retry occurs. Cancellation intent is durable before pipe closure and permanently
+blocks further start/release of this operation. An observation window of two seconds
+bounds the call; timeout or probe failure means exit unconfirmed, never success.
+
+The durable cancellation distinguishes Attempted from Exited, with caller in the
+owning request, intent time/reason, and observed exit time/status/code/signal. Roster
+evidence is pre-close, not atomic with the exit. Only an owned Child's reaped status
+establishes exit. A durable Exited receipt is historical, not a current-liveness claim;
+even reading it through cancel after restart refuses when host ownership is lost.
+An explicit retry must use the same reason and re-enters the dispatcher gate.
+
+Cancellation never closes adoption. Pending/unconfirmed cancellation blocks the
+separate `coordinator_release` adoption verb; after durable Exited, that existing
+admitted verb can close it. Until then supervision remains, including on failed
+cleanup or failed receipt persistence. This does not add general retirement policy.
+Stopping a whole monitor still closes all its owned pipes; it is not a substitute
+for this scoped operation or permission to restart a live fleet.
+
+Attempted-without-Accepted brief delivery remains ambiguous and is not resent.
+There is currently no supported resolution verb: do not repair it by silently
+editing the store or treating transcript absence as proof of non-delivery. A future
+explicitly admitted resolution must preserve who decided, when, observed evidence
+and the chosen action. It must not claim exactly-once delivery. Until that surface
+exists, this operation remains blocked/ambiguous rather than declared complete.
 
 ## What a notice is, and what it is not
 
@@ -155,7 +212,7 @@ than only a process death. Three rules beside that:
 eidolon plugins install <owner>/<repo> coordinator
 nix build .#coordinator            # or: cargo build -p eidolon-coordinator
 eidolon plugins trust coordinator
-for v in adopt release adoptions notices; do
+for v in adopt release adoptions notices start; do
     eidolon plugins grant "coordinator_$v" file:~/.config/eidolon/coordinator.token
 done
 eidolon plugins service approve coordinator

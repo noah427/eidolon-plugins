@@ -7,9 +7,13 @@
 //!
 //! What it does, once per interval: read the harness's structured roster; write
 //! one notice per *new observed halt* of an adopted worker; hand each notice that
-//! has never been handed over to the transport exactly once; save. What it never
-//! does: resume, steer, cancel or touch a worker, and claim a delivery the
-//! transport did not report. The decisions themselves are in `lib.rs`.
+//! has never been handed over to the transport exactly once; save. The scan itself
+//! never resumes, cancels or starts anything. Two acts are available as admitted
+//! doors and are the only things that change a worker's fate: an explicitly
+//! requested start through the held-launch adapter, and a bounded cancellation of
+//! a child this instance still owns and has never tried to release. Neither
+//! claims a delivery the transport did not report. The decisions themselves are in
+//! `lib.rs`.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -148,6 +152,8 @@ struct App {
     token: String,
     roster: Box<dyn Roster>,
     transport: Box<dyn Transport>,
+    // Lock order is always Gate, then process host. No caller-provided executable.
+    launches: Mutex<eidolon_coordinator::process_host::ProcessHost>,
     /// Why the last scan could not see anything, kept so a tool answer can say it
     /// instead of reporting an empty watch.
     blind: Mutex<Vec<String>>,
@@ -286,6 +292,57 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
     // entry point, so there is no pre-check left for a caller to race past.
     let mut store = app.gate.enter()?;
     match method {
+        "start" => {
+            let request: eidolon_coordinator::managed_start::Request = serde_json::from_value(args.clone())
+                .map_err(|e| format!("invalid managed-start request: {e}"))?;
+            if request.brief.trim().is_empty() || request.brief.len() > 65536 {
+                return Err("managed start needs a nonempty brief of at most 65536 bytes".into());
+            }
+            let mut host = app.launches.lock().map_err(|_| "managed host lock poisoned")?;
+            if !store.starts.iter().any(|r| r.request.caller == caller && r.request.operation == request.operation) {
+                host.register_fresh(&request)?;
+            }
+            let file = app.file.clone();
+            let mut save = |s: &Store| store::save(&file, s);
+            let mut load = || match store::load(&file) {
+                Ok(s) => Ok(s),
+                Err(e) => { app.gate.poison(e.clone()); Err(e) }
+            };
+            let result = eidolon_coordinator::managed_start::start(
+                &mut store, &request, &mut *host, &mut save, &mut load, now,
+            );
+            match result {
+                Ok(started) => Ok(serde_json::json!({
+                    "status": "managed", "operation": request.operation,
+                    "session": started.session, "adoption_epoch": started.adoption_epoch,
+                    "brief_transport": started.brief_outcome.word(), "brief_consumption": "not established",
+                }).to_string()),
+                Err(error) => {
+                    use eidolon_coordinator::managed_start::Host;
+                    let observed = host.inspect(&request);
+                    Err(format!("managed start {} is partial/unconfirmed: {error}; host evidence: {observed:?}", request.operation))
+                }
+            }
+        }
+        "cancel" => {
+            let operation = text("operation");
+            let reason = text("reason");
+            let mut host = app.launches.lock().map_err(|_| "managed host lock poisoned")?;
+            let file = app.file.clone();
+            let mut save = |s: &Store| store::save(&file, s);
+            let mut load = || match store::load(&file) {
+                Ok(s) => Ok(s),
+                Err(e) => { app.gate.poison(e.clone()); Err(e) }
+            };
+            let evidence = eidolon_coordinator::managed_start::cancel(
+                &mut store, &caller, &operation, &reason, &mut *host, &mut save, &mut load, now,
+            )?;
+            Ok(serde_json::json!({
+                "status": "exit_observed", "operation": operation, "exit": evidence,
+                "adoption_closed": false,
+                "supervision": "any existing adoption is retained; coordinator_release is a separate admitted act",
+            }).to_string())
+        }
         "adopt" => {
             let worker = text("session");
             // A roster that cannot be read is not an absent worker. The lookup's
@@ -373,6 +430,11 @@ fn render_adoptions(
 ) -> String {
     let mine = store.records.iter().filter(|r| r.coordinator == caller);
     let mut out = String::new();
+    for start in store.starts.iter().filter(|r| r.request.caller == caller) {
+        out.push_str(&format!("managed start {}: durable phase {:?}, session {:?}, adoption epoch {:?} (not current liveness)\n",
+            start.request.operation, start.phase, start.session, start.adoption_epoch));
+        out.push_str(&format!("  cancellation: {:?} (historical exit receipt, not current liveness)\n", start.cancellation));
+    }
     match &rows {
         Ok(rs) if addresses_established(rs) => {}
         Ok(rs) => {
@@ -530,8 +592,12 @@ async fn call(
     }
 }
 
-async fn method_async(app: &App, name: &str, args: &serde_json::Value) -> Result<String, String> {
-    method(app, name, args, now_ms())
+async fn method_async(app: &Arc<App>, name: &str, args: &serde_json::Value) -> Result<String, String> {
+    let app = app.clone();
+    let name = name.to_string();
+    let args = args.clone();
+    tokio::task::spawn_blocking(move || method(&app, &name, &args, now_ms())).await
+        .map_err(|e| format!("coordinator method task failed: {e}"))?
 }
 
 fn usage() -> ! {
@@ -545,7 +611,8 @@ fn usage() -> ! {
            --interval-s <n>     seconds between scans (default 30, or $EIDOLON_COORDINATOR_INTERVAL_S)\n\
          \n\
          It watches the workers the adoption records name and sends one notice per\n\
-         observed halt. It never resumes, steers or cancels anything."
+         observed halt. The scan never resumes, steers or cancels anything; starts and\n\
+         bounded cancellations are separate admitted calls."
     );
     std::process::exit(2)
 }
@@ -614,7 +681,11 @@ async fn main() {
         file,
         token,
         roster: Box::new(CliRoster { eidolon: eidolon.clone() }),
-        transport: Box::new(CliTransport { eidolon }),
+        transport: Box::new(CliTransport { eidolon: eidolon.clone() }),
+        launches: Mutex::new(eidolon_coordinator::process_host::ProcessHost::new(
+            PathBuf::from(&eidolon), dir.join("launches"),
+            Box::new(CliRoster { eidolon: eidolon.clone() }), Box::new(CliTransport { eidolon }),
+        )),
         blind: Mutex::new(Vec::new()),
         now: now_ms,
     });
@@ -638,7 +709,7 @@ async fn main() {
     let port: u16 = std::env::var("EIDOLON_COORDINATOR_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(8092);
+        .unwrap_or(8095);
     let router = Router::new()
         .route("/health", get(health))
         .route("/call", post(call))

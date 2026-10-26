@@ -106,7 +106,7 @@ fn no_roster(why) {
 fn service() {
     #{
         name: "coordinator",
-        base_url: "http://127.0.0.1:8092",
+        base_url: "http://127.0.0.1:8095",
         token_file: "~/.config/eidolon/coordinator.token",
         auth: #{ header: "Authorization", prefix: "Bearer " },
         timeout_s: 30,
@@ -119,7 +119,7 @@ async fn call_service(method, args) {
     let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
         Ok(r) => r,
         Err(e) => {
-            return Err(`the coordinator monitor is not answering on 127.0.0.1:8092 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
         }
     };
     let reply = json::from_string(sent)?;
