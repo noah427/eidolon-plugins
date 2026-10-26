@@ -145,7 +145,22 @@ pub async fn run(input) {
         print("ok: service death closes owned stdin; child exits and journals why")
         before = sorted(p.name for p in (root / "data/eidolon/sessions").glob("*.eid"))
         monitor = start_monitor()
-        recovered = call("start", record["request"])
+        # **Replay the caller's own arguments, not the stored record.** A retry in the
+        # product is the caller repeating what it asked for; the store is reconciled
+        # against, never resubmitted. `record["request"]` carries the shapes the
+        # service pins for itself — `shape`, and a visible launch's `destination` —
+        # and `request_from_args` refuses those as *caller* input, so replaying the
+        # record made this line assert a refusal that happened before the recovery
+        # path was ever reached, and the two behavioural assertions below passed
+        # vacuously. Sending `request` reaches the real question: after a restart,
+        # does this operation still answer from its receipt?
+        # A caller supplies its **own** address and nothing the service pins for
+        # itself. `caller` is harness-derived: the plugin's tool reads it from the
+        # roster (`my_address()`), and this RPC-level replay stands in for that
+        # caller, so it carries the address the record was made under. `shape` and
+        # `destination` are the service's, and `request_from_args` refuses them.
+        retry = dict(request, caller=record["request"]["caller"])
+        recovered = call("start", retry)
         assert recovered["ok"] is False, recovered
         assert "host restarted or has no receipt" in recovered["error"], recovered
         after = sorted(p.name for p in (root / "data/eidolon/sessions").glob("*.eid"))
