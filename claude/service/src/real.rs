@@ -882,26 +882,213 @@ fn mcp_door(
 
 // ------------------------------------------------------------------ the mcp shim
 
+/// One request this shim has read and has not answered — which is what
+/// "in progress" means to the client, and the only thing a cancellation may
+/// name.
+struct InProgress {
+    method: String,
+    cancelled: bool,
+}
+
+/// What the reader hands the writing loop: a request to serve, or a reply it has
+/// already decided on because the request must not be served at all.
+enum Incoming {
+    Request(String, Value),
+    /// A request naming an id that is already in flight. The reply is made here
+    /// and written by the loop, so exactly one thread writes to stdout.
+    Refused(Value),
+}
+
+/// The requests this shim has read and not answered, by id.
+///
+/// The key is the id rendered as JSON, because a JSON-RPC id is
+/// `string | number` and `1` and `"1"` are two different requests. A
+/// **synchronous** mutex, held for a field and never across an I/O call — the
+/// shape `Conn::pending` uses on this side, and for the same reason.
+#[derive(Default)]
+struct InFlight(std::sync::Mutex<std::collections::HashMap<String, InProgress>>);
+
+impl InFlight {
+    /// A request has been read. From here until it is answered it can be
+    /// cancelled; after that, a cancellation naming it is stale.
+    ///
+    /// **A live id is never overwritten**, and `false` says so. Two requests in
+    /// flight under one id cannot be told apart — least of all by a cancellation
+    /// that names the id — so the first one keeps the slot and the second is
+    /// refused by the reader. Overwriting was a real hole: a duplicate `call`
+    /// could take the slot from a queued `initialize`, a later
+    /// `notifications/cancelled` would then mark it, and the `initialize` would
+    /// be dropped unanswered by a shim whose doc promises it cannot be cancelled.
+    fn heard(&self, key: String, method: &str) -> bool {
+        let mut open = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if open.contains_key(&key) {
+            return false;
+        }
+        open.insert(key, InProgress { method: method.to_string(), cancelled: false });
+        true
+    }
+
+    /// Act on a notification.
+    ///
+    /// There is exactly one this shim honours, `notifications/cancelled`, and
+    /// everything else — another notification, a malformed one, one naming no
+    /// request — is correctly nothing: a notification is answered never, so
+    /// "acted on and no effect" and "ignored" are the same on the wire.
+    ///
+    /// **The bound, and where it comes from.** The spec lets a client cancel
+    /// only a request it issued in this direction and believes still in
+    /// progress, and lets the receiver ignore a request that is unknown, already
+    /// completed, or cannot be cancelled. So the only id this can act on is one
+    /// this process has itself read and not yet answered: an id it has never
+    /// seen, one it has answered, and `initialize` (which a client must not
+    /// cancel) are all refused here rather than guessed at. Nothing wider is
+    /// reachable — the door socket this shim forwards to is minted per turn
+    /// (`mcp-{nonce}.sock`), so an id names at most one request, in one turn, of
+    /// one session, and the only effect available is on this process's own
+    /// stdout. A cancellation read here cannot cancel anyone else's work because
+    /// there is no one else's work here to cancel.
+    fn notified(&self, req: &Value) {
+        if req.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
+            return;
+        }
+        let Some(id) = req.pointer("/params/requestId") else {
+            return;
+        };
+        let mut open = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(entry) = open.get_mut(&id_key(id)) else {
+            // Unknown, or already answered: the spec's own list of the ignorable.
+            return;
+        };
+        if entry.method == "initialize" {
+            return;
+        }
+        entry.cancelled = true;
+    }
+
+    /// Whether the request was cancelled before its forward had even begun — in
+    /// which case it is dropped rather than run, which is the only "stop
+    /// processing" this side can do. Its slot goes with it.
+    fn cancelled_before_it_started(&self, key: &str) -> bool {
+        let mut open = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let cancelled = open.get(key).map(|entry| entry.cancelled).unwrap_or(false);
+        if cancelled {
+            open.remove(key);
+        }
+        cancelled
+    }
+
+    /// The request is finished: this shim is about to answer it, or never will.
+    /// Whether it was cancelled meanwhile — and its slot goes either way.
+    fn finished(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(key)
+            .map(|entry| entry.cancelled)
+            .unwrap_or(false)
+    }
+}
+
+/// A JSON-RPC id is `string | number`, and `1` and `"1"` are two requests; the
+/// rendered JSON is the key that keeps them apart.
+fn id_key(id: &Value) -> String {
+    serde_json::to_string(id).unwrap_or_default()
+}
+
 /// `eidolon-claude mcp`: MCP over stdio, forwarded to the door.
 ///
-/// A pipe, and a stalled MCP server stalls the CLI's whole turn, so this is
-/// synchronous on purpose. A request without an id is a notification: act,
-/// answer nothing.
+/// A pipe, and a stalled MCP server stalls the CLI's whole turn, so **the
+/// forward path is synchronous on purpose**: one request at a time, in the order
+/// it arrived, each one a blocking round trip to the door.
+///
+/// A request without an id is a notification: act, answer nothing. The one
+/// notification this shim can act on is `notifications/cancelled`, and its
+/// window is real only because *reading* is not synchronous — a cancellation is
+/// useful only while the request it names is in flight, and the request in
+/// flight is exactly what the forward below is blocked on. So stdin is read on a
+/// thread of its own, which does nothing but hand requests to the loop and
+/// record a cancellation (see [`InFlight::notified`] for what a cancellation may
+/// name and why that is the whole of its reach). The loop still forwards one at
+/// a time and writes every reply itself, so nothing here is reordered and no
+/// reply is written twice.
+///
+/// **What this side can and cannot honour.** The spec's obligation on a receiver
+/// is to stop processing the cancelled request, free what it holds and not
+/// answer it. The last of those is the whole of what is available here: work
+/// that has already been forwarded is the session's — the door's only cancel is
+/// the turn's, which signals the CLI's process group — so a call already running
+/// runs to its answer, and this side drops the answer rather than inventing a
+/// kill it cannot justify. That is a bound, not an oversight; see the lane
+/// receipt beside this build.
 pub fn mcp_client() -> ! {
-    use std::io::{BufRead, Write};
+    use std::io::Write;
     let socket = std::env::var(MCP_ENV).ok();
     let mut out = std::io::stdout();
-    for line in std::io::stdin().lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
+    let in_flight = Arc::new(InFlight::default());
+
+    // The reading thread. Requests go over the channel in the order they
+    // arrived; notifications are acted on here, because the loop they would
+    // otherwise wait for is the thing that is blocked.
+    let (requests, incoming) = std::sync::mpsc::channel::<Incoming>();
+    let seen = in_flight.clone();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(req) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(id) = req.get("id").cloned() else {
+                seen.notified(&req);
+                continue;
+            };
+            let key = id_key(&id);
+            let method = req.get("method").and_then(Value::as_str).unwrap_or_default();
+            if !seen.heard(key.clone(), method) {
+                // Two live requests under one id cannot be told apart, least of
+                // all by a cancellation. The one already in flight keeps its
+                // slot; this one is answered at once, by the same thread that
+                // writes every other reply, so there is one writer on stdout.
+                let reply = json!({ "jsonrpc": "2.0", "id": id, "error": {
+                    "code": -32600,
+                    "message": "a request with this id is already in flight",
+                } });
+                if requests.send(Incoming::Refused(reply)).is_err() {
+                    break;
+                }
+                continue;
+            }
+            if requests.send(Incoming::Request(key, req)).is_err() {
+                break;
+            }
         }
-        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+    });
+
+    for next in incoming {
+        // A duplicate live id, already answered by the reader's decision.
+        let Incoming::Request(key, req) = next else {
+            if let Incoming::Refused(reply) = next
+                && (writeln!(out, "{reply}").is_err() || out.flush().is_err())
+            {
+                break;
+            }
             continue;
         };
         let Some(id) = req.get("id").cloned() else {
+            // Unreachable by construction: only an id-bearing request is ever
+            // registered and queued. It stays as a guard rather than a
+            // possibility — a request that reached here without an id would be
+            // answered with nothing and would leave a slot in `in_flight` for
+            // the life of the process, making that id un-cancellable forever.
             continue;
         };
+        // Cancelled while it waited: there is nothing to stop but the forward.
+        if in_flight.cancelled_before_it_started(&key) {
+            continue;
+        }
         let method = req.get("method").and_then(Value::as_str).unwrap_or_default();
         let reply = match method {
             "initialize" => json!({ "jsonrpc": "2.0", "id": id, "result": {
@@ -952,6 +1139,10 @@ pub fn mcp_client() -> ! {
             }
             other => mcp_error(id, &format!("no such method: {other}")),
         };
+        // The answer to a cancelled request is never written.
+        if in_flight.finished(&key) {
+            continue;
+        }
         if writeln!(out, "{reply}").is_err() || out.flush().is_err() {
             break;
         }
@@ -1107,6 +1298,44 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cancelled(request: Value) -> Value {
+        json!({ "method": "notifications/cancelled", "params": { "requestId": request } })
+    }
+
+    /// What a cancellation may name, at the level the bookkeeping can be held
+    /// to: the tests that drive the loop prove the effect, this proves the
+    /// refusals one at a time.
+    #[test]
+    fn a_cancellation_may_only_name_a_door_request_the_shim_is_holding() {
+        let open = InFlight::default();
+        open.heard(id_key(&json!(7)), "tools/call");
+        open.heard(id_key(&json!(8)), "initialize");
+
+        // The one it names.
+        open.notified(&cancelled(json!(7)));
+        // A client MUST NOT cancel `initialize`.
+        open.notified(&cancelled(json!(8)));
+        // Never issued here, never heard here, and malformed.
+        open.notified(&cancelled(json!(9)));
+        open.notified(&json!({ "method": "notifications/cancelled" }));
+        open.notified(&json!({ "method": "notifications/initialized" }));
+        // `"7"` is a string id, which is a different request from `7`.
+        open.notified(&cancelled(json!("7")));
+
+        assert!(
+            !open.finished(&id_key(&json!(8))),
+            "an initialize was marked cancelled"
+        );
+        assert!(
+            open.cancelled_before_it_started(&id_key(&json!(7))),
+            "the request the cancellation named was not marked"
+        );
+        assert!(
+            !open.finished(&id_key(&json!(9))),
+            "a request this shim never held was treated as cancellable"
+        );
+    }
 
     #[test]
     fn a_read_is_read_only_and_anything_unknown_is_not() {
