@@ -442,6 +442,11 @@ async fn connection(stream: UnixStream, host: Arc<Host>) -> std::io::Result<()> 
     // was cancelled is a cancelled turn, not a failed one, and saying otherwise
     // would be a different and less true claim.
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Whether this session declared `call_cancel` in its own handshake. Absent
+    // means no: an unknown method ends a turn on the session side, so a host
+    // must never send the frame to a client that did not announce it. Recorded
+    // per connection, read by the doors, and never inferred from a version.
+    let call_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // The `req_id` of the cancel in flight, for the ack the turn task sends once
     // it has *seen* the process group go.
     let cancel_req: Arc<Mutex<Option<Value>>> = Arc::default();
@@ -479,6 +484,10 @@ async fn connection(stream: UnixStream, host: Arc<Host>) -> std::io::Result<()> 
                 if msg.get("protocol").and_then(Value::as_str) != Some(PROTOCOL) {
                     break;
                 }
+                call_cancel.store(
+                    msg.get("call_cancel").and_then(Value::as_bool).unwrap_or(false),
+                    Ordering::Relaxed,
+                );
             }
             "run_turn" => {
                 // No session id, no origin: the connection is about one session
@@ -511,6 +520,7 @@ async fn connection(stream: UnixStream, host: Arc<Host>) -> std::io::Result<()> 
                 let pid = pid.clone();
                 let cancelled = cancelled.clone();
                 let cancel_req = cancel_req.clone();
+                let call_cancel = call_cancel.clone();
                 let req = msg.clone();
                 turn = Some(tokio::spawn(async move {
                     let result = match host.real.clone() {
@@ -532,6 +542,7 @@ async fn connection(stream: UnixStream, host: Arc<Host>) -> std::io::Result<()> 
                                 pid.clone(),
                                 cancel,
                                 cancel_req.clone(),
+                                call_cancel.clone(),
                             )
                             .await
                         }

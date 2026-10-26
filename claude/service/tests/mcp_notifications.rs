@@ -47,6 +47,20 @@ fn sock(tag: &str) -> PathBuf {
 struct Door(mpsc::UnboundedReceiver<(Value, oneshot::Sender<Value>)>);
 
 impl Door {
+    /// The next **call**, skipping (and answering) a per-call cancellation:
+    /// a cancellation is now a door op of its own, and only the test that is
+    /// about the cancellation should have to look at it.
+    async fn next_call(&mut self) -> (Value, oneshot::Sender<Value>) {
+        loop {
+            let (op, answer) = self.next_ask().await;
+            if op["op"] == "cancel" {
+                let _ = answer.send(json!({ "forwarded": true }));
+                continue;
+            }
+            return (op, answer);
+        }
+    }
+
     /// The next thing the shim forwarded, held unanswered until the sender is
     /// used — which is what keeps a call "in flight" as long as a test needs.
     async fn next_ask(&mut self) -> (Value, oneshot::Sender<Value>) {
@@ -179,7 +193,7 @@ async fn a_cancelled_call_still_reaches_the_door_and_its_answer_is_dropped() {
     let mut shim = Shim::start(&path).await;
 
     shim.say(call(7, "echo the call that will be cancelled")).await;
-    let (asked, answer) = door.next_ask().await;
+    let (asked, answer) = door.next_call().await;
     assert_eq!(asked["op"], "call", "a call is forwarded as a door op: {asked}");
     assert_eq!(asked["tool"], "bash");
 
@@ -193,7 +207,7 @@ async fn a_cancelled_call_still_reaches_the_door_and_its_answer_is_dropped() {
     // A second call, so the claim is "no answer for 7" rather than "no answer
     // at all": the next thing on stdout must be 9's.
     shim.say(call(9, "echo the call after it")).await;
-    let (asked, answer) = door.next_ask().await;
+    let (asked, answer) = door.next_call().await;
     assert_eq!(asked["op"], "call");
     answer
         .send(json!({ "content": "the next call ran", "is_error": false, "images": [] }))
@@ -217,7 +231,7 @@ async fn a_cancellation_stops_the_call_it_names_and_not_the_one_in_flight() {
     let mut shim = Shim::start(&path).await;
 
     shim.say(call(7, "echo seven, in flight")).await;
-    let (asked, seven) = door.next_ask().await;
+    let (asked, seven) = door.next_call().await;
     assert_eq!(asked["op"], "call");
 
     // Queued behind it, then cancelled before it is ever forwarded.
@@ -234,7 +248,7 @@ async fn a_cancellation_stops_the_call_it_names_and_not_the_one_in_flight() {
     assert_eq!(text, "seven ran");
 
     shim.say(call(11, "echo eleven")).await;
-    let (asked, eleven) = door.next_ask().await;
+    let (asked, eleven) = door.next_call().await;
     assert_eq!(
         asked["input"]["command"], "echo eleven",
         "nine was forwarded anyway: {asked}"
@@ -257,7 +271,7 @@ async fn a_cancellation_that_names_nothing_in_flight_cancels_nothing() {
     let mut shim = Shim::start(&path).await;
 
     shim.say(call(7, "echo seven")).await;
-    let (asked, seven) = door.next_ask().await;
+    let (asked, seven) = door.next_call().await;
     assert_eq!(asked["op"], "call");
 
     // Eight was never issued by this client; a bare notification names nothing
@@ -277,7 +291,7 @@ async fn a_cancellation_that_names_nothing_in_flight_cancels_nothing() {
     // And one naming a call already answered is stale, not retroactive.
     shim.say(cancelled(json!(7))).await;
     shim.say(call(9, "echo nine")).await;
-    let (asked, nine) = door.next_ask().await;
+    let (asked, nine) = door.next_call().await;
     assert_eq!(asked["op"], "call");
     nine.send(json!({ "content": "nine ran", "is_error": false, "images": [] }))
         .expect("the door answers");
@@ -304,7 +318,7 @@ async fn a_duplicate_live_id_is_refused_and_displaces_nothing() {
 
     // One call in flight, so the next requests queue behind it.
     shim.say(call(5, "echo five, in flight")).await;
-    let (asked, five) = door.next_ask().await;
+    let (asked, five) = door.next_call().await;
     assert_eq!(asked["op"], "call");
 
     // A queued `initialize`, then a duplicate id, then a cancellation naming it.
@@ -338,4 +352,74 @@ async fn a_duplicate_live_id_is_refused_and_displaces_nothing() {
         Some(-32600),
         "the duplicate was not refused: {third}"
     );
+}
+
+/// **A cancellation of a call in flight is told to the door, by name.**
+///
+/// Suppressing the answer is what this shim can do alone; stopping the work needs
+/// the session, and the session can only be reached through the door. So the
+/// reader — the thread that is free while the forward is blocked — sends
+/// `{op:"cancel", call_id, gen}` on a connection of its own. The answer is still
+/// never written, whatever the door says about forwarding: the two are separate
+/// obligations and neither one is conditional on the other.
+#[tokio::test]
+async fn a_cancellation_is_told_to_the_door_by_name() {
+    let (path, mut door, _serving) = door("told").await;
+    let mut shim = Shim::start(&path).await;
+
+    shim.say(call(7, "echo the call that will be cancelled")).await;
+    let (asked, seven) = door.next_ask().await;
+    assert_eq!(asked["op"], "call");
+    let named = asked["call_id"].as_str().expect("the call carries an id").to_string();
+    let generation = asked["gen"].as_u64().expect("the call carries a generation");
+
+    // The client gives up while the call is in flight.
+    shim.say(cancelled(json!(7))).await;
+    let (told, answer) = door.next_ask().await;
+    assert_eq!(told["op"], "cancel", "the door was not told: {told}");
+    assert_eq!(told["call_id"], json!(named), "the cancellation names the wrong call: {told}");
+    assert_eq!(told["gen"], json!(generation), "the generation must match the call: {told}");
+    answer.send(json!({ "forwarded": true })).expect("the door answers the op");
+
+    // And the answer to the call itself is still withheld.
+    seven
+        .send(json!({ "content": "the call ran", "is_error": false, "images": [] }))
+        .expect("the door answers the call");
+    shim.say(call(9, "echo the call after it")).await;
+    let (_, nine) = door.next_ask().await;
+    nine.send(json!({ "content": "nine ran", "is_error": false, "images": [] }))
+        .expect("the door answers");
+
+    let (id, text) = answered(&shim.answer().await);
+    assert_eq!(id, json!(9), "the cancelled call was answered: {id}");
+    assert_eq!(text, "nine ran");
+}
+
+/// **A cancellation of something never issued tells the door nothing.**
+///
+/// The bound the session relies on: the only call ids this shim can name are the
+/// ones it minted for its own live requests. An id it never registered produces no
+/// door op at all, so there is nothing for a stale or forged name to reach.
+#[tokio::test]
+async fn a_cancellation_of_an_unissued_id_tells_the_door_nothing() {
+    let (path, mut door, _serving) = door("untold").await;
+    let mut shim = Shim::start(&path).await;
+
+    shim.say(cancelled(json!(8))).await;
+    shim.say(json!({ "jsonrpc": "2.0", "method": "notifications/cancelled" })).await;
+    tokio::time::sleep(SETTLE).await;
+
+    // The next thing the door sees is a real call, not a cancel op.
+    shim.say(call(9, "echo nine")).await;
+    let (asked, nine) = door.next_ask().await;
+    assert_eq!(
+        asked["op"], "call",
+        "a cancellation of an unissued id was passed to the door: {asked}"
+    );
+    nine.send(json!({ "content": "nine ran", "is_error": false, "images": [] }))
+        .expect("the door answers");
+
+    let (id, text) = answered(&shim.answer().await);
+    assert_eq!(id, json!(9));
+    assert_eq!(text, "nine ran");
 }

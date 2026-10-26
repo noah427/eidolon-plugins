@@ -83,6 +83,11 @@ pub const HOOK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(24
 /// failed. `pid` is published so the connection can signal the process group on
 /// a cancel — the ack is the *host's* word that it signalled the group it
 /// spawned, which is why it is sent by whoever did the signalling.
+// The turn's handles are threaded one by one on purpose — the process to signal,
+// the token a cancel fires, the request its ack answers, the capability the
+// session declared — and bundling them into a struct would name each of them
+// again without telling a reader anything this signature does not.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn real_turn(
     conn: &Arc<Conn>,
     req: &Value,
@@ -93,6 +98,9 @@ pub(crate) async fn real_turn(
     pid: Arc<Mutex<Option<u32>>>,
     cancel: Arc<tokio::sync::Notify>,
     cancel_req: Arc<Mutex<Option<Value>>>,
+    // Whether the session declared `call_cancel` in its handshake: the door
+    // forwards a per-call cancellation only when this is set. Absent means no.
+    call_cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<()> {
     let field = |k: &str| {
         req.get(k)
@@ -160,6 +168,7 @@ pub(crate) async fn real_turn(
                 conn.clone(),
                 turn_id.clone(),
                 tools,
+                call_cancel.clone(),
             )),
             None => {
                 return Err(std::io::Error::new(
@@ -831,12 +840,14 @@ fn mcp_door(
     conn: Arc<Conn>,
     turn_id: String,
     tools: Vec<Value>,
+    call_cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             let conn = conn.clone();
             let turn_id = turn_id.clone();
             let tools = tools.clone();
+            let call_cancel = call_cancel.clone();
             tokio::spawn(async move {
                 let Ok(buf) = read_frame(&mut stream).await else {
                     return;
@@ -871,6 +882,36 @@ fn mcp_door(
                             }),
                         }
                     }
+                    // One call abandoned by name, from the shim's reader thread.
+                    // Answered with whether it was forwarded, and **only** when
+                    // the session declared the capability: an unknown method ends
+                    // a session's turn, so a host that volunteers this frame to a
+                    // client that never asked for it would break turns rather
+                    // than abort calls.
+                    "cancel" => {
+                        let call_id = req
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let generation = req.get("gen").and_then(Value::as_u64).unwrap_or(0);
+                        if call_id.is_empty() {
+                            json!({ "forwarded": false, "why": "the cancel named no call" })
+                        } else if !call_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            json!({ "forwarded": false, "why": "the session did not declare call_cancel" })
+                        } else {
+                            // A notification in the other direction: the session
+                            // answers nothing, so nothing is awaited here.
+                            let sent = conn
+                                .send(&json!({
+                                    "method": "call_cancel", "turn_id": turn_id,
+                                    "call_id": call_id, "gen": generation,
+                                }))
+                                .await
+                                .is_ok();
+                            json!({ "forwarded": sent })
+                        }
+                    }
                     other => json!({ "error": format!("unknown door op {other:?}") }),
                 };
                 let _ = write_frame(&mut stream, &reply).await;
@@ -882,11 +923,26 @@ fn mcp_door(
 
 // ------------------------------------------------------------------ the mcp shim
 
+/// The generation minted for each call this process tells the session about: one,
+/// two, three, for the life of the shim. A call id can be reused by a client; a
+/// generation is what lets the session tell an outrun cancellation from a stale
+/// one, and it is a fact this side mints rather than one the wire order supplies.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// One request this shim has read and has not answered — which is what
 /// "in progress" means to the client, and the only thing a cancellation may
 /// name.
 struct InProgress {
     method: String,
+    /// What the door and the session know this call by, minted when the request
+    /// is **heard** rather than when it is forwarded: the reader thread has to be
+    /// able to name the call while the forward is blocked, and a name minted at
+    /// forward time would not exist yet at the moment a cancellation arrives.
+    call_id: String,
+    /// The generation minted with the id. Both travel on the cancellation, and
+    /// the session matches the pair — a recycled id carrying an older generation
+    /// cancels nothing.
+    generation: u64,
     cancelled: bool,
 }
 
@@ -919,13 +975,44 @@ impl InFlight {
     /// could take the slot from a queued `initialize`, a later
     /// `notifications/cancelled` would then mark it, and the `initialize` would
     /// be dropped unanswered by a shim whose doc promises it cannot be cancelled.
-    fn heard(&self, key: String, method: &str) -> bool {
+    fn heard(&self, key: String, req: &Value) -> Option<(String, u64)> {
+        let method = req.get("method").and_then(Value::as_str).unwrap_or_default();
+        let call_id = self.mint_call_id(&key, req);
+        let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut open = self.0.lock().unwrap_or_else(|p| p.into_inner());
         if open.contains_key(&key) {
-            return false;
+            return None;
         }
-        open.insert(key, InProgress { method: method.to_string(), cancelled: false });
-        true
+        open.insert(
+            key,
+            InProgress {
+                method: method.to_string(),
+                call_id: call_id.clone(),
+                generation,
+                cancelled: false,
+            },
+        );
+        Some((call_id, generation))
+    }
+
+    /// The name this shim gives the session for one request. The key is the id
+    /// rendered as JSON; a call made under `_meta`'s tool-use id keeps that id (the
+    /// CLI and the session already agree on it), and everything else gets one of
+    /// ours.
+    fn mint_call_id(&self, key: &str, req: &Value) -> String {
+        // The CLI's own id for this call when it supplied one, so its view and
+        // the session's agree on which call a result belongs to; otherwise one of
+        // ours, carrying the request's id so two calls in one millisecond are
+        // still two names.
+        let named = req
+            .pointer("/params/_meta/claudecode~1toolUseId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !named.is_empty() {
+            named.to_string()
+        } else {
+            format!("mcp-{}-{}", now_ms(), key.trim_matches('"'))
+        }
     }
 
     /// Act on a notification.
@@ -947,22 +1034,44 @@ impl InFlight {
     /// one session, and the only effect available is on this process's own
     /// stdout. A cancellation read here cannot cancel anyone else's work because
     /// there is no one else's work here to cancel.
-    fn notified(&self, req: &Value) {
+    /// `socket` is the door this shim forwards to, and is used here to tell the
+    /// session **while the forward is blocked** — which is the only moment the
+    /// cancellation can stop work rather than merely withhold an answer. Nothing
+    /// is awaited on the answer: the door's reply says whether it forwarded the
+    /// frame, and no effect here depends on it.
+    fn notified(&self, req: &Value, socket: Option<&str>) {
         if req.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
             return;
         }
         let Some(id) = req.pointer("/params/requestId") else {
             return;
         };
-        let mut open = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(entry) = open.get_mut(&id_key(id)) else {
-            // Unknown, or already answered: the spec's own list of the ignorable.
-            return;
+        let named = {
+            let mut open = self.0.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(entry) = open.get_mut(&id_key(id)) else {
+                // Unknown, or already answered: the spec's own list of the ignorable.
+                return;
+            };
+            if entry.method == "initialize" {
+                return;
+            }
+            entry.cancelled = true;
+            (entry.call_id.clone(), entry.generation)
         };
-        if entry.method == "initialize" {
-            return;
-        }
-        entry.cancelled = true;
+        // Sent outside the lock, on its own connection, because the one this
+        // shim is forwarding the call on is busy by definition.
+        let _ = forward_send(
+            socket,
+            &json!({ "op": "cancel", "call_id": named.0, "gen": named.1 }),
+        );
+    }
+
+    /// The `(call_id, generation)` this request was registered with, if it is
+    /// still live. The forwarding loop asks for it rather than minting its own at
+    /// forward time, so the reader and the loop name the call identically.
+    fn identity(&self, key: &str) -> Option<(String, u64)> {
+        let open = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        open.get(key).map(|entry| (entry.call_id.clone(), entry.generation))
     }
 
     /// Whether the request was cancelled before its forward had even begun — in
@@ -1031,6 +1140,9 @@ pub fn mcp_client() -> ! {
     // otherwise wait for is the thing that is blocked.
     let (requests, incoming) = std::sync::mpsc::channel::<Incoming>();
     let seen = in_flight.clone();
+    // The reader needs the door's path for a cancellation, and the loop below
+    // needs it for every forward: one clone each, never a moved original.
+    let reader_socket = socket.clone();
     std::thread::spawn(move || {
         use std::io::BufRead;
         for line in std::io::stdin().lock().lines() {
@@ -1042,12 +1154,11 @@ pub fn mcp_client() -> ! {
                 continue;
             };
             let Some(id) = req.get("id").cloned() else {
-                seen.notified(&req);
+                seen.notified(&req, reader_socket.as_deref());
                 continue;
             };
             let key = id_key(&id);
-            let method = req.get("method").and_then(Value::as_str).unwrap_or_default();
-            if !seen.heard(key.clone(), method) {
+            if seen.heard(key.clone(), &req).is_none() {
                 // Two live requests under one id cannot be told apart, least of
                 // all by a cancellation. The one already in flight keeps its
                 // slot; this one is answered at once, by the same thread that
@@ -1107,15 +1218,17 @@ pub fn mcp_client() -> ! {
             "tools/call" => {
                 let tool = req.pointer("/params/name").and_then(Value::as_str).unwrap_or_default();
                 let input = req.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
-                // The CLI's own id for this call, so its view and the session's
-                // agree on which call the result belongs to.
-                let call_id = req
-                    .pointer("/params/_meta/claudecode~1toolUseId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let call_id = if call_id.is_empty() { format!("mcp-{}", now_ms()) } else { call_id };
-                let asked = json!({ "op": "call", "call_id": call_id, "tool": tool, "input": input });
+                // The name and generation this request was registered with when
+                // it was **heard**, so the cancellation the reader sends for the
+                // same request carries the same pair — and so the session can
+                // match a cancellation to the call it means.
+                let (call_id, generation) = in_flight
+                    .identity(&key)
+                    .unwrap_or_else(|| (format!("mcp-{}", now_ms()), 0));
+                let asked = json!({
+                    "op": "call", "call_id": call_id, "gen": generation,
+                    "tool": tool, "input": input,
+                });
                 match forward_op(socket.as_deref(), &asked) {
                     Ok(v) => {
                         let text = v.get("content").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -1155,6 +1268,25 @@ fn mcp_error(id: Value, message: &str) -> Value {
 }
 
 /// One request and one reply over the door, synchronously.
+/// One frame to the door, and **no** reply read: what a notification needs.
+///
+/// Used from the reader thread for a per-call cancellation, where the whole point
+/// is that the ordinary forward is blocked on the call it names. The door answers
+/// with whether it forwarded the frame; nothing here waits for that.
+fn forward_send(socket: Option<&str>, request: &Value) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream as StdStream;
+    let path = socket.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no driver socket configured")
+    })?;
+    let body = serde_json::to_vec(request).unwrap_or_default();
+    let mut stream = StdStream::connect(path)?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+    stream.write_all(&(body.len() as u32).to_le_bytes())?;
+    stream.write_all(&body)?;
+    stream.flush()
+}
+
 fn forward_op(socket: Option<&str>, request: &Value) -> std::io::Result<Value> {
     let path = socket.ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no driver socket configured")
@@ -1309,19 +1441,19 @@ mod tests {
     #[test]
     fn a_cancellation_may_only_name_a_door_request_the_shim_is_holding() {
         let open = InFlight::default();
-        open.heard(id_key(&json!(7)), "tools/call");
-        open.heard(id_key(&json!(8)), "initialize");
+        open.heard(id_key(&json!(7)), &json!({ "method": "tools/call" }));
+        open.heard(id_key(&json!(8)), &json!({ "method": "initialize" }));
 
         // The one it names.
-        open.notified(&cancelled(json!(7)));
+        open.notified(&cancelled(json!(7)), None);
         // A client MUST NOT cancel `initialize`.
-        open.notified(&cancelled(json!(8)));
+        open.notified(&cancelled(json!(8)), None);
         // Never issued here, never heard here, and malformed.
-        open.notified(&cancelled(json!(9)));
-        open.notified(&json!({ "method": "notifications/cancelled" }));
-        open.notified(&json!({ "method": "notifications/initialized" }));
+        open.notified(&cancelled(json!(9)), None);
+        open.notified(&json!({ "method": "notifications/cancelled" }), None);
+        open.notified(&json!({ "method": "notifications/initialized" }), None);
         // `"7"` is a string id, which is a different request from `7`.
-        open.notified(&cancelled(json!("7")));
+        open.notified(&cancelled(json!("7")), None);
 
         assert!(
             !open.finished(&id_key(&json!(8))),
