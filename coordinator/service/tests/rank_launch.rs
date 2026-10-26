@@ -64,6 +64,9 @@ impl eidolon_coordinator::managed_start::BriefTransport for NoTransport {
     fn send_correlated(&self, _: &str, _: &str, _: &str, _: &str) -> Result<eidolon_coordinator::managed_start::Correlated, String> {
         panic!("a held launch must not send a brief")
     }
+    fn wake(&self, _: &str, _: &str) -> Result<Delivery, String> {
+        panic!("a held launch must not wake a worker")
+    }
 }
 
 fn tmpdir(tag: &str) -> PathBuf {

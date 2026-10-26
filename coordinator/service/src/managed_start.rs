@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use crate::{Adoption, Outcome, Store, next_epoch, reconcile, store::SaveError};
+use crate::{Adoption, Delivery, Outcome, Store, next_epoch, reconcile, store::SaveError};
 
 /// Immutable admitted launch input. `caller` is harness-derived, never model input.
 /// An operation id identifies an attempt, not an address a peer resolver accepts.
@@ -36,11 +36,23 @@ pub struct Request {
     /// launch up to then was headless.
     #[serde(default)]
     pub shape: LaunchShape,
-    /// Where a **visible** child's window belongs, resolved by the caller
-    /// immediately before the call — the launch performs the placement, it
-    /// does not decide the policy of where workers go. Absent for a headless
-    /// launch, which has no window; required for a terminal one, which refuses
-    /// rather than guessing a workspace.
+    /// Where a **visible** child's window belongs.
+    ///
+    /// **Not a caller's input, and not resolved per attempt.** This sentence used
+    /// to say "resolved by the caller immediately before the call"; that design
+    /// was wrong and is corrected here rather than left to mislead. A caller that
+    /// re-resolves on every attempt cannot carry its answer across a retry — the
+    /// tool has no memory of it — so a retry after the Imperator's workspace moved
+    /// would present a different destination, differ from the admitted request,
+    /// and be refused as changed input.
+    ///
+    /// So the service resolves it **once**, on the first attempt of a terminal
+    /// operation, before the intent checkpoint, and pins it here; every retry is
+    /// reconciled against the recorded value and never re-resolves
+    /// (`lib::destination_for_operation`). The launch performs the placement; it
+    /// still does not decide the policy of where workers go. Absent for a headless
+    /// launch, which has no window; a terminal one with none is the one case the
+    /// service fills.
     #[serde(default)]
     pub destination: Option<i64>,
 }
@@ -95,6 +107,42 @@ pub enum BriefState {
     /// The recipient's build does not know the correlated op. Fail closed:
     /// no legacy message was sent in its place.
     Unsupported,
+}
+
+/// What became of the wake that follows a journaled brief.
+///
+/// The brief is journaled, not delivered: **a record in a log starts no turn**,
+/// so a start that stopped at the receipt had accepted work nothing would read.
+/// This is the ordinary message that asks the recipient to read that record.
+/// It carries no brief bytes and no delivery key, so the recipient's
+/// deduplication does not apply to it and a repeat is a second pointer, never a
+/// second brief.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WakeState {
+    #[default]
+    NotAttempted,
+    /// Write-ahead intent: after a crash, whether the wake arrived is
+    /// ambiguous, and the text names the same record either way.
+    Attempted,
+    /// The harness's own answer for an ordinary send. `delivered` and `queued`
+    /// mean the message is in the recipient's inbox; neither means a turn
+    /// started, and neither means the model read anything.
+    Answered { outcome: Outcome, words: String },
+    /// The send could not be made, or the harness answered something this
+    /// monitor cannot read. Said plainly, and not as success: the brief is
+    /// journaled and the accepted work has still not begun.
+    Undeliverable { why: String },
+}
+
+impl WakeState {
+    /// Whether the wake is known to have arrived, on the notice rule: a
+    /// `delivered` wake has arrived and a `queued` one is in the inbox, so
+    /// neither is ever sent again. Every other state delivered nothing this
+    /// monitor can rely on, and is re-attempted — a repeat being a pointer to
+    /// the record the log already holds.
+    pub fn arrived(&self) -> bool {
+        matches!(self, WakeState::Answered { outcome: Outcome::Delivered | Outcome::Queued, .. })
+    }
 }
 
 /// The receipt one correlated delivery produced — the recipient's log's own
@@ -177,6 +225,14 @@ pub trait BriefTransport: Send + Sync {
         binding_digest: &str,
         text: &str,
     ) -> Result<Correlated, String>;
+
+    /// Ask the recipient to take a turn: **ordinary inbox mail**, whose text
+    /// names the brief the log already holds. It is the one thing a correlated
+    /// delivery is not allowed to be — no delivery key, no digest, and the
+    /// harness refuses `--wake` beside either — so the recipient's deduplication
+    /// does not apply to it and a repeat is a second pointer, never a second
+    /// brief. The answer is a transport outcome; it is not evidence a turn ran.
+    fn wake(&self, to: &str, text: &str) -> Result<Delivery, String>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,6 +255,12 @@ pub struct StartRecord {
     /// different bytes.
     #[serde(default)]
     pub brief_binding_digest: Option<String>,
+    /// What became of the wake that follows the journaled brief. Defaulted on
+    /// read, so an operation recorded before the wake existed loads as
+    /// `NotAttempted` — which is exactly what it is: its brief is in the log
+    /// and nothing asked the worker to read it.
+    #[serde(default)]
+    pub wake: WakeState,
     #[serde(default)]
     pub cancellation: Option<Cancellation>,
 }
@@ -275,6 +337,12 @@ pub trait Host {
         delivery_key: &str,
         binding_digest: &str,
     ) -> Result<Correlated, String>;
+    /// Ask the recipient to take a turn: ordinary inbox mail whose text names
+    /// the brief the log already holds. **Not** a delivery and never a fallback
+    /// for one — it carries no brief bytes and no delivery key, so a second
+    /// wake is a second pointer rather than a second brief. The answer is a
+    /// transport outcome, never evidence that a turn ran.
+    fn wake(&mut self, request: &Request, session: &str, text: &str) -> Result<Delivery, String>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -284,6 +352,10 @@ pub struct Started {
     /// What the recipient's log established about the brief. Only `Journaled`
     /// or `Existing` can be reported here, and neither means it was read.
     pub brief: Correlated,
+    /// What became of the wake sent after the brief. `arrived` is transport
+    /// acceptance of an ordinary message; the turn it asks for is not observed
+    /// here and is never claimed.
+    pub wake: WakeState,
 }
 
 fn persist(
@@ -358,6 +430,66 @@ fn binding_digest(request: &Request, session: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The wake's own words: a **pointer at the record**, never a second copy of it.
+///
+/// The record id is what makes this checkable — a reader can open its own log at
+/// that record — and the sentence says out loud that this message is not the
+/// assignment, so nothing downstream mistakes a wake for a brief.
+fn wake_text(operation: &str, record: u64) -> String {
+    format!(
+        "Managed start `{operation}`: your assignment is journaled in this session's own log as record {record}. \
+         Read that record — it is the brief. This message is only the wake, sent because a journaled record does \
+         not start a turn, and it restates nothing."
+    )
+}
+
+/// Send the one wake that turns a journaled brief into a started turn.
+///
+/// **This is the repair of 2026-10-26.** A correlated delivery deliberately does
+/// not wake its recipient, so a start that stopped at the receipt had accepted
+/// work nothing would read: three recorded operations sat idle until somebody
+/// sent ordinary mail by hand. The wake is ordinary mail — no delivery key, no
+/// digest, no brief bytes, so the recipient's deduplication does not apply to it
+/// and a repeat cannot become a second brief.
+///
+/// It is attempted again only when the recorded answer says nothing arrived, on
+/// the same rule a notice follows: `delivered` has arrived and `queued` is in the
+/// inbox, so neither is sent twice; `failed`, `refused`, `partial`, an
+/// undeliverable transport and a bare write-ahead attempt are all re-attempted.
+fn wake_the_worker(
+    store: &mut Store,
+    index: usize,
+    request: &Request,
+    session: &str,
+    host: &mut dyn Host,
+    save: &mut dyn FnMut(&Store) -> Result<(), SaveError>,
+    load: &mut dyn FnMut() -> Result<Store, String>,
+) -> Result<WakeState, String> {
+    if store.starts[index].wake.arrived() {
+        return Ok(store.starts[index].wake.clone());
+    }
+    // A wake points at a record. Without one there is nothing to point at, and
+    // sending the text anyway would be a message about a record that is not there.
+    let record = match &store.starts[index].brief {
+        BriefState::Journaled { receipt } | BriefState::Existing { receipt } => receipt.record,
+        other => return Err(format!("a wake needs a journaled brief to point at; the brief is {other:?}")),
+    };
+    let text = wake_text(&request.operation, record);
+    // Write-ahead, for the same reason the brief's key is: after a crash the
+    // ambiguity is recorded rather than discovered.
+    let mut next = store.clone();
+    next.starts[index].wake = WakeState::Attempted;
+    persist(store, next, save, load)?;
+    let answered = host.wake(request, session, &text);
+    let mut next = store.clone();
+    next.starts[index].wake = match answered {
+        Ok(delivery) => WakeState::Answered { outcome: delivery.outcome, words: delivery.words },
+        Err(why) => WakeState::Undeliverable { why },
+    };
+    persist(store, next, save, load)?;
+    Ok(store.starts[index].wake.clone())
+}
+
 /// Complete or resume one admitted start. Errors describe partial/unknown state,
 /// never managed success. Intent, supervision and completion are separate durable
 /// checkpoints; retrying the same request reconciles them rather than spawning anew.
@@ -394,7 +526,8 @@ pub fn start(
             let mut next = store.clone();
             next.starts.push(StartRecord {
                 request: request.clone(), phase: Phase::Intent, session: None, adoption_epoch: None, brief: BriefState::NotAttempted,
-                brief_delivery_key: None, brief_binding_digest: None, cancellation: None,
+                brief_delivery_key: None, brief_binding_digest: None, wake: WakeState::NotAttempted,
+                cancellation: None,
             });
             persist(store, next, save, load)?;
             store.starts.len() - 1
@@ -578,7 +711,14 @@ pub fn start(
         next.starts[index].phase = Phase::Running;
         persist(store, next, save, load)?;
     }
-    Ok(Started { session, adoption_epoch: epoch, brief })
+    // ---- The wake: a record in the log starts no turn. ----
+    //
+    // After the brief is journaled and the child is running, one ordinary
+    // message points the worker at the record. It is not a delivery, it is not a
+    // second brief, and its answer is not evidence that a turn ran — only that a
+    // door took the mail.
+    let wake = wake_the_worker(store, index, request, &session, host, save, load)?;
+    Ok(Started { session, adoption_epoch: epoch, brief, wake })
 }
 
 /// Explicitly admitted cancellation, under the same Gate then Host lock order.

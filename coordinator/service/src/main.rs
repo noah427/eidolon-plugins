@@ -146,6 +146,13 @@ impl eidolon_coordinator::managed_start::BriefTransport for CliTransport {
             }),
         }
     }
+    /// The wake is ordinary inbox mail on the harness's own door — the same
+    /// call a notice takes, with `--wake` — and deliberately not a correlated
+    /// delivery: no key, no digest, and the harness refuses `--wake` beside a
+    /// delivery key anyway. The text names the record; it carries no brief.
+    fn wake(&self, to: &str, text: &str) -> Result<eidolon_coordinator::Delivery, String> {
+        <Self as Transport>::send(self, to, text)
+    }
 }
 
 impl Transport for CliTransport {
@@ -219,12 +226,81 @@ struct App {
     blocks: rank::Blocks,
     roster: Box<dyn Roster>,
     transport: Box<dyn Transport>,
+    /// The attestation a launch is admitted under — `<instance>@<unix seconds>` — or
+    /// `None` when there is no capability. Kept so a launch's own receipt names the
+    /// evidence it was admitted under instead of inheriting the process's state.
+    attestation: Option<String>,
+    /// Where a visible worker's destination comes from — the chain of starts to
+    /// the Imperator, then its window. Called **once per operation**, and never
+    /// for an operation the store already carries a destination for; a seam
+    /// because the tests need a compositor that answers differently each time.
+    resolver: Box<dyn eidolon_coordinator::Resolver>,
     // Lock order is always Gate, then process host. No caller-provided executable.
     launches: Mutex<eidolon_coordinator::process_host::ProcessHost>,
     /// Why the last scan could not see anything, kept so a tool answer can say it
     /// instead of reporting an empty watch.
     blind: Mutex<Vec<String>>,
     now: fn() -> u64,
+}
+
+/// **The no-focus capability, from the environment read once at start** — or the
+/// reason there is none.
+///
+/// Only the wiring is decided here: the parse and every check live in
+/// `ancestry::observed_no_focus`. Lookups are a closure so a test can drive this
+/// without touching this process's environment, which is the one surface of this
+/// file a caller could otherwise get past the guard through.
+///
+/// `service_started` is this process's own start in unix seconds: an attestation
+/// stamped before it is refused, because a claim older than the process serving it
+/// is a standing claim.
+struct Capability {
+    capability: std::sync::Arc<dyn eidolon_coordinator::ancestry::NoFocus>,
+    /// The **normalised** `<instance>@<observed_at>` the capability was built from:
+    /// what a launch's answer carries, rather than the raw environment spelling.
+    attested: String,
+}
+
+fn no_focus_from_env(
+    lookup: impl Fn(&str) -> Option<String>,
+    service_started: u64,
+    now: u64,
+) -> (Option<Capability>, Option<String>) {
+    let attested = lookup("EIDOLON_COORDINATOR_NOFOCUS_ATTESTED");
+    let live = lookup("HYPRLAND_INSTANCE_SIGNATURE");
+    match eidolon_coordinator::ancestry::observed_no_focus(
+        attested.as_deref(),
+        live.as_deref(),
+        service_started,
+        now,
+    ) {
+        Ok(Some(attestation)) => (
+            Some(Capability {
+                attested: attestation.attested_value(),
+                capability: std::sync::Arc::new(attestation),
+            }),
+            None,
+        ),
+        Ok(None) => (None, None),
+        // A value that cannot be read as an observation is reported, never silently
+        // dropped: whoever set it must be told why it is not in force, and the guard
+        // refuses either way.
+        Err(why) => (None, Some(why)),
+    }
+}
+
+/// Where the harness keeps its registrations — `<XDG_RUNTIME_DIR>/eidolon/<id>/meta.json`.
+///
+/// Refused rather than defaulted when the variable is absent: a service outside a
+/// graphical session has no runtime dir, and reading some other path would be
+/// guessing which machine's processes were meant.
+fn presence_root() -> Result<PathBuf, String> {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").map_err(|_| {
+        "this process has no XDG_RUNTIME_DIR, so it cannot read the presence directory that carries \
+         the caller's pid: nothing here will guess a path"
+            .to_string()
+    })?;
+    Ok(PathBuf::from(runtime).join("eidolon"))
 }
 
 fn now_ms() -> u64 {
@@ -388,8 +464,9 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
                         .into(),
                 );
             }
-            let mut request: eidolon_coordinator::managed_start::Request = serde_json::from_value(args.clone())
-                .map_err(|e| format!("invalid managed-start request: {e}"))?;
+            // `visible` is the caller's only say about shape; `shape` and
+            // `destination` are refused as inputs and determined here.
+            let mut request = eidolon_coordinator::request_from_args(args)?;
             if request.brief.trim().is_empty() || request.brief.len() > 65536 {
                 return Err("managed start needs a nonempty brief of at most 65536 bytes".into());
             }
@@ -397,6 +474,44 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
             // goes into the record is the digest of the bytes this launch will hand
             // the child. A rank with no written block binds nothing and adds nothing.
             request.rank_digest = app.blocks.resolve(request.rank.as_deref())?.map(|block| block.digest);
+            // **Resolved once per operation, then pinned.** A terminal operation with
+            // no recorded destination is resolved *before* the intent checkpoint, so
+            // the record and the launch agree; a retry of the same operation takes the
+            // destination from the record instead, because a second resolution could
+            // return a different number and the immutable input would then differ from
+            // the one this operation was admitted with.
+            // **The capability is checked before the resolver runs.** A refusal must
+            // not require compositor contact: if the refusing path first asked
+            // `hyprctl -j clients`, a slow, absent or badly-answering compositor would
+            // produce a different refusal or a failure before the guard's own sentence,
+            // and a refusal whose text depends on the compositor is not the pre-spawn
+            // refusal the design describes. Same sentence as the guard's, from one
+            // constant.
+            if request.shape == eidolon_coordinator::managed_start::LaunchShape::Terminal
+                && app.attestation.is_none()
+            {
+                return Err(eidolon_coordinator::process_host::NO_FOCUS_REFUSAL.into());
+            }
+            let rows = match app.roster.rows() {
+                Ok(rows) => rows,
+                // A headless launch needs no row: it has no window to place. A
+                // terminal one is refused with the roster's own words rather than
+                // with "no row for caller", which would blame the caller for a
+                // failure of the monitor's own reading.
+                Err(e)
+                    if request.shape == eidolon_coordinator::managed_start::LaunchShape::Terminal
+                        && request.destination.is_none() =>
+                {
+                    return Err(format!(
+                        "the roster could not be read, so the Imperator the destination is relative to \
+                         cannot be found: {e}"
+                    ))
+                }
+                Err(_) => Vec::new(),
+            };
+            let resolved = eidolon_coordinator::destination_for_operation(
+                &store, &rows, app.resolver.as_ref(), &caller, &mut request,
+            )?;
             let mut host = app.launches.lock().map_err(|_| "managed host lock poisoned")?;
             if !store.starts.iter().any(|r| r.request.caller == caller && r.request.operation == request.operation) {
                 host.register_fresh(&request)?;
@@ -418,7 +533,25 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
                     // `Journaled`/`Existing` say the record is in that log, and
                     // neither says the model read it.
                     "rank": request.rank, "rank_block_sha256": request.rank_digest,
+                    "shape": request.shape, "destination": request.destination,
+                    // `resolved` means the resolver ran on this attempt; `None` means
+                    // the operation already carried its destination. A number here is
+                    // the one in the record, never a fresh guess.
+                    // The evidence this launch was admitted under, with instance and
+                    // time, carried on the launch rather than inherited from the
+                    // process. Not durable: the record is the operation's, and this is
+                    // the answer's copy of it.
+                    "no_focus": app.attestation,
+                    "resolved": resolved.map(|d| serde_json::json!({
+                        "workspace": d.workspace, "root": d.root, "window": d.window,
+                    })),
                     "brief": started.brief, "brief_consumption": "not established",
+                    // The wake is the one message that asks the worker to read
+                    // that record. Its answer is a transport outcome: `delivered`
+                    // or `queued` mean the mail is in its inbox, and `undeliverable`
+                    // means the accepted work still has not begun — said in its own
+                    // field rather than smoothed into the receipt.
+                    "wake": started.wake, "turn_after_wake": "not established",
                 }).to_string()),
                 Err(error) => {
                     use eidolon_coordinator::managed_start::{Host, LaunchState, Phase};
@@ -746,6 +879,8 @@ fn usage() -> ! {
 
 #[tokio::main]
 async fn main() {
+    // This process's own start, in ms: an attestation stamped before it is refused.
+    let started_ms = now_ms();
     let mut once = false;
     let mut print_token = false;
     let mut interval_s: u64 = std::env::var("EIDOLON_COORDINATOR_INTERVAL_S")
@@ -803,6 +938,46 @@ async fn main() {
         }
     };
     let eidolon = std::env::var("EIDOLON_COORDINATOR_BIN").unwrap_or_else(|_| "eidolon".to_string());
+    // **The visible path is wired, and it refuses at its own guard.** A terminal
+    // and a compositor are offered here so that a visible request reaching this
+    // host is answered with the reason that actually applies — "this host cannot
+    // establish a no-focus map" — rather than with "this host has no terminal
+    // configured", which would be true but not the point.
+    //
+    // The no-focus capability is attached **only** when the operator has recorded
+    // a dated observation: `EIDOLON_COORDINATOR_NOFOCUS_ATTESTED` carries
+    // `<compositor instance>@<unix seconds>` — the instance a person watched the
+    // managed-worker rule hold in, and when. Read **once**, here; unset — the
+    // default, and the state after any restart — leaves the capability absent and
+    // guard four refusing every visible launch before a process exists. Nothing here
+    // can infer it, and a stamp older than this process is refused; see
+    // `ancestry::AttestedNoFocus`.
+    let (no_focus, no_focus_problem) =
+        no_focus_from_env(|key| std::env::var(key).ok(), started_ms / 1000, now_ms());
+    if let Some(why) = &no_focus_problem {
+        eprintln!("[coordinator] no no-focus capability is in force: {why}");
+    }
+    // Only an accepted attestation is carried into a launch's receipt; a rejected
+    // value is a reason in the log, never something a launch claims to have been
+    // admitted under.
+    // The value is carried from the parse, never re-read from the environment: one
+    // read, and what a launch's answer names is the claim as parsed.
+    let attestation = no_focus.as_ref().map(|c| c.attested.clone());
+    let mut launches = eidolon_coordinator::process_host::ProcessHost::new(
+        PathBuf::from(&eidolon), dir.join("launches"),
+        Box::new(CliRoster { eidolon: eidolon.clone() }), Box::new(CliTransport { eidolon: eidolon.clone() }),
+    )
+    .with_terminal(
+        std::env::var("EIDOLON_COORDINATOR_TERMINAL").unwrap_or_else(|_| "foot".to_string()),
+    )
+    .with_placement(std::sync::Arc::new(eidolon_coordinator::ancestry::Hyprland))
+    // The host re-reads a block here, right before it spawns, and compares
+    // it with the digest the operation was recorded with — the same
+    // directory this process read the digest from, never a caller's path.
+    .with_ranks(rank::Blocks::new(ranks_dir()));
+    if let Some(attached) = no_focus {
+        launches = launches.with_no_focus(attached.capability);
+    }
     let app = Arc::new(App {
         gate: Gate::new(opened),
         file,
@@ -812,28 +987,13 @@ async fn main() {
         blocks: rank::Blocks::new(ranks_dir()),
         roster: Box::new(CliRoster { eidolon: eidolon.clone() }),
         transport: Box::new(CliTransport { eidolon: eidolon.clone() }),
-        // **The visible path is wired, and it refuses at its own guard.** A
-        // terminal and a compositor are offered here so that a visible request
-        // reaching this host is answered with the reason that actually applies —
-        // "this host cannot establish a no-focus map" — rather than with "this
-        // host has no terminal configured", which would be true but not the
-        // point. Nothing establishes a no-focus map, so guard four still refuses
-        // every visible launch before a process exists; wiring the other two
-        // changes the sentence, not the behaviour.
-        launches: Mutex::new(
-            eidolon_coordinator::process_host::ProcessHost::new(
-                PathBuf::from(&eidolon), dir.join("launches"),
-                Box::new(CliRoster { eidolon: eidolon.clone() }), Box::new(CliTransport { eidolon }),
-            )
-            .with_terminal(
-                std::env::var("EIDOLON_COORDINATOR_TERMINAL").unwrap_or_else(|_| "foot".to_string()),
-            )
-            .with_placement(std::sync::Arc::new(eidolon_coordinator::ancestry::Hyprland))
-            // The host re-reads a block here, right before it spawns, and compares
-            // it with the digest the operation was recorded with — the same
-            // directory this process read the digest from, never a caller's path.
-            .with_ranks(rank::Blocks::new(ranks_dir())),
-        ),
+        attestation,
+        resolver: Box::new(eidolon_coordinator::ancestry::ImperatorChain {
+            presence: presence_root().ok(),
+            proc_root: PathBuf::from("/proc"),
+            compositor: std::sync::Arc::new(eidolon_coordinator::ancestry::Hyprland),
+        }),
+        launches: Mutex::new(launches),
         blind: Mutex::new(Vec::new()),
         now: now_ms,
     });
@@ -883,4 +1043,199 @@ fn unsafe_root(p: String) {
     // SAFETY: single-threaded here — this runs during argument parsing, before any
     // thread is started, and nothing else reads the environment concurrently.
     unsafe { std::env::set_var("EIDOLON_COORDINATOR_ROOT", p) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INSTANCE: &str = "663b29b846e4bad17cfa29941f6d2fbb6b61f139_1793036127_572132252";
+    /// This process started after the instance, before the stamp.
+    const STARTED: u64 = 1793036200;
+    const NOW: u64 = 1793036400;
+
+    fn lookup(pairs: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
+        move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone())
+    }
+
+    fn env(attested: Option<String>, live: Option<&str>) -> impl Fn(&str) -> Option<String> {
+        lookup(
+            [
+                ("EIDOLON_COORDINATOR_NOFOCUS_ATTESTED", attested),
+                ("HYPRLAND_INSTANCE_SIGNATURE", live.map(str::to_string)),
+            ]
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .collect(),
+        )
+    }
+
+    /// **The wiring, which is the only place the guard could be bypassed.** A dated
+    /// observation of the instance this process started against is attached, so the
+    /// host gets the capability and guard four stops refusing.
+    #[test]
+    fn a_dated_attestation_for_this_instance_is_attached() {
+        let (capability, problem) =
+            no_focus_from_env(env(Some(format!("{INSTANCE}@1793036300")), Some(INSTANCE)), STARTED, NOW);
+        assert!(problem.is_none(), "{problem:?}");
+        assert!(capability.is_some(), "a dated observation of this instance must attach");
+    }
+
+    /// Unset is the default and the state after any restart: nothing attached,
+    /// nothing claimed, no complaint.
+    #[test]
+    fn nothing_set_attaches_nothing_and_says_nothing() {
+        let (capability, problem) = no_focus_from_env(env(None, Some(INSTANCE)), STARTED, NOW);
+        assert!(capability.is_none());
+        assert!(problem.is_none());
+    }
+
+    /// A bare instance string — the form an earlier ruling asked for — is refused
+    /// **and reported**, because a record of which instance is not a record of an
+    /// observation.
+    #[test]
+    fn a_bare_instance_string_is_refused_and_reported() {
+        let (capability, problem) =
+            no_focus_from_env(env(Some(INSTANCE.into()), Some(INSTANCE)), STARTED, NOW);
+        assert!(capability.is_none());
+        assert!(problem.expect("a reason").contains("no `@`"));
+    }
+
+    /// A stamp older than the process serving it is a standing claim: refused, and
+    /// said so, rather than quietly absent.
+    #[test]
+    fn a_stamp_older_than_this_process_is_refused_and_reported() {
+        let (capability, problem) = no_focus_from_env(
+            env(Some(format!("{INSTANCE}@1793036150")), Some(INSTANCE)),
+            STARTED,
+            NOW,
+        );
+        assert!(capability.is_none(), "a standing claim must not attach");
+        assert!(problem.expect("a reason").contains("standing claim"));
+    }
+
+    /// Another instance's stamp never attaches, whatever else it says.
+    #[test]
+    fn another_instances_stamp_is_refused_and_reported() {
+        let other = "663b29b8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_1793000000_1";
+        let (capability, problem) = no_focus_from_env(
+            env(Some(format!("{other}@1793036300")), Some(INSTANCE)),
+            STARTED,
+            NOW,
+        );
+        assert!(capability.is_none());
+        assert!(problem.expect("a reason").contains("names compositor instance"));
+    }
+
+    /// And the refusal a caller reads is one sentence, from one constant, whether it
+    /// came from the service before the resolver ran or from the guard inside
+    /// `prepare`.
+    #[test]
+    fn the_refusal_sentence_is_the_guard_s_own() {
+        assert!(eidolon_coordinator::process_host::NO_FOCUS_REFUSAL.contains("cannot establish a no-focus map"));
+        assert!(eidolon_coordinator::process_host::NO_FOCUS_REFUSAL.contains("not permitted"));
+    }
+
+    /// **A refusal must not require compositor contact**, and until this test that was
+    /// only the order of two statements in `method`: the capability check stands above
+    /// `destination_for_operation`, where the resolver is entered. Every double here
+    /// panics on entry, so an edit that moves the check below the resolver fails this
+    /// test rather than quietly making a refusal's text depend on `hyprctl`.
+    ///
+    /// The fixture lives here because `App` and `method` are private to this module —
+    /// which is exactly why the property could not be pinned from an integration test.
+    #[test]
+    fn a_terminal_request_with_no_attestation_is_refused_before_any_compositor_contact() {
+        struct PanickingResolver;
+        impl eidolon_coordinator::Resolver for PanickingResolver {
+            fn destination(
+                &self,
+                _caller: &str,
+                _store: &eidolon_coordinator::Store,
+                _rows: &[eidolon_coordinator::Row],
+            ) -> Result<eidolon_coordinator::Destination, String> {
+                panic!("the resolver was entered: a request with no capability must be refused before any compositor contact")
+            }
+        }
+
+        /// Nothing in a refused start has a notice or a brief to carry, so reaching
+        /// either transport is the same failure as reaching the resolver.
+        struct PanickingTransport;
+        impl eidolon_coordinator::Transport for PanickingTransport {
+            fn send(&self, _to: &str, _text: &str) -> Result<eidolon_coordinator::Delivery, String> {
+                panic!("a notice was sent: a refused start has no notice to carry")
+            }
+        }
+        impl eidolon_coordinator::managed_start::BriefTransport for PanickingTransport {
+            fn send_correlated(
+                &self,
+                _to: &str,
+                _delivery_key: &str,
+                _binding_digest: &str,
+                _text: &str,
+            ) -> Result<eidolon_coordinator::managed_start::Correlated, String> {
+                panic!("a brief was delivered: a refused start has no brief to journal")
+            }
+            fn wake(&self, _to: &str, _text: &str) -> Result<eidolon_coordinator::Delivery, String> {
+                panic!("a wake was sent: a refused start never reaches the launch")
+            }
+        }
+
+        /// The roster is the one double that answers: a terminal request with no
+        /// destination is what the resolver is reached for, and the roster's own
+        /// emptiness must not be the thing that stops the walk first. It would not
+        /// stop it — `destination_for_operation` calls the resolver without reading
+        /// the rows — but a fixture that panics here too would prove less.
+        struct EmptyRoster;
+        impl eidolon_coordinator::Roster for EmptyRoster {
+            fn rows(&self) -> Result<Vec<eidolon_coordinator::Row>, String> {
+                Ok(Vec::new())
+            }
+        }
+
+        fn fixed_now() -> u64 {
+            NOW
+        }
+
+        let app = App {
+            gate: Gate::new(eidolon_coordinator::Store::default()),
+            // Never written: the refusal happens before the intent checkpoint.
+            file: PathBuf::from("/nonexistent/coordinator-store.json"),
+            token: "not-a-real-token".to_string(),
+            blocks: rank::Blocks::new(PathBuf::new()),
+            roster: Box::new(EmptyRoster),
+            transport: Box::new(PanickingTransport),
+            attestation: None,
+            resolver: Box::new(PanickingResolver),
+            launches: Mutex::new(eidolon_coordinator::process_host::ProcessHost::new(
+                PathBuf::from("/nonexistent/eidolon"),
+                PathBuf::from("/nonexistent/launches"),
+                Box::new(EmptyRoster),
+                Box::new(PanickingTransport),
+            )),
+            blind: Mutex::new(Vec::new()),
+            now: fixed_now,
+        };
+        let args = serde_json::json!({
+            "caller": "1793039941296",
+            "operation": "refusal-never-contacts-the-compositor",
+            "workspace": "/home/noah/Development/eidolon",
+            "model": "ollama:deepseek-v4.1-flash",
+            "brief": "a visible request with no capability attached",
+            "visible": true,
+        });
+        // The request really is the one the resolver is reached for — terminal, and
+        // carrying no destination — so nothing but the capability check stands between
+        // this call and `resolver.destination`.
+        let parsed = eidolon_coordinator::request_from_args(&args).expect("a valid request");
+        assert_eq!(parsed.shape, eidolon_coordinator::managed_start::LaunchShape::Terminal);
+        assert!(parsed.destination.is_none(), "a caller may not pin a destination, so none is set");
+
+        let refused = method(&app, "start", &args, NOW).expect_err("a terminal start with no attestation is refused");
+        assert_eq!(
+            refused.as_str(),
+            eidolon_coordinator::process_host::NO_FOCUS_REFUSAL,
+            "the refusal must be the guard's own sentence, not a compositor's failure"
+        );
+    }
 }

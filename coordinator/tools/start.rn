@@ -4,7 +4,7 @@
 pub fn manifest() {
     #{
         name: "coordinator_start",
-        description: "Start and adopt one managed worker as one operation. The harness holds the child before its first model turn; adoption is made durable before release. Name an operation id and retry ONLY the same immutable input to reconcile. An optional rank appends that rank's block (the plugin's ranks/<rank>.md) beside the persona at spawn; the monitor binds the digest of the block's exact bytes into the operation, so editing the file and retrying the same operation is refused, not re-told. A partial outcome is not success and never causes a blind replacement. The brief is one correlated delivery: a key minted once and stored before the send, so repeating this same operation carries the same key and the worker deduplicates it instead of receiving a second brief. The child currently uses persistent headless chat; desktop/persona enforcement is not implied. Model/spend/workspace permissions are decided by this call's dispatcher, not by rank. A journaled receipt says the record is in the worker's log; it is not proof the model read it, that a turn ran, or that the work happened. A correlated delivery does not wake the recipient.",
+        description: "Start and adopt one managed worker as one operation. The harness holds the child before its first model turn; adoption is made durable before release. Name an operation id and retry ONLY the same immutable input to reconcile. An optional rank appends that rank's block (the plugin's ranks/<rank>.md) beside the persona at spawn; the monitor binds the digest of the block's exact bytes into the operation, so editing the file and retrying the same operation is refused, not re-told. A partial outcome is not success and never causes a blind replacement. The brief is one correlated delivery: a key minted once and stored before the send, so repeating this same operation carries the same key and the worker deduplicates it instead of receiving a second brief. That delivery establishes a journal record in the worker's log — not execution, not consumption, and not a turn — and it wakes nobody. Separately from it, once the brief is journaled the monitor attempts one ordinary wake naming that record rather than restating it, because a journaled record starts no turn by itself. That is one attempt per start attempt, not a guarantee of delivery: `Answered` with `delivered` or `queued` has arrived and is never sent again, while `failed`, `refused`, `partial`, an `Undeliverable` wake and a bare `Attempted` are re-attempted — so repeating the operation re-attempts only the wake, never a second brief. The child uses persistent headless chat unless `visible` is true, in which case it runs in a terminal window whose destination the service decides and pins; a visible launch refuses before any process exists unless this host can establish a no-focus map, and desktop/persona enforcement is not implied either way. Model/spend/workspace permissions are decided by this call's dispatcher, not by rank. A journaled receipt says the record is in the worker's log; it is not proof the model read it, that a turn ran, or that the work happened. `wake` is the externally tagged `WakeState`: `Answered` carries the transport's `outcome` and `words`, and `Undeliverable` carries a `why`. An `Undeliverable` wake means no wake reached the worker and the accepted work has not begun.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
@@ -16,6 +16,7 @@ pub fn manifest() {
                 "persona": #{ "type": "string", "description": "Optional requested persona; not an authority grant or verified visibility claim." },
                 "rank": #{ "type": "string", "enum": ["imperator", "legatus", "tribunus", "miles", "centurio"],
                     "description": "Optional rank whose block under the plugin's ranks/ is appended beside the persona at spawn, through the CLI's generic --system-append. The monitor reads the block and binds the digest of its exact bytes into this operation's immutable input; a rank with no written block appends nothing. Not a persona rewrite, not an enforcement, and not a permission." },
+                "visible": #{ "type": "boolean", "description": "Ask for a desktop-visible child: the same managed child, in a terminal window, instead of a persistent headless chat. The workspace is NOT a caller's input — the service resolves it from the Imperator's own window, once per operation, and pins it in the record, so a retry reuses the destination the operation was admitted with. On a host that cannot promise the child will not take the operator's keyboard, a visible launch refuses at its guard before any process exists. Default false." },
                 "brief": #{ "type": "string", "description": "Bounded assignment journaled into the worker's own log after durable supervision, under a key minted once for this operation; not an inbox message, and it does not wake the worker." },
             },
             "required": ["operation", "workspace", "model", "brief"],
@@ -48,6 +49,23 @@ pub async fn call(input) {
             Some(e) => return Err(e),
             None => { args.insert("rank", rank); }
         },
+        None => {}
+    }
+    // A visible launch is a shape the caller may ask for and nothing more. There
+    // is no destination to send and none to invent: the service resolves it from
+    // the Imperator's own window on the first attempt and pins it in the record,
+    // so a retry reuses the admitted number instead of resolving a second time.
+    // Sent only when true, which keeps a headless call's payload byte-identical
+    // to what it was before this argument existed.
+    match input.get("visible") {
+        Some(v) => {
+            let said = `${v}`;
+            if said == "true" {
+                args.insert("visible", true);
+            } else if said != "false" {
+                return Err(`coordinator_start: \`visible\` must be true or false, not ${said}: a launch shape is not a string to be guessed at`);
+            }
+        }
         None => {}
     }
     call_service("start", args).await

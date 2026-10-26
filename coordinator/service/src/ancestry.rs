@@ -214,6 +214,33 @@ pub enum PlacementRefusal {
         /// The workspace name as given.
         name: String,
     },
+    /// No roster row carries the caller's address at all — a different fact
+    /// from a row whose registration cannot be read, and it asks the caller to
+    /// establish the address rather than to fix a directory.
+    NoRow {
+        /// The address the caller gave.
+        caller: String,
+    },
+    /// The chain of starts does not reach a session marked as the Imperator, so
+    /// "the Imperator's workspace + 1" has no Imperator to be relative to. Never
+    /// repaired by falling back to the caller's own workspace: that is the
+    /// silent wrong answer this variant exists to replace.
+    ChainBroken {
+        /// The session the walk had reached when it stopped.
+        at: String,
+        /// Which link is missing, in the walk's own words.
+        why: String,
+    },
+    /// The caller's registration could not be turned into a pid: no presence
+    /// directory, no readable `meta.json`, an `id` that disagrees with the name
+    /// looked up, or no usable pid in it. Named rather than folded into
+    /// `NoWindow`, because the two ask different questions of different people.
+    NoRegistration {
+        /// The registration directory the roster row named.
+        registration: String,
+        /// What was actually wrong, in the words of the read that failed.
+        why: String,
+    },
 }
 
 impl std::fmt::Display for PlacementRefusal {
@@ -230,6 +257,22 @@ impl std::fmt::Display for PlacementRefusal {
             PlacementRefusal::NotNumeric { name } => write!(
                 f,
                 "the Imperator is on the named workspace `{name}`, which has no numeric successor: ask where the worker should go"
+            ),
+            PlacementRefusal::NoRow { caller } => write!(
+                f,
+                "the roster carries no row for `{caller}`, so nothing here knows which process or window \
+                 that address is: a null `session` is not established, never `no such session`, and an \
+                 address is never matched from a name, a tag or a cwd"
+            ),
+            PlacementRefusal::ChainBroken { at, why } => write!(
+                f,
+                "the chain of starts does not reach an Imperator: it stopped at `{at}` because {why}. \
+                 The destination is the Imperator's workspace plus one, so with no Imperator there is \
+                 no number to place a worker on — and the caller's own workspace is not a substitute"
+            ),
+            PlacementRefusal::NoRegistration { registration, why } => write!(
+                f,
+                "the caller's registration `{registration}` cannot be turned into a process, so its window cannot be found: {why}"
             ),
         }
     }
@@ -249,6 +292,131 @@ pub fn destination(workspace_id: i64, workspace_name: &str) -> Result<i64, Place
         return Err(PlacementRefusal::NotNumeric { name: workspace_name.to_string() });
     }
     Ok(workspace_id + 1)
+}
+
+/// **The compositor's client list, behind a seam** — the read-only half of
+/// [`Placement`], split out because resolving a destination must be answerable
+/// *without* placing anything and must be testable without a compositor.
+///
+/// One query, one answer: `hyprctl -j clients`. A failure is the compositor's
+/// words, never an empty desktop — an empty list would silently mean "no window
+/// hosts this pid", which is a refusal with a different reason.
+pub trait Clients: Send + Sync {
+    /// Every window the compositor lists, parsed; a row it cannot describe is
+    /// dropped by [`parse_clients`], not defaulted.
+    fn clients(&self) -> Result<Vec<Client>, String>;
+}
+
+impl Clients for Hyprland {
+    fn clients(&self) -> Result<Vec<Client>, String> {
+        parse_clients(&hyprctl(&["-j", "clients"])?)
+    }
+}
+
+/// **Where a visible worker belongs, resolved from the caller's own registration.**
+///
+/// The three hops the design names, with every one of them a fact rather than an
+/// inference: the roster row names the caller's **registration directory**
+/// (`Row::id`), that directory's `meta.json` carries the harness's own `pid`
+/// (`crates/swarm/src/presence.rs::Meta`), and the `/proc` walk plus the client
+/// list turn that pid into the window hosting it — whose workspace, plus one, is
+/// the destination.
+///
+/// Deliberately **read-only**: it reads two files and a JSON list and returns a
+/// number with the window it came from. It places nothing, dispatches nothing,
+/// and is safe to call before any launch exists.
+///
+/// Refuses rather than guesses at every hop, including the one this function
+/// exists because of: the roster row's `pid` is **not** published by
+/// `eidolon peers --json` (`Row` has no such field), so `meta.json` is the only
+/// surface that carries it — and `meta.json` also lets a wrong-directory read be
+/// caught, since the file's own `id` must equal the registration asked for.
+pub fn destination_for(
+    presence_root: &Path,
+    proc_root: &Path,
+    registration: &str,
+    clients: &[Client],
+) -> Result<(i64, Client), PlacementRefusal> {
+    if registration.is_empty() {
+        return Err(PlacementRefusal::NoRegistration {
+            registration: registration.to_string(),
+            why: "the roster row carries no registration id, so there is no presence directory to read".into(),
+        });
+    }
+    let path = presence_root.join(registration).join("meta.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| PlacementRefusal::NoRegistration {
+        registration: registration.to_string(),
+        why: format!("{}: {e}", path.display()),
+    })?;
+    let meta: serde_json::Value = serde_json::from_str(&text).map_err(|e| PlacementRefusal::NoRegistration {
+        registration: registration.to_string(),
+        why: format!("{} is not JSON: {e}", path.display()),
+    })?;
+    // A registration directory whose own `id` disagrees with the name we looked
+    // up is a different registration, and its pid is somebody else's process.
+    if meta.get("id").and_then(|v| v.as_str()) != Some(registration) {
+        return Err(PlacementRefusal::NoRegistration {
+            registration: registration.to_string(),
+            why: format!("{} names registration {:?}, not `{registration}`", path.display(), meta.get("id")),
+        });
+    }
+    let pid = match meta.get("pid").and_then(|v| v.as_u64()) {
+        Some(pid) if pid > 0 && pid <= u32::MAX as u64 => pid as u32,
+        // Zero, too wide, or absent: a pid that would read as alive forever or
+        // name nothing. Not a guess.
+        other => {
+            return Err(PlacementRefusal::NoRegistration {
+                registration: registration.to_string(),
+                why: format!("{} carries no usable pid ({other:?})", path.display()),
+            })
+        }
+    };
+    plan_placement(proc_root, pid, clients)
+}
+
+/// **The real resolver** — the chain of starts to its root, that session's
+/// registration to its pid, and its window's workspace plus one. The number is
+/// *beside the chain root*; calling the root the Imperator is the convention, not
+/// this code's finding.
+///
+/// Two reads (one presence `meta.json`, one `hyprctl -j clients`) and a `/proc`
+/// walk. It places nothing, dispatches nothing and moves no window; whether it is
+/// *called at all* is the service's business, and `destination_for_operation`
+/// calls it once per operation and pins the answer in the record.
+pub struct ImperatorChain {
+    /// Where the harness keeps `<registration>/meta.json`, or `None` when this
+    /// process has no `XDG_RUNTIME_DIR`. `None` is a refusal at call time, never
+    /// a reason to stop the monitor: the headless path needs no runtime dir, and
+    /// a host that only ever starts headless children should still run.
+    pub presence: Option<std::path::PathBuf>,
+    /// `/proc`, named so a test can read a fixture.
+    pub proc_root: std::path::PathBuf,
+    /// The compositor's client list, read-only.
+    pub compositor: std::sync::Arc<dyn Clients>,
+}
+
+impl crate::Resolver for ImperatorChain {
+    fn destination(
+        &self,
+        caller: &str,
+        store: &crate::Store,
+        rows: &[crate::Row],
+    ) -> Result<crate::Destination, String> {
+        let root = crate::chain_root(&store.starts, rows, caller)?;
+        let row = rows
+            .iter()
+            .find(|r| r.session.as_deref() == Some(root.as_str()))
+            .ok_or_else(|| format!("the roster carries no row for the chain root `{root}`"))?;
+        let presence = self.presence.as_ref().ok_or_else(|| {
+            "this process has no XDG_RUNTIME_DIR, so it cannot read the presence directory that carries \
+             the Imperator's pid: nothing here will guess a path"
+                .to_string()
+        })?;
+        let clients = self.compositor.clients()?;
+        let (workspace, window) = destination_for(presence, &self.proc_root, &row.id, &clients)
+            .map_err(|e| e.to_string())?;
+        Ok(crate::Destination { workspace, root, window: window.address })
+    }
 }
 
 /// Where a visible worker spawned from `imperator_pid` belongs, with the
@@ -527,12 +695,16 @@ pub fn place_window(
 
 /// **The precondition a visible launch must satisfy before it may spawn.**
 ///
-/// A visible child must not take the operator's keyboard. Establishing that is
-/// a compositor capability this tree does **not** have: no mechanism has been
-/// validated (see the compositor-mutation incident note and the design note's
-/// unresolved no-focus section), so there is deliberately **no implementation
-/// of this trait anywhere**, and a host that cannot offer one cannot start a
-/// visible child at all.
+/// A visible child must not take the operator's keyboard. The mechanism is the
+/// operator's own config — a persistent window rule matching the launcher's
+/// class namespace — and nothing a launch can *do*; there is therefore exactly
+/// one **production** implementation, [`AttestedNoFocus`] (`DeclaredNoFocus`
+/// beside the guard's own tests is a stand-in that establishes nothing), and
+/// what it establishes is an
+/// **attestation**: that a person watched the rule hold in the compositor
+/// instance this launch is about to spawn into. A host that cannot offer one
+/// cannot start a visible child at all, and [`observed_no_focus`] is the only
+/// thing that supplies it.
 ///
 /// That is the difference this seam exists to enforce: a launch may not spawn a
 /// window and then disclaim the guarantee in a comment. The check runs **before
@@ -546,6 +718,220 @@ pub trait NoFocus: Send + Sync {
 /// A no-focus map that has been established. Dropping it releases the map, so
 /// a launch that fails after establishing one does not leave it behind.
 pub trait NoFocusGuard {}
+
+/// **The one no-focus capability this tree can honestly offer: an attestation,
+/// not a mechanism.**
+///
+/// The operator's compositor config carries a persistent rule
+/// (`coordinator-managed-worker-no-focus`) matching `^(eidolon-worker-[0-9a-f]+)$`
+/// with `no_initial_focus = true` and no monitor or workspace property — the
+/// namespace [`crate::launch::APP_ID_PREFIX`] builds, and it is deliberately the
+/// only class the rule can match. Nothing is added, removed or dispatched at
+/// launch: the rule is in the config the compositor loads, when such a window
+/// closes the rule matches nothing, and there is no cleanup call that could
+/// overreach. That is the shape the compositor-mutation incident receipt
+/// requires, and it is why this type performs no compositor call at all.
+///
+/// **What it cannot do is prove the rule is in force.** No IPC lists window
+/// rules (`hyprctl --help`'s command list has none), and the design forbids
+/// inferring effectiveness from a file: reading `hyprland.lua` shows what would
+/// be loaded, not what this instance loaded, nor that Hyprland applied it. So
+/// the only honest thing left is a person's observation, carried here as an
+/// attestation: **`<instance>@<unix seconds>`** — the compositor instance someone
+/// watched a managed worker map in without taking the keyboard, **and when**.
+///
+/// **What the bound is, exactly.** Both environment values are read **once, at
+/// process start**, and a process's environment does not change when the
+/// compositor is replaced. So a compositor restarted while this service runs is
+/// invisible to it: the comparison is a construction-time check, not a live
+/// watch, and restarting the service is what re-reads it. Two checks give the
+/// value an expiry rather than a mere equality: the stamp must not predate this
+/// process's own start, and it must not predate the compositor instance it names.
+///
+/// The guarantee is procedural, and saying so is the point: **an attestation is
+/// an operator grant, not a proof.** Nothing here establishes that a window will
+/// not take focus, and the code cannot tell an observation recorded after a run
+/// from a decision made before one — it records whose claim that is, and when.
+#[derive(Debug)]
+pub struct AttestedNoFocus {
+    /// `HYPRLAND_INSTANCE_SIGNATURE` at the moment the observation was recorded.
+    attested_instance: String,
+    /// `HYPRLAND_INSTANCE_SIGNATURE` in the environment this process started with.
+    live_instance: String,
+    /// When the observation was recorded, unix seconds — the part that makes this
+    /// a record of an *observation* rather than of an instance name.
+    observed_at: u64,
+    /// When **this process** started, unix seconds: an attestation stamped before
+    /// it is refused, so what a launch inherits cannot be older than the process
+    /// serving it.
+    service_started: u64,
+}
+
+impl AttestedNoFocus {
+    /// The value this attestation came from, normalised to
+    /// `<instance>@<observed_at>` — what a launch's answer carries, rather than the
+    /// raw environment bytes it was spelled with.
+    pub fn attested_value(&self) -> String {
+        format!("{}@{}", self.attested_instance, self.observed_at)
+    }
+}
+
+impl NoFocus for AttestedNoFocus {
+    fn establish(&self, app_id: &str) -> Result<Box<dyn NoFocusGuard>, String> {
+        if self.live_instance != self.attested_instance {
+            return Err(format!(
+                "the no-focus rule was observed in compositor instance `{}`, but this process was \
+                 started against `{}`: an observation does not carry over a compositor restart",
+                self.attested_instance, self.live_instance
+            ));
+        }
+        if self.observed_at.saturating_add(ATTESTATION_GRACE_S) < self.service_started {
+            return Err(format!(
+                "the attestation is stamped {} but this process started at {}: an attestation older \
+                 than the process serving it is a standing claim, and a standing claim is what this \
+                 value exists to replace",
+                self.observed_at, self.service_started
+            ));
+        }
+        match instance_start(&self.attested_instance) {
+            Some(began) if self.observed_at >= began => {}
+            Some(began) => {
+                return Err(format!(
+                    "the attestation is stamped {} but compositor instance `{}` began at {began}: an \
+                     observation cannot be older than the compositor it observed",
+                    self.observed_at, self.attested_instance
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "compositor instance `{}` carries no parseable start time, so the attestation's \
+                     timestamp cannot be placed against it",
+                    self.attested_instance
+                ))
+            }
+        }
+        if !crate::launch::is_managed_worker_class(app_id) {
+            return Err(format!(
+                "`{app_id}` is outside the `{}<launch id>` class namespace the operator's \
+                 no-focus rule matches, so the rule would not apply to this window",
+                crate::launch::APP_ID_PREFIX
+            ));
+        }
+        Ok(Box::new(PersistentRuleGuard))
+    }
+}
+
+/// The rule lives in the compositor's configuration and a launch neither adds
+/// nor removes it, so releasing this guard is deliberately nothing. It exists so
+/// that "established" and "released" stay one type on every path out of a
+/// launch, and so a future launch-scoped primitive can be dropped in without
+/// changing a call site.
+pub struct PersistentRuleGuard;
+
+impl NoFocusGuard for PersistentRuleGuard {}
+
+/// **The attestation's own start time**, out of the instance signature.
+///
+/// Hyprland's signature is `<commit>_<unix-seconds>_<monotonic>`; the middle field
+/// is when that instance began. Measured on this host, 2026-10-26: instance
+/// `…_1793036127_572132252` against `ps -o lstart` for its pid, 13:35:26, one
+/// second apart. A signature without a parseable middle field is `None`, which
+/// every caller turns into a refusal: a stamp means nothing if it cannot be placed
+/// against the instance it is about.
+/// **How late a stamp may legitimately be, in seconds.**
+///
+/// The value is read once at start and must not predate that start, so a stamp
+/// composed by the launching shell (`@$(date +%s)`) would otherwise fail by exec
+/// latency — punishing the honest procedure and rewarding a stamp written into the
+/// future. A few seconds of tolerance admits the honest case; a leftover stamp from
+/// a previous run is minutes or hours old and is still refused.
+pub const ATTESTATION_GRACE_S: u64 = 3;
+
+pub fn instance_start(signature: &str) -> Option<u64> {
+    signature.split('_').nth(1)?.parse().ok()
+}
+
+/// **The attestation, only when it is current and dated** — `None` when nothing was
+/// recorded, and a refusal when what was recorded cannot be read as an observation.
+///
+/// The value is `<instance>@<unix-seconds>`. Two equal strings were never an
+/// observation — any invented instance satisfies that — so the stamp is parsed and
+/// placed against two things: **this process's own start** (an older stamp is a
+/// standing claim, which is exactly what the value replaces) and the compositor
+/// instance's start (an observation cannot predate the compositor it observed). A
+/// value that is missing, malformed, about another instance, or too old is refused
+/// with a reason rather than quietly becoming `None`.
+///
+/// **Operational consequence, stated because it is easy to miss.** The value is
+/// read once at start, and it must not be stamped before that start. So the only
+/// stamp that passes is one produced **as this process is launched** — the same
+/// command that starts the service has to compose it, and a value written after the
+/// service is up is refused by the very check that stops it being standing.
+pub fn observed_no_focus(
+    attested: Option<&str>,
+    live: Option<&str>,
+    service_started: u64,
+    now: u64,
+) -> Result<Option<AttestedNoFocus>, String> {
+    let value = match attested {
+        None => return Ok(None),
+        Some("") => return Ok(None),
+        Some(value) => value,
+    };
+    let (instance, seconds) = value.split_once('@').ok_or_else(|| {
+        format!(
+            "the attestation `{value}` carries no `@`: it must be `<compositor instance>@<unix \
+             seconds>`, because a record of which instance is not a record of an observation"
+        )
+    })?;
+    let observed_at: u64 = seconds.parse().map_err(|_| {
+        format!("the attestation `{value}` does not carry a unix-seconds timestamp after `@`")
+    })?;
+    let live = live.ok_or_else(|| {
+        "this process has no HYPRLAND_INSTANCE_SIGNATURE, so there is no instance an attestation \
+         could be about"
+            .to_string()
+    })?;
+    if instance != live {
+        return Err(format!(
+            "the attestation names compositor instance `{instance}`, but this process was started \
+             against `{live}`: an observation is about one instance and does not carry over a restart"
+        ));
+    }
+    let began = instance_start(live).ok_or_else(|| {
+        format!(
+            "compositor instance `{live}` carries no parseable start time, so the attestation cannot \
+             be placed against it"
+        )
+    })?;
+    if observed_at < began {
+        return Err(format!(
+            "the attestation is stamped {observed_at} but instance `{live}` began at {began}: an \
+             observation cannot be older than the compositor it observed"
+        ));
+    }
+    if observed_at.saturating_add(ATTESTATION_GRACE_S) < service_started {
+        return Err(format!(
+            "the attestation is stamped {observed_at} but this process started at {service_started}: an \
+             attestation more than {ATTESTATION_GRACE_S}s older than the process serving it is a \
+             standing claim (a few seconds of slack is allowed for a stamp composed as the service \
+             is launched), and a standing claim is \
+             what this value exists to replace. It has to be composed as the service is launched"
+        ));
+    }
+    if observed_at > now.saturating_add(60) {
+        return Err(format!(
+            "the attestation is stamped {observed_at}, later than this process's clock ({now}): a stamp \
+             from the future is not a record of an observation"
+        ));
+    }
+    Ok(Some(AttestedNoFocus {
+        attested_instance: instance.to_string(),
+        live_instance: live.to_string(),
+        observed_at,
+        service_started,
+    }))
+}
 
 /// **The compositor, behind a seam**, so a launch can be tested without one
 /// and so the one implementation that talks to a live compositor is the only
@@ -752,5 +1138,156 @@ mod compositor_tests {
         // Not JSON, or not a list, is a refusal — not an empty desktop.
         assert!(parse_clients("not json").is_err());
         assert!(parse_clients(r#"{"windows":[]}"#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod no_focus_tests {
+    use super::*;
+
+    const INSTANCE: &str = "663b29b846e4bad17cfa29941f6d2fbb6b61f139_1793036127_572132252";
+    const CLASS: &str = "eidolon-worker-0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    /// The instance began at 1793036127; the stamp is after it.
+    const STAMP: u64 = 1793036300;
+    const NOW: u64 = 1793036400;
+
+    fn fresh() -> String {
+        format!("{INSTANCE}@{STAMP}")
+    }
+
+    /// `Box<dyn NoFocusGuard>` is not `Debug`, so `unwrap_err` is unavailable and
+    /// the refusal is taken by matching.
+    fn refusal(result: Result<Box<dyn NoFocusGuard>, String>) -> String {
+        match result {
+            Ok(_) => panic!("expected a refusal"),
+            Err(why) => why,
+        }
+    }
+
+    /// **The one case that establishes anything**: a dated observation of this
+    /// instance, stamped after the process started, for a class the rule matches —
+    /// and what it establishes is a guard that releases nothing.
+    #[test]
+    fn a_dated_attestation_for_this_instance_covers_our_own_class_only() {
+        let capability = observed_no_focus(Some(&fresh()), Some(INSTANCE), 0, NOW)
+            .expect("readable")
+            .expect("attested");
+        assert!(capability.establish(CLASS).is_ok());
+        for class in [
+            "Alacritty",
+            "foot",
+            "eidolon-worker-",
+            "eidolon-worker-XYZ",
+            "eidolon-worker-0f1e2d3c4b5a69788796a5b4c3d2e1f0 ",
+            "eidolon-worker-0f1e2d3c4b5a69788796a5b4c3d2e1f_",
+        ] {
+            let refused = refusal(capability.establish(class));
+            assert!(refused.contains("namespace"), "{class}: {refused}");
+        }
+    }
+
+    /// **A record of which instance is not a record of an observation.** The value
+    /// must carry a stamp, and the stamp is placed against the instance it names.
+    #[test]
+    fn the_value_must_carry_a_stamp_and_the_stamp_must_fit_the_instance() {
+        // A bare instance — the form an earlier ruling asked the operator to set.
+        let refused = observed_no_focus(Some(INSTANCE), Some(INSTANCE), 0, NOW).unwrap_err();
+        assert!(refused.contains("no `@`"), "{refused}");
+        // A stamp before the instance began cannot be an observation of it.
+        let refused = observed_no_focus(
+            Some(&format!("{INSTANCE}@1793036000")),
+            Some(INSTANCE),
+            0,
+            NOW,
+        )
+        .unwrap_err();
+        assert!(refused.contains("older than the compositor"), "{refused}");
+        // A stamp from the future is not a record of anything.
+        let refused = observed_no_focus(Some(&format!("{INSTANCE}@1793099999")), Some(INSTANCE), 0, NOW)
+            .unwrap_err();
+        assert!(refused.contains("from the future"), "{refused}");
+        // No stamp to parse at all.
+        let refused = observed_no_focus(Some(&format!("{INSTANCE}@later")), Some(INSTANCE), 0, NOW)
+            .unwrap_err();
+        assert!(refused.contains("unix-seconds timestamp"), "{refused}");
+    }
+
+    /// **The service-start bound**: an attestation older than the process serving it
+    /// is a standing claim, and is refused both where the value is read and again by
+    /// `establish`, which cannot be talked out of it.
+    #[test]
+    fn a_stamp_older_than_this_process_is_refused() {
+        // More than the grace window late: refused.
+        let refused = observed_no_focus(Some(&fresh()), Some(INSTANCE), STAMP + 10, NOW).unwrap_err();
+        assert!(refused.contains("standing claim"), "{refused}");
+        // And the same refusal from the guard itself, on a hand-built value.
+        let hand_built = AttestedNoFocus {
+            attested_instance: INSTANCE.into(),
+            live_instance: INSTANCE.into(),
+            observed_at: STAMP,
+            service_started: STAMP + 10,
+        };
+        let refused = refusal(hand_built.establish(CLASS));
+        assert!(refused.contains("standing claim"), "{refused}");
+    }
+
+    /// **The honest procedure passes.** A stamp composed by the launching shell is a
+    /// second or two older than the process it was handed to, by exec latency; that is
+    /// timing, not a standing claim.
+    #[test]
+    fn a_stamp_a_couple_of_seconds_older_than_this_process_is_accepted() {
+        let capability = observed_no_focus(Some(&fresh()), Some(INSTANCE), STAMP + 2, NOW)
+            .expect("readable");
+        assert!(capability.is_some(), "exec latency must not read as a standing claim");
+    }
+
+    /// An observation is about one instance: another instance's stamp does not
+    /// carry over a compositor restart.
+    #[test]
+    fn an_observation_does_not_carry_over_a_compositor_restart() {
+        let other = "663b29b8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_1793000000_1";
+        let refused = observed_no_focus(Some(&format!("{other}@1793036300")), Some(INSTANCE), 0, NOW)
+            .unwrap_err();
+        assert!(refused.contains("names compositor instance"), "{refused}");
+        let hand_built = AttestedNoFocus {
+            attested_instance: other.into(),
+            live_instance: INSTANCE.into(),
+            observed_at: STAMP,
+            service_started: 0,
+        };
+        let refused = refusal(hand_built.establish(CLASS));
+        assert!(refused.contains("does not carry over"), "{refused}");
+    }
+
+    /// Nothing set is nothing claimed; anything set is a refusal with a reason,
+    /// never a quiet `None`.
+    #[test]
+    fn without_a_value_nothing_is_supplied() {
+        assert!(observed_no_focus(None, Some(INSTANCE), 0, NOW).unwrap().is_none());
+        assert!(observed_no_focus(Some(""), Some(INSTANCE), 0, NOW).unwrap().is_none());
+        assert!(observed_no_focus(Some(&fresh()), None, 0, NOW)
+            .unwrap_err()
+            .contains("no HYPRLAND_INSTANCE_SIGNATURE"));
+    }
+
+    /// Releasing the guard is inert by design — the rule is the operator's, not the
+    /// launch's, so there is no compositor call to make and none that could overreach.
+    #[test]
+    fn releasing_the_guard_dispatches_nothing() {
+        let capability = observed_no_focus(Some(&fresh()), Some(INSTANCE), 0, NOW)
+            .expect("readable")
+            .expect("attested");
+        let guard = capability.establish(CLASS).expect("in namespace");
+        drop(guard);
+    }
+
+    /// The signature's middle field is the instance's start, measured against this
+    /// host's own compositor on 2026-10-26 (`_1793036127_` and `ps -o lstart` giving
+    /// 13:35:26).
+    #[test]
+    fn the_instance_signature_carries_its_start_time() {
+        assert_eq!(instance_start(INSTANCE), Some(1793036127));
+        assert_eq!(instance_start("no-fields-here"), None);
+        assert_eq!(instance_start("a_notanumber_c"), None);
     }
 }

@@ -33,6 +33,27 @@ use crate::managed_start::LaunchShape;
 /// matching it. Neither file can enforce the other, so both say so.
 pub const APP_ID_PREFIX: &str = "eidolon-worker-";
 
+/// **Whether a window class is inside the namespace the no-focus rule matches.**
+///
+/// The operator's rule matches `^(eidolon-worker-[0-9a-f]+)$`; this is that test
+/// in code, so a launcher asked to stand behind a class the rule cannot match
+/// refuses instead of promising something the rule will not deliver.
+///
+/// **No live path exercises the refusal today, and that is deliberate.** The
+/// service builds the class as `APP_ID_PREFIX` plus 16 random bytes formatted as
+/// lowercase hex, so it is always inside the namespace; the check is defence in
+/// depth for a future caller, and a test asserts the boundary rather than a call
+/// site proving it.
+pub fn is_managed_worker_class(app_id: &str) -> bool {
+    match app_id.strip_prefix(APP_ID_PREFIX) {
+        Some(rest) => {
+            !rest.is_empty()
+                && rest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        None => false,
+    }
+}
+
 /// The terminal a visible launch runs through, and the labels it carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Terminal {
@@ -266,5 +287,29 @@ mod tests {
         )
         .unwrap();
         assert!(!head.args.iter().any(|a| a == "--persona"), "{:?}", head.args);
+    }
+
+    /// The no-focus rule's `[0-9a-f]+` namespace, in code. The launcher's own
+    /// class is inside it; nothing else is *nearly* inside it. The uppercase
+    /// case matters: the compositor's regex is case-sensitive and admits no
+    /// uppercase hex, so a class carrying it would silently not match the rule.
+    #[test]
+    fn only_the_launcher_namespace_matches_the_no_focus_rule() {
+        assert!(is_managed_worker_class(
+            "eidolon-worker-0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+        ));
+        assert!(is_managed_worker_class("eidolon-worker-a"));
+        for outside in [
+            "eidolon-worker-",
+            "eidolon-worker-ABCDEF",
+            "eidolon-worker-xyz",
+            "eidolon-worker0f1",
+            "eidolon-worker-eidolon-worker-a",
+            "eidolon-worker- a",
+            "eidolon-worker",
+            "foot",
+        ] {
+            assert!(!is_managed_worker_class(outside), "{outside}");
+        }
     }
 }

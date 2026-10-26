@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Mutex;
-use eidolon_coordinator::{Store, managed_start::{self, BriefState, BriefTransport, Correlated, Host, LaunchState, LogBinding, Phase, Receipt, Request}, store::SaveError};
+use eidolon_coordinator::{Delivery, Outcome, Store, managed_start::{self, BriefState, BriefTransport, Correlated, Host, LaunchState, LogBinding, Phase, Receipt, Request, WakeState}, store::SaveError};
 
 const SESSION: &str = "1792962214694";
 
@@ -46,14 +46,24 @@ struct Call {
 struct FakeBriefs {
     answers: Mutex<VecDeque<Answer>>,
     calls: Mutex<Vec<Call>>,
+    /// Wakes, as (recipient, text). A test that is about the wake scripts an
+    /// answer; unscripted, a wake answers `delivered`, which is the ordinary
+    /// case and keeps every other fixture free of wake noise.
+    wake_answers: Mutex<VecDeque<Result<Delivery, String>>>,
+    wakes: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeBriefs {
     fn new(answers: impl IntoIterator<Item = Answer>) -> Self {
-        Self { answers: Mutex::new(answers.into_iter().collect()), calls: Mutex::new(Vec::new()) }
+        Self {
+            answers: Mutex::new(answers.into_iter().collect()), calls: Mutex::new(Vec::new()),
+            wake_answers: Mutex::new(VecDeque::new()), wakes: Mutex::new(Vec::new()),
+        }
     }
 
     fn calls(&self) -> Vec<Call> { self.calls.lock().unwrap().clone() }
+
+    fn wake_calls(&self) -> Vec<(String, String)> { self.wakes.lock().unwrap().clone() }
 }
 
 impl BriefTransport for FakeBriefs {
@@ -79,6 +89,14 @@ impl BriefTransport for FakeBriefs {
             None => panic!("the brief was sent more times than the test scripted"),
         }
     }
+
+    fn wake(&self, to: &str, text: &str) -> Result<Delivery, String> {
+        self.wakes.lock().unwrap().push((to.into(), text.into()));
+        match self.wake_answers.lock().unwrap().pop_front() {
+            Some(scripted) => scripted,
+            None => Ok(Delivery { outcome: Outcome::Delivered, words: "delivered".into() }),
+        }
+    }
 }
 
 struct FakeHost {
@@ -89,6 +107,7 @@ struct FakeHost {
     releases: usize,
     turns: usize,
     brief_sends: usize,
+    wakes: usize,
     lose_prepare_reply: bool,
     lose_release_reply: bool,
     ignore_release: bool,
@@ -138,6 +157,23 @@ impl Host for FakeHost {
         self.brief_sends += 1;
         self.briefs.send_correlated(session, delivery_key, binding_digest, &request.brief)
     }
+
+    fn wake(&mut self, request: &Request, session: &str, text: &str) -> Result<Delivery, String> {
+        let disk = self.disk.borrow();
+        let record = disk.starts.iter().find(|r| r.request == *request).unwrap();
+        // A wake follows a running child and a journaled brief, and its own
+        // write-ahead attempt is durable before the transport is given anything
+        // — the same order the brief follows.
+        assert_eq!(record.phase, Phase::Running, "a wake follows a running child, never a held one");
+        assert!(
+            matches!(record.brief, BriefState::Journaled { .. } | BriefState::Existing { .. }),
+            "a wake points at a journaled brief"
+        );
+        assert_eq!(record.wake, WakeState::Attempted, "the wake attempt must be durable before the send");
+        drop(disk);
+        self.wakes += 1;
+        self.briefs.wake(session, text)
+    }
 }
 
 struct Fixture {
@@ -158,7 +194,7 @@ impl Fixture {
             briefs: briefs.clone(),
             host: FakeHost {
                 disk: Rc::new(RefCell::new(Store::default())), briefs, state: LaunchState::NotCreated,
-                prepares: 0, releases: 0, turns: 0, brief_sends: 0, lose_prepare_reply: false,
+                prepares: 0, releases: 0, turns: 0, brief_sends: 0, wakes: 0, lose_prepare_reply: false,
                 lose_release_reply: false, ignore_release: false, lose_liveness_after_release: false,
             },
         }
@@ -166,6 +202,14 @@ impl Fixture {
 
     fn with_answers() -> Self {
         Self::new([Answer::Journaled])
+    }
+
+    /// A fixture whose wake answers are scripted. The brief is journaled and
+    /// the child runs, as in `with_answers`; only the wake's answer differs.
+    fn with_wake_answers(wake_answers: impl IntoIterator<Item = Result<Delivery, String>>) -> Self {
+        let f = Self::with_answers();
+        *f.briefs.wake_answers.lock().unwrap() = wake_answers.into_iter().collect();
+        f
     }
 
     fn run(&mut self, request: &Request) -> Result<managed_start::Started, String> {
@@ -211,7 +255,10 @@ fn complete_start_is_supervised_before_the_first_turn_and_retries_are_idempotent
 #[test]
 fn each_persistence_failure_is_partial_not_success_and_restart_recovers_without_an_extra_child() {
     for uncertain in [false, true] {
-        for checkpoint in 1..=6 {
+        // One save per durable checkpoint: intent, adoption, the reflush before
+        // release, the brief's attempt and receipt, the running phase, and the
+        // wake's attempt and answer.
+        for checkpoint in 1..=8 {
             // A keyed repeat is answered `Existing`: the recipient recognises
             // the key and appends nothing.
             let mut f = Fixture::new([Answer::Journaled, Answer::Existing]);
@@ -510,6 +557,123 @@ fn a_legacy_inbox_acceptance_is_not_reported_as_a_correlated_receipt() {
     let error = f.run(&request()).unwrap_err();
     assert!(error.contains("legacy inbox transport"), "{error}");
     assert_eq!(f.briefs.calls().len(), 1, "an accepted legacy brief is not sent again");
+}
+
+// ---- the wake --------------------------------------------------------------
+//
+// A correlated delivery does not wake its recipient, by design: the record is in
+// the log and it reads that at its next turn. A headless child at its prompt is
+// not going to take one, so a start that stopped at the receipt — which is what
+// it did until 2026-10-26 — had accepted work nothing would read, and a person
+// had to send ordinary mail by hand to begin it. These are the regression tests.
+
+/// The wake is the message the brief is not: one ordinary message naming the
+/// record in the worker's own log, carrying no brief bytes and no second
+/// delivery.
+#[test]
+fn a_journaled_brief_is_followed_by_one_wake_that_names_the_record_and_restates_nothing() {
+    let mut f = Fixture::with_answers();
+    let started = f.run(&request()).unwrap();
+    let wakes = f.briefs.wake_calls();
+    assert_eq!(wakes.len(), 1, "one managed start, one wake");
+    let (to, text) = &wakes[0];
+    assert_eq!(to, SESSION, "the wake goes to the adopted child");
+    assert!(text.contains(&request().operation), "the wake names the operation: {text}");
+    assert!(text.contains("record 7"), "the wake names the record the log holds: {text}");
+    assert!(!text.contains(&request().brief), "the wake never restates the brief: {text}");
+    assert_eq!(f.briefs.calls().len(), 1, "the brief is sent once, correlated, and not again");
+    assert_eq!(f.host.wakes, 1);
+    assert_eq!(
+        started.wake,
+        WakeState::Answered { outcome: Outcome::Delivered, words: "delivered".into() }
+    );
+    // Two messages, one brief: the record, and a pointer at it.
+    assert_eq!(f.store.starts[0].wake, started.wake);
+    assert!(matches!(f.store.starts[0].brief, BriefState::Journaled { .. }));
+}
+
+/// A settled operation re-sends neither the brief nor the wake.
+#[test]
+fn a_repeat_after_an_arrived_wake_sends_nothing_again() {
+    let mut f = Fixture::with_answers();
+    let first = f.run(&request()).unwrap();
+    f.restart_monitor();
+    assert_eq!(f.run(&request()).unwrap(), first);
+    assert_eq!(f.briefs.calls().len(), 1, "no second brief");
+    assert_eq!(f.briefs.wake_calls().len(), 1, "no second wake");
+    assert_eq!(f.host.wakes, 1);
+}
+
+/// `delivered` has arrived and `queued` is in the inbox, so neither is sent
+/// again; `failed` and `refused` delivered nothing this monitor can rely on, and
+/// are re-attempted on the notice rule. Nothing in this loop re-sends the brief.
+#[test]
+fn only_an_arrived_wake_is_never_repeated() {
+    for (answer, repeated) in [
+        (Ok(Delivery { outcome: Outcome::Delivered, words: "delivered".into() }), false),
+        (Ok(Delivery { outcome: Outcome::Queued, words: "queued".into() }), false),
+        (Ok(Delivery { outcome: Outcome::Partial, words: "partial".into() }), true),
+        (Ok(Delivery { outcome: Outcome::Failed, words: "failed".into() }), true),
+        (Ok(Delivery { outcome: Outcome::Refused, words: "refused".into() }), true),
+    ] {
+        let mut f = Fixture::with_wake_answers([answer.clone()]);
+        f.run(&request()).unwrap();
+        f.restart_monitor();
+        f.run(&request()).unwrap();
+        assert_eq!(
+            f.briefs.wake_calls().len(),
+            if repeated { 2 } else { 1 },
+            "{} must{} be re-sent",
+            answer.as_ref().map(|d| d.outcome.word()).unwrap_or("an undeliverable wake"),
+            if repeated { "" } else { " not" }
+        );
+        assert_eq!(f.briefs.calls().len(), 1, "a wake repeat never re-sends the brief");
+    }
+}
+
+/// A wake the transport could not make is reported in its own field, not
+/// swallowed and not dressed as success: the record is in the log, the child is
+/// running, and the accepted work still has not begun.
+#[test]
+fn an_undeliverable_wake_is_reported_and_leaves_the_record_journaled() {
+    let mut f = Fixture::with_wake_answers([
+        Err("the doorbell socket refused the connection".into()),
+        Err("still refused".into()),
+    ]);
+    let started = f.run(&request()).unwrap();
+    let WakeState::Undeliverable { why } = &started.wake else {
+        panic!("a wake that never left is not success: {:?}", started.wake)
+    };
+    assert!(why.contains("refused the connection"), "{why}");
+    assert!(matches!(f.store.starts[0].brief, BriefState::Journaled { .. }), "the record stays in the log");
+    assert_eq!(f.store.starts[0].phase, Phase::Running);
+    // A repeat says the same thing again rather than quietly becoming success,
+    // and it re-attempts only the wake.
+    f.restart_monitor();
+    assert!(matches!(f.run(&request()).unwrap().wake, WakeState::Undeliverable { .. }));
+    assert_eq!(f.briefs.calls().len(), 1, "an undeliverable wake never becomes a second brief");
+    assert_eq!(f.briefs.wake_calls().len(), 2, "each repeat re-attempts the wake, and only the wake");
+}
+
+/// Cut off between the wake's write-ahead attempt and its answer, the ambiguity
+/// is the durable fact; the repeat points at the same record again and still
+/// sends no second brief.
+#[test]
+fn a_wake_cut_off_after_its_attempt_is_re_attempted_and_is_not_a_second_brief() {
+    let mut f = Fixture::with_answers();
+    f.fail_at = Some(8); // the wake's answer never becomes durable
+    f.uncertain = true;
+    f.uncertain_keeps_old = true;
+    assert!(f.run(&request()).is_err());
+    assert_eq!(f.store.starts[0].wake, WakeState::Attempted, "the attempt is what is durable");
+    assert_eq!(f.briefs.wake_calls().len(), 1);
+    f.restart_monitor();
+    f.fail_at = None;
+    f.run(&request()).unwrap();
+    let wakes = f.briefs.wake_calls();
+    assert_eq!(wakes.len(), 2, "the repeat points at the same record again");
+    assert_eq!(wakes[0].1, wakes[1].1, "the same pointer, not a new assignment");
+    assert_eq!(f.briefs.calls().len(), 1, "and never sends the brief again");
 }
 
 // ---- the rank binding ------------------------------------------------------

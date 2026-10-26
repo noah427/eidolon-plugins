@@ -44,11 +44,21 @@ keeps the answer as itself: `Journaled` (this call appended the record), `Existi
 own kind, `Unknown` (no durable acceptance and no evidence of absence), or
 `Unsupported` (the worker's build does not know the op — nothing was sent and no
 legacy message was sent in its place). None of them is consumption or execution
-proof, and a correlated delivery does not wake the recipient: the record is in its
-log and it reads that at its next turn. A repeat of the same immutable operation
-re-sends under the same key, which the recipient deduplicates, and retrying an
-operation whose record is already journaled sends nothing at all. After monitor
-restart, missing process/channel receipts mean Unknown, not permission to respawn.
+proof, and **a correlated delivery does not wake the recipient**: the record is in
+its log and it reads that at its next turn. A repeat of the same immutable
+operation re-sends under the same key, which the recipient deduplicates, and
+retrying an operation whose record is already journaled sends nothing at all.
+
+Because a record in a log starts no turn, the start path does not stop there: once
+the brief is journaled and the child is running, the monitor sends **one ordinary
+wake** — inbox mail carrying no brief bytes and no delivery key, whose text names
+the operation and the record in the worker's own log. Its answer is kept as
+`Answered` (`delivered`/`queued` have arrived, and are never sent again;
+`failed`/`refused`/`partial` are re-attempted) or `Undeliverable`, which says the
+record is in the log and the accepted work has still not begun — repeating the
+operation re-attempts the wake and never a second brief. `delivered`/`queued` mean
+the mail is in the worker's inbox; none of these words means a turn started. After
+monitor restart, missing process/channel receipts mean Unknown, not permission to respawn.
 Monitor death closes the chat's owned stdin; the child exits at its input boundary
 and journals the closure. No automatic recovery budget, context compaction,
 retirement policy or live deployment is implied.
