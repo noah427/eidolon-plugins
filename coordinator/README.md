@@ -295,6 +295,30 @@ than only a process death. Three rules beside that:
   durable address changes, an adoption stops resolving and is reported as unresolved
   — never silently rebound to whatever now looks similar.
 
+## The port
+
+The monitor binds `127.0.0.1:8095` and nothing else. That number appears in three
+places — every tool's `service()` (`base_url`), this plugin's `readiness` block, and the
+monitor's own `DEFAULT_PORT` constant — and `tests/coordinator/run.sh` checks that the
+three agree. **It is not configurable.** It used to be, through
+`EIDOLON_COORDINATOR_PORT`, and that variable is gone: nothing else in the plugin could
+follow it. `eidolon plugins service start` awaits readiness on the port this plugin
+*declares* and terminates the process when it does not answer, so a monitor listening
+on a port of its own choosing was killed fifteen seconds after a healthy start. A knob
+that destroys the service it configures is worse than no knob.
+
+Two consequences worth knowing:
+
+- **One coordinator per host, by construction.** A second monitor cannot bind 8095 and
+  exits naming the port. That is the design, not an accident of a literal.
+- **A fixture needs 8095 free.** If a coordinator is running on this host, run the
+  fixtures inside a private network namespace, where 8095 is nobody's until the fixture
+  takes it: `unshare -rn sh -c 'ip link set lo up; HOME=… bash tests/coordinator/run.sh'`
+  (with the same `HOME`/`XDG_*` variables as below). `ack-failure.sh` is the exception —
+  its subject is a store the process must *fail* to write, and a user namespace maps you
+  to uid 0, which writes into a read-only directory regardless. Run that one on a host
+  with a free 8095 and no namespace.
+
 ## Prerequisites
 
 - eidolon with the plugin runtime and the structured roster, and `eidolon` on `PATH`.
@@ -327,7 +351,7 @@ hash, so editing `plugin.rn` asks again; the monitor makes
 eidolon plugins service status coordinator          # the /health probe
 t=$(mktemp -d)
 HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
-  bash tests/coordinator/run.sh                     # the fixture: 43 checks
+  bash tests/coordinator/run.sh                     # the fixture: 53 checks
 HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
   bash tests/coordinator/ack-failure.sh             # the process stops when it cannot write: 8 checks
 python3 tests/coordinator/rank-launch.py target/debug/eidolon-coordinator
@@ -335,8 +359,8 @@ python3 tests/coordinator/rank-launch.py target/debug/eidolon-coordinator
 cargo test -p eidolon-coordinator                   # the monitor's own 103 (one ignored fixture entry)
 ```
 
-The fixture drives the real monitor against a stand-in harness — its own port, its
-own state root, a fake `eidolon` answering `peers --json` and `send --json` — and
+The fixture drives the real monitor against a stand-in harness — the fixed port above,
+its own state root, a fake `eidolon` answering `peers --json` and `send --json` — and
 then checks that the shipped tools refuse, naming what is missing, against the real
 harness. It proves the plumbing, not the harness.
 

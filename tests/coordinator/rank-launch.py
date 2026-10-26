@@ -19,7 +19,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import socket
 import shutil
 import subprocess
 import sys
@@ -96,15 +95,14 @@ os.write(fd, line.encode())
 ''')
     fake.chmod(0o755)
 
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    for tool in (plugin / "tools").glob("*.rn"):
-        tool.write_text(tool.read_text().replace("127.0.0.1:8095", f"127.0.0.1:{port}"))
+    # The monitor binds 8095 and every tool's `service()` dials it; neither can be told
+    # otherwise, so this run owns that port instead of choosing one — and the tools under
+    # test are the SHIPPED bytes, never a copy rewritten to point somewhere else.
+    port = 8095
 
     monitor_root = root / "monitor"
     log_file = (root / "monitor.log").open("wb")
-    env.update(EIDOLON_COORDINATOR_PORT=str(port), EIDOLON_COORDINATOR_BIN=str(fake),
+    env.update(EIDOLON_COORDINATOR_BIN=str(fake),
                EIDOLON_COORDINATOR_INTERVAL_S="600", EIDOLON_COORDINATOR_RANKS=str(plugin / "ranks"))
 
     def health():

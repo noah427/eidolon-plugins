@@ -40,14 +40,11 @@ check_absent() {
     fi
 }
 
-port=
-for p in 8095 8094 8095 8096 8097 8098; do
-    if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; then
-        port=$p
-        break
-    fi
-done
-[ -n "$port" ] || { say "FAIL no free port"; exit 1; }
+# Fixed, like the plugin declares it; the monitor cannot be told to use another.
+port=8095
+if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+    say "FAIL 127.0.0.1:$port is already answering, and the monitor cannot use another port"; exit 1
+fi
 
 work=$(mktemp -d)
 monitor=
@@ -84,7 +81,6 @@ fi
 root=$work/state
 export EIDOLON_COORDINATOR_ROOT=$root
 export EIDOLON_COORDINATOR_BIN=$work/eidolon
-export EIDOLON_COORDINATOR_PORT=$port
 export EIDOLON_COORDINATOR_INTERVAL_S=1
 export EIDOLON_COORDINATOR_TOKEN=$XDG_CONFIG_HOME/eidolon/coordinator.token
 

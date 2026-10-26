@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -50,11 +49,10 @@ with tempfile.TemporaryDirectory(prefix="eidolon-managed-start-") as directory:
     work.mkdir()
     plugin = config / "plugins/coordinator"
     shutil.copytree(SOURCE, plugin)
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    for tool in (plugin / "tools").glob("*.rn"):
-        tool.write_text(tool.read_text().replace("127.0.0.1:8095", f"127.0.0.1:{port}"))
+    # The monitor binds 8095 and every tool's `service()` dials it; neither can be told
+    # otherwise, so this run owns that port instead of choosing one — and the tools under
+    # test are the SHIPPED bytes, never a copy rewritten to point somewhere else.
+    port = 8095
     (plugin / "workflows").mkdir(exist_ok=True)
     (plugin / "workflows/managed.rn").write_text('''
 pub fn workflow() {
@@ -67,7 +65,7 @@ pub async fn run(input) {
     Ok(#{ first: first, again: again })
 }
 ''')
-    env.update(EIDOLON_COORDINATOR_PORT=str(port), EIDOLON_COORDINATOR_BIN=EIDOLON,
+    env.update(EIDOLON_COORDINATOR_BIN=EIDOLON,
                EIDOLON_COORDINATOR_INTERVAL_S="60")
     monitor_root = root / "monitor"
     log_file = (root / "monitor.log").open("wb")
@@ -118,8 +116,11 @@ pub async fn run(input) {
         assert len(state["starts"]) == 1, output
         record = state["starts"][0]
         assert record["phase"] == "Running", (record, output)
-        assert "Accepted" in record["brief"], record
-        assert record["brief"]["Accepted"]["outcome"] in ("delivered", "queued")
+        assert "Journaled" in record["brief"], record
+        receipt = record["brief"]["Journaled"]["receipt"]
+        assert receipt["session"] == record["session"], (receipt, record)
+        assert receipt["delivery_key"] == record["brief_delivery_key"], (receipt, record)
+        assert receipt["binding_digest"] == record["brief_binding_digest"], (receipt, record)
         assert len(state["records"]) == 1, state
         address = record["session"]
         log = root / "data/eidolon/sessions" / f"{address}.eid"

@@ -31,6 +31,11 @@ use eidolon_coordinator::{
 };
 use subtle::ConstantTimeEq;
 
+/// The port the tools and `plugin.rn` name in their own files. This process binds it
+/// and nothing else: an override here is one neither of those two can follow, and
+/// `service start` would kill a monitor that honoured one (README, "The port").
+const DEFAULT_PORT: u16 = 8095;
+
 /// Where the roster comes from.
 ///
 /// `eidolon peers --json` is the process-level face of the same row builder the
@@ -1014,10 +1019,7 @@ async fn main() {
         });
     }
 
-    let port: u16 = std::env::var("EIDOLON_COORDINATOR_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8095);
+    let port: u16 = DEFAULT_PORT;
     let router = Router::new()
         .route("/health", get(health))
         .route("/call", post(call))

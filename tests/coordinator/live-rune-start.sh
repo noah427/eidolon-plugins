@@ -113,7 +113,7 @@ if [ "$pin_line" != unreadable ]; then
 fi
 
 export EIDOLON_COORDINATOR_ROOT=$w/store EIDOLON_COORDINATOR_BIN=$EID \
-       EIDOLON_COORDINATOR_PORT=8095 EIDOLON_COORDINATOR_INTERVAL_S=1 \
+       EIDOLON_COORDINATOR_INTERVAL_S=1 \
        EIDOLON_COORDINATOR_TOKEN=$HOME/.config/eidolon/coordinator.token
 "$COORD" --print-token >/dev/null
 say "monitor: 127.0.0.1:8095 inside a private namespace | token file present: $([ -f "$EIDOLON_COORDINATOR_TOKEN" ] && echo yes || echo no)"
