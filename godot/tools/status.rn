@@ -1,0 +1,62 @@
+// `godot_status`: what the bridge is in front of. The one verb that answers with
+// no editor attached — and then the answer *is* "no editor attached", carrying the
+// reason, rather than a refusal that says the same thing in the shape of an error.
+// It is also how a caller watches something asynchronous settle: `godot_run play`
+// reports what the editor said at that instant, and this says what it says now.
+pub fn manifest() {
+    #{
+        name: "godot_status",
+        description: "Report what the Godot bridge is in front of, with or without an editor. From this host: whether an editor is attached, since when, how long since anything arrived from it, and how many calls are waiting on it. From the editor, when one is attached: the project and engine it dialled in from, the scene it is editing and its root node, whether that scene has unsaved changes, the scenes it has open, which scene the project would play, whether it is playing, and which nodes the operator currently has selected. When nothing is attached the answer carries `reason`, naming the addon that has to be enabled and where the README says the rest.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{},
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("status", input).await
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is the same in every godot_*.rn: upstream compiles each of
+// these files on its own, and a tool file is meant to be handed over whole.
+
+// The bridge host (../service). `eidolon plugins service start godot` runs it, and
+// the editor's addon dials it; the tools come in the other side. Change the port
+// here and the host's EIDOLON_GODOT_PORT together, and the token file here and
+// EIDOLON_GODOT_TOKEN_FILE.
+fn service() {
+    #{
+        name: "godot",
+        base_url: "http://127.0.0.1:8092",
+        token_file: "~/.config/eidolon/godot.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the host is not running. There is one command that
+    // fixes that, so the answer names it rather than leaving a connection refusal
+    // to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the godot bridge is not answering on 127.0.0.1:8092 — the eidolon-godot service has to be running (\`eidolon plugins service start godot\`); see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`the godot bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok {
+        Ok(out.result)
+    } else {
+        Err(out.error)
+    }
+}

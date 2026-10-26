@@ -1,0 +1,55 @@
+// `librewolf_tabs`: every tab in the browser, by title and id, and whether each
+// one is enabled. Metadata only: listing a tab enables nothing, reads nothing,
+// and grants nothing.
+pub fn manifest() {
+    #{
+        name: "librewolf_tabs",
+        description: "Inventory every tab of the operator's own LibreWolf session, including background tabs in other windows: each tab's id, its title, and whether a person has enabled it for the assistant. This is metadata and nothing more — it does not enable a tab, does not attach to one, does not read any page, and grants no access to any content; the only thing that enables a tab is a person clicking the extension's toolbar button on it. Enabled tabs are marked here; librewolf_status says which document each enabled tab is showing.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{},
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("tabs", input).await
+}
+// Everything below is the same in every librewolf_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed
+// over whole.
+
+// The bridge host (../service). LibreWolf starts it, not eidolon: the browser
+// runs it as its native messaging host, so there is no `eidolon plugins service
+// start librewolf` to name. Change the port here and the host's
+// EIDOLON_LIBREWOLF_PORT together.
+fn service() {
+    #{
+        name: "librewolf",
+        base_url: "http://127.0.0.1:8091",
+        token_file: "~/.config/eidolon/librewolf.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the browser is not running with the extension, or
+    // no profile has it loaded. There is no command that fixes that, so the
+    // answer names the one act that does instead of leaving a refusal to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the LibreWolf bridge is not answering on 127.0.0.1:8091 — LibreWolf must be running with the librewolf bridge extension connected, because the browser starts this host and eidolon cannot; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`librewolf bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok { Ok(out.result) } else { Err(out.error) }
+}

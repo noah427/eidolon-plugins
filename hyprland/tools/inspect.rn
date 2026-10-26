@@ -1,0 +1,372 @@
+// `hyprland_inspect`: what the compositor says right now — monitors, workspaces, and
+// every window with the identity, geometry and focus that a later call is checked
+// against. Reads only: nothing here changes what the session shows.
+//
+// Hyprland 0.56 answers `hyprctl -j monitors|workspaces|clients|activewindow|cursorpos`
+// with JSON; the coordinate space is the layout's, in logical pixels (a window on a
+// second 1920x1080 monitor at x=1920 reports `at: [1934, 69]`), which is also the space
+// `grim -g` and the input verbs use. `scale` and `transform` of the owning monitor are
+// reported beside every rect because the *pixels* of a screenshot are not these numbers.
+//
+// Visibility is derived, not read. hyprctl's workspace records have no `visible` field, and its
+// per-window `visible` is about the window's own surface (`!hidden && mapped && …`) rather than
+// about which workspace an output is showing — a mapped, unhidden window on a workspace nobody
+// is showing answers `true`. So `visible` here is worked out from the monitors' active and
+// special workspaces, and the raw field is kept beside it as `compositor_visible`.
+
+pub fn manifest() {
+    #{
+        name: "hyprland_inspect",
+        description: "Look at a Hyprland session: monitors (name, position, size, scale, transform, active and special workspace), workspaces (id, name, monitor, window count, whether an output is showing it, whether it is a special), every window (address, stableId, title, class, pid, monitor, workspace, at, size, focused, visible, compositor_visible, mapped, hidden, pinned, accepts_input) and the current cursor position. `visible` means on a screen now, and is worked out from the monitors: a workspace is shown when it is an enabled output's active workspace or the special workspace that output has open, and a window is on screen when it is mapped, unhidden and either on such a workspace or pinned to such an output. hyprctl's own per-window field is reported beside it as `compositor_visible` because it does not answer this: it is about the window's surface, and is true for a mapped, unhidden window on a workspace no output is showing. Every window carries a `fingerprint` — the identity and geometry of that moment — which hyprland_focus, hyprland_screenshot, hyprland_click, hyprland_scroll, hyprland_type and hyprland_key take as `expect` and re-check before acting, so a window that moved, resized, changed workspace or died and had its address reused is refused rather than acted on. Read-only: it never focuses, switches or captures anything.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "format": #{ "type": "string", "enum": ["text", "json"], "description": "text (default): one line per monitor, workspace and window. json: the same records as one JSON object, for a script or workflow that reads fields." },
+            },
+        },
+    }
+}
+
+pub async fn call(input) {
+    let format = match input.get("format") {
+        Some(f) => if f is String { f } else { "text" },
+        None => "text",
+    };
+    if format != "text" && format != "json" {
+        return Err(`format is "text" or "json", not "${format}"`);
+    }
+    let monitors = hypr_json(["-j", "monitors"]).await?;
+    let workspaces = hypr_json(["-j", "workspaces"]).await?;
+    let clients = hypr_json(["-j", "clients"]).await?;
+    let active = hypr_json(["-j", "activewindow"]).await?;
+    let cursor = hypr_json(["-j", "cursorpos"]).await?;
+    let active_address = str_field(active, "address");
+
+    let windows = [];
+    for w in clients {
+        windows.push(window_record(monitors, w, active_address));
+    }
+    let out = #{
+        monitors: monitor_records(monitors),
+        workspaces: workspace_records(monitors, workspaces),
+        windows: windows,
+        active: active_address,
+        cursor: #{ x: int_field(cursor, "x"), y: int_field(cursor, "y") },
+    };
+    if format == "json" {
+        Ok(json::to_string(out)?)
+    } else {
+        Ok(render_text(out))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is the same in every hyprland tool file: upstream compiles each
+// tool file on its own, and a tool file is meant to be handed over whole.
+
+const HYPRCTL = "hyprctl";
+const EXEC_TIMEOUT_S = 15;
+
+fn join(parts, sep) {
+    let out = "";
+    let first = true;
+    for p in parts {
+        if first {
+            first = false;
+        } else {
+            out += sep;
+        }
+        out += p;
+    }
+    out
+}
+
+// `exec` renders a failed call into its output rather than raising, so a command that
+// never ran has to be told apart from one that answered.
+fn exec_failed(out) {
+    out.starts_with("[exit code") || out.starts_with("[timed out")
+        || out.starts_with("[cancelled") || out.starts_with("[killed")
+}
+
+async fn hypr(args) {
+    let out = eidolon::exec(HYPRCTL, args, Some(EXEC_TIMEOUT_S)).await?;
+    if exec_failed(out) {
+        return Err(`hyprctl ${join(args, " ")} failed: ${out.trim()} -- is Hyprland running, and is this process inside its session (WAYLAND_DISPLAY, HYPRLAND_INSTANCE_SIGNATURE)?`);
+    }
+    Ok(out)
+}
+
+async fn hypr_json(args) {
+    let out = hypr(args).await?;
+    match json::from_string(out) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(`hyprctl ${join(args, " ")} did not answer JSON (${e}): ${out.trim()}`),
+    }
+}
+
+fn str_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is String { v } else { `${v}` },
+        None => "",
+    }
+}
+
+fn int_field(m, name) {
+    match m.get(name) {
+        Some(v) => as_int(v),
+        None => 0,
+    }
+}
+
+fn bool_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is bool { v } else { false },
+        None => false,
+    }
+}
+
+fn as_int(v) {
+    if v is i64 {
+        v
+    } else if v is f64 {
+        v as i64
+    } else {
+        0
+    }
+}
+
+fn vec_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is Vec { v } else { [] },
+        None => [],
+    }
+}
+
+// A pair of layout coordinates or a w×h, as `[a, b]`; a missing or malformed one is
+// [0, 0] and the record says so through `geometry_known`.
+fn pair(m, name) {
+    let v = vec_field(m, name);
+    if v.len() == 2 {
+        [as_int(v[0]), as_int(v[1])]
+    } else {
+        [0, 0]
+    }
+}
+
+fn geometry_known(m) {
+    vec_field(m, "at").len() == 2 && vec_field(m, "size").len() == 2
+}
+
+fn workspace_of_window(w) {
+    match w.get("workspace") {
+        Some(v) => v,
+        None => #{},
+    }
+}
+
+// Whether an output is showing this workspace right now. hyprctl's workspace records carry no
+// `visible` field at all (Hyprland 0.56 prints id, name, monitor, monitorID, windows,
+// hasfullscreen, lastwindow, lastwindowtitle, ispersistent, tiledLayout), so it has to be
+// worked out from the monitors: a workspace is on a screen when it is an enabled output's
+// active workspace, or the special workspace that output has open — specials are named
+// `special:<name>` and the monitor reports that same name, which is how the two are matched.
+// This is the compositor's own rule (CWorkspace::isVisibleNotCovered), and an open special does
+// not stop the workspace underneath it from being shown: opening one never clears the other's
+// visible flag (Monitor::setSpecialWorkspace), so both answer true here.
+fn shown_by(monitors, ws) {
+    let id = int_field(ws, "id");
+    let name = str_field(ws, "name");
+    for m in monitors {
+        if bool_field(m, "disabled") {
+            continue;
+        }
+        match m.get("activeWorkspace") {
+            Some(a) => {
+                if id > 0 && int_field(a, "id") == id {
+                    return Some(str_field(m, "name"));
+                }
+            }
+            None => {}
+        }
+        match m.get("specialWorkspace") {
+            Some(s) => {
+                if name != "" && str_field(s, "name") == name {
+                    return Some(str_field(m, "name"));
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn workspace_shown(monitors, ws) {
+    match shown_by(monitors, ws) {
+        Some(name) => name != "",
+        None => false,
+    }
+}
+
+// A special workspace is the compositor's own id range for one (WorkspaceQueryCore: ids from
+// SPECIAL_WORKSPACE_START, -99, up to -2), not a field hyprctl reports.
+fn is_special_workspace(ws) {
+    let id = int_field(ws, "id");
+    id >= -99 && id <= -2
+}
+
+fn monitor_by_id(monitors, id) {
+    for m in monitors {
+        if int_field(m, "id") == id {
+            return Some(m);
+        }
+    }
+    None
+}
+
+// Whether the window is on a screen right now — which is *not* what hyprctl's per-window
+// `visible` says. Upstream defines that one as `!m_hidden && m_isMapped && surface &&
+// visibleByAlpha()` (CWindow::visible): it describes the window's own surface inside its
+// workspace, not which workspace an output is showing. Measured on this session (Hyprland
+// 0.56), a mapped, unhidden window on a workspace no output is showing answers
+// `visible: true` — so it cannot be used to decide whether acting on it would land on what is
+// on screen. On screen means: mapped, not hidden, and either the window's workspace is one an
+// output is showing, or the window is pinned — a pinned window is rendered on whatever
+// workspace its output is showing, whatever its own workspace field says
+// (IHyprRenderer::shouldRenderWindow returns true for a pinned window). Neither this nor
+// anything else here accounts for occlusion: a window behind a fullscreen one is reported on
+// screen, and the capture and input verbs say in their answers that they cannot bind to a
+// window.
+fn window_on_screen(monitors, w) {
+    if !bool_field(w, "mapped") {
+        return false;
+    }
+    if bool_field(w, "hidden") {
+        return false;
+    }
+    if bool_field(w, "pinned") {
+        match monitor_by_id(monitors, int_field(w, "monitor")) {
+            Some(m) => !bool_field(m, "disabled"),
+            None => false,
+        }
+    } else {
+        workspace_shown(monitors, workspace_of_window(w))
+    }
+}
+
+// What a later call is held to: identity (address, stable id, pid, class), the
+// workspace, and the geometry that was on screen. The title is deliberately not in it —
+// a terminal rewrites its title as you work in it, and refusing a click because a shell
+// changed its prompt would be a false alarm; `title_at_inspect` is reported so a caller
+// can compare it by hand. An address on its own is not identity: Hyprland reuses the
+// pointer when a window dies, and stableId, pid and class are what tell the two apart.
+fn fingerprint(w) {
+    let at = pair(w, "at");
+    let size = pair(w, "size");
+    let ws = workspace_of_window(w);
+    `${str_field(w, "address")}|${str_field(w, "stableId")}|${int_field(w, "pid")}|${str_field(w, "class")}|${str_field(ws, "name")}|${at[0]},${at[1]}|${size[0]}x${size[1]}`
+}
+
+fn window_record(monitors, w, active_address) {
+    let at = pair(w, "at");
+    let size = pair(w, "size");
+    let ws = workspace_of_window(w);
+    let address = str_field(w, "address");
+    #{
+        address: address,
+        stable_id: str_field(w, "stableId"),
+        title: str_field(w, "title"),
+        class: str_field(w, "class"),
+        pid: int_field(w, "pid"),
+        monitor: int_field(w, "monitor"),
+        workspace: #{ id: int_field(ws, "id"), name: str_field(ws, "name") },
+        at: #{ x: at[0], y: at[1] },
+        size: #{ w: size[0], h: size[1] },
+        rect: `${at[0]},${at[1]} ${size[0]}x${size[1]}`,
+        geometry_known: geometry_known(w),
+        focused: address == active_address,
+        visible: window_on_screen(monitors, w),
+        compositor_visible: bool_field(w, "visible"),
+        mapped: bool_field(w, "mapped"),
+        hidden: bool_field(w, "hidden"),
+        pinned: bool_field(w, "pinned"),
+        accepts_input: bool_field(w, "acceptsInput"),
+        floating: bool_field(w, "floating"),
+        fullscreen: int_field(w, "fullscreen"),
+        focus_history_id: int_field(w, "focusHistoryID"),
+        fingerprint: fingerprint(w),
+    }
+}
+
+fn monitor_records(monitors) {
+    let out = [];
+    for m in monitors {
+        let size = pair(m, "size");
+        out.push(#{
+            name: str_field(m, "name"),
+            id: int_field(m, "id"),
+            description: str_field(m, "description"),
+            at: #{ x: int_field(m, "x"), y: int_field(m, "y") },
+            size: #{ w: int_field(m, "width"), h: int_field(m, "height") },
+            scale: match m.get("scale") {
+                Some(v) => if v is f64 { v } else if v is i64 { v as f64 } else { 1.0 },
+                None => 1.0,
+            },
+            transform: int_field(m, "transform"),
+            refresh_hz: int_field(m, "refreshRate"),
+            focused: bool_field(m, "focused"),
+            disabled: bool_field(m, "disabled"),
+            active_workspace: match m.get("activeWorkspace") {
+                Some(ws) => #{ id: int_field(ws, "id"), name: str_field(ws, "name") },
+                None => #{ id: 0, name: "" },
+            },
+            special_workspace: match m.get("specialWorkspace") {
+                Some(ws) => str_field(ws, "name"),
+                None => "",
+            },
+            reserved: pair(m, "reserved"),
+        });
+    }
+    out
+}
+
+fn workspace_records(monitors, workspaces) {
+    let out = [];
+    for ws in workspaces {
+        out.push(#{
+            id: int_field(ws, "id"),
+            name: str_field(ws, "name"),
+            monitor: str_field(ws, "monitor"),
+            monitor_id: int_field(ws, "monitorID"),
+            windows: int_field(ws, "windows"),
+            visible: workspace_shown(monitors, ws),
+            special: is_special_workspace(ws),
+            persistent: bool_field(ws, "ispersistent"),
+            has_fullscreen: bool_field(ws, "hasfullscreen"),
+            last_window_title: str_field(ws, "lastwindowtitle"),
+            tiled_layout: str_field(ws, "tiledLayout"),
+        });
+    }
+    out
+}
+
+fn render_text(out) {
+    let lines = [];
+    lines.push(`monitors: ${out.monitors.len()}`);
+    for m in out.monitors {
+        lines.push(`  ${m.name} ${m.size.w}x${m.size.h} at ${m.at.x},${m.at.y} scale ${m.scale} transform ${m.transform} ${m.refresh_hz}Hz active_ws=${m.active_workspace.id} focused=${m.focused} disabled=${m.disabled}`);
+    }
+    lines.push(`workspaces: ${out.workspaces.len()}`);
+    for ws in out.workspaces {
+        lines.push(`  ${ws.id} name=${ws.name} monitor=${ws.monitor} windows=${ws.windows} visible=${ws.visible} special=${ws.special}`);
+    }
+    lines.push(`windows: ${out.windows.len()}`);
+    for w in out.windows {
+        lines.push(`  ${w.address} class=${w.class} pid=${w.pid} ws=${w.workspace.id} monitor=${w.monitor} rect=${w.rect} focused=${w.focused} visible=${w.visible} mapped=${w.mapped} pinned=${w.pinned} accepts_input=${w.accepts_input}`);
+        lines.push(`    title: ${w.title}`);
+        lines.push(`    fingerprint: ${w.fingerprint}`);
+    }
+    lines.push(`active: ${out.active}`);
+    lines.push(`cursor: ${out.cursor.x},${out.cursor.y}`);
+    join(lines, "\n")
+}

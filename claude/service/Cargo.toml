@@ -1,0 +1,13 @@
+[package]
+name = "eidolon-claude"
+version = "0.1.0"
+description = "The driver host a session dials to run a turn on an external CLI — first slice: the transport, the handshake, the refusals, and a fake backend"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# for `umask`, which is what makes the socket 0600 at creation rather than a
+# syscall later
+libc = "0.2"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

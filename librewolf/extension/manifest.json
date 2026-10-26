@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2,
+  "name": "eidolon librewolf bridge",
+  "version": "0.3.0",
+  "description": "Let eidolon work with the tabs you enable with a click: an inventory of titles and ids, and read, act, navigate on the ones you enabled. Nothing is enabled without the click, and a cross-origin navigation ends it.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "librewolf-bridge@eidolon.local",
+      "strict_min_version": "115.0"
+    }
+  },
+    "permissions": ["nativeMessaging", "activeTab", "tabs", "webNavigation"],
+  "optional_permissions": ["*://*/*", "downloads"],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_title": "Enable this tab for eidolon (click again to disable)",
+    "default_icon": "icon.svg"
+  },
+  "icons": {
+    "48": "icon.svg",
+    "96": "icon.svg"
+  }
+}

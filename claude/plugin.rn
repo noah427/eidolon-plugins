@@ -1,0 +1,37 @@
+// The manifest for `claude` — the driver host.
+//
+// The directory's name is the namespace every verb it ships is registered
+// under, and this plugin ships **no verbs**: a driver has nothing for a person
+// to type. What it has is a service, and a session dials it. That is why
+// `eidolon plugins trust claude` refuses this plugin — it vouches verbs, and
+// there are none — and why the thing the operator approves here is the service
+// declaration: `eidolon plugins service approve claude`.
+pub fn manifest() {
+    #{
+        name: "claude",
+        version: "0.1.0",
+        description: "the driver host: eidolon dials it to run a turn on an external CLI",
+        // Readiness is the loopback probe `plugins service start` and `status`
+        // use (`Readiness { port, health }`). It is **not** the turn protocol:
+        // that is the 0600 unix socket at $XDG_RUNTIME_DIR/eidolon-claude.sock,
+        // which the session derives from this plugin's name. This port says
+        // only that a host is up and which protocol it speaks.
+        service: #{
+            command: "eidolon-claude",
+            readiness: #{ port: 8093, health: "/health" },
+            ready_timeout_s: 30,
+        },
+        // The tool names this host's CLI uses, so a person can see what their
+        // own `policy.rn` would have to know before this backend runs unattended
+        // — see README.md, "What this plugin needs from your policy". A claim is
+        // not a permission and nothing reads it as one: it is the plugin saying
+        // out loud which vocabulary it will forward to the gate, which is exactly
+        // what a plugin wrapping a vendor CLI is expected to propose rather than
+        // have the harness ship.
+        claims: #{ tools: [
+            "Bash", "Read", "Glob", "Grep", "LS", "NotebookRead", "Write", "Edit",
+            "MultiEdit", "NotebookEdit", "TodoWrite", "WebFetch", "WebSearch",
+            "BashOutput", "KillBash", "KillShell", "Task",
+        ] },
+    }
+}

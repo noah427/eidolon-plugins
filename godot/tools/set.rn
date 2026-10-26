@@ -1,0 +1,72 @@
+// `godot_set`: one property, set the way the editor's own inspector would set it —
+// through the undo history, so the operator can take it back with Ctrl-Z.
+//
+// The node is re-resolved at the call and the fingerprint checked before anything
+// is written: a scene is somebody's open window, and it changes under a caller
+// whenever they touch it. A refusal here is cheaper than a value in the wrong
+// node, and the answer carries the reading before, the value asked for, and the
+// reading after, together with whether they agree.
+pub fn manifest() {
+    #{
+        name: "godot_set",
+        description: "Set one property of one node in the scene a Godot editor is editing. `expect` is required and is the fingerprint godot_node reported for that node; the node is re-resolved at the call and the verb refuses — changing nothing — if what is at that path is not the one that was inspected. Name exactly one of `value` (a JSON value: a number, a string, a bool — a Dictionary with x/y/z/w or r/g/b/a is made into the Vector or Color the property already is) or `value_text` (a Godot literal, spelled the way godot_node's `repr` spells it: \"Vector2(1, 2)\", \"Color(1, 0, 0)\"). The answer carries the value before, the value asked for, and the value read back afterwards, with `matched` saying whether they agree — a setter that clamps or transforms is reported, not hidden. The edit goes through the editor's undo history, so the operator can take it back with Ctrl-Z, and it marks the scene unsaved. A property holding an Object is refused: this verb sets values, not references.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "path": #{ "type": "string", "description": "The node's path relative to the edited scene's root: \".\" for the root itself, \"Player\", \"Player/Sprite\"." },
+                "expect": #{ "type": "string", "description": "The fingerprint godot_node reported for that node. Required; the verb refuses if the node at that path is not this one." },
+                "property": #{ "type": "string", "description": "The property to set, as godot_node lists it." },
+                "value": #{ "description": "The JSON value to set it to. Exactly one of `value` and `value_text`." },
+                "value_text": #{ "type": "string", "description": "The value as a Godot literal, e.g. \"Vector2(1, 2)\". Exactly one of `value` and `value_text`." },
+            },
+            "required": ["path", "expect", "property"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("set", input).await
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is the same in every godot_*.rn: upstream compiles each of
+// these files on its own, and a tool file is meant to be handed over whole.
+
+// The bridge host (../service). `eidolon plugins service start godot` runs it, and
+// the editor's addon dials it; the tools come in the other side. Change the port
+// here and the host's EIDOLON_GODOT_PORT together, and the token file here and
+// EIDOLON_GODOT_TOKEN_FILE.
+fn service() {
+    #{
+        name: "godot",
+        base_url: "http://127.0.0.1:8092",
+        token_file: "~/.config/eidolon/godot.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the host is not running. There is one command that
+    // fixes that, so the answer names it rather than leaving a connection refusal
+    // to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the godot bridge is not answering on 127.0.0.1:8092 — the eidolon-godot service has to be running (\`eidolon plugins service start godot\`); see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`the godot bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok {
+        Ok(out.result)
+    } else {
+        Err(out.error)
+    }
+}

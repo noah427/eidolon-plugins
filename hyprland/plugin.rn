@@ -1,0 +1,16 @@
+// The plugin manifest for `hyprland` — the directory's name is the namespace every
+// verb is registered under (`hyprland_inspect`, ...), so this file says only what the
+// plugin says about itself. No `service:` block: nothing here has to keep running.
+// Observation and focus are `hyprctl` calls against the compositor's own Lua API, and
+// each input verb runs a short-lived client (wlrctl, wtype) that exits when it is done.
+pub fn manifest() {
+    #{
+        name: "hyprland",
+        version: "0.1.0",
+        description: "see and drive a Hyprland session: monitors, workspaces and windows with identity and geometry, screenshots handed over as pictures, an explicit focus, and pointer/keyboard input that re-checks the window it was aimed at",
+        claims: #{
+            tools: ["inspect", "screenshot", "focus", "click", "scroll", "type", "key"],
+            workflows: ["selftest"],
+        },
+    }
+}
