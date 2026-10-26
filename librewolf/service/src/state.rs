@@ -1604,7 +1604,7 @@ mod tests {
         let mut st = State::default();
         for url in [
             "about:config",
-            "file:///home/noah/notes.txt",
+            "file:///tmp/notes.txt",
             "view-source:https://example.com/",
             "moz-extension://abc/page.html",
         ] {

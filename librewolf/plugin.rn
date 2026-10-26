@@ -13,7 +13,7 @@ pub fn manifest() {
         // `api_request` endpoint and the "answers with the reason it isn't there"
         // error; the plugin's README says what an operator has to do instead.
         // Events this plugin DECLARES it can emit, per the frozen contract
-        // (/home/noah/.local/share/eidolon/reports/2026-10-11-plugin-event-contract.md).
+        // (the plugin-event contract note in the operator's vault).
         // Only what works is declared: document_ready is emitted on the confirmed false->true
         // edge of a tab's document — the click's confirmation, a new document settling, or a
         // same-document restoration — and the source tool answers from the host's own log.
