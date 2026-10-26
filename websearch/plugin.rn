@@ -1,0 +1,20 @@
+// The plugin manifest for `websearch` — the directory's name is the namespace
+// the verb is registered under (`websearch_search`), so this file says only what
+// the plugin says about itself.
+//
+// No `service:` block: the tool calls Ollama's hosted search API directly over
+// HTTPS, with the key from the custodied secret store. Nothing runs beside eidolon.
+//
+// `claims.grants` is what the plugin says it needs, and nothing reads it as a
+// grant. The grant is the operator's act: `eidolon plugins grant --plugin websearch secret:ollama`.
+pub fn manifest() {
+    #{
+        name: "websearch",
+        version: "0.1.0",
+        description: "web search through Ollama's hosted search API, for hosts with no browser to search with",
+        claims: #{
+            tools: ["search"],
+            grants: ["secret:ollama"],
+        },
+    }
+}

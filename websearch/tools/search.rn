@@ -1,0 +1,158 @@
+// `websearch_search`: Ollama's web search API (POST https://ollama.com/api/web_search),
+// with the key from the custodied secret `ollama`. Returns numbered results as text.
+pub fn manifest() {
+    #{
+        name: "websearch_search",
+        description: "Search the web through Ollama's hosted search API and return the top results as numbered text: title, url, and a snippet of each. Use it to find pages; to read one page in full, use fetch. Results are candidates, not verified answers: check the url before relying on a snippet. Needs the `ollama` secret and its grant; without them the call says what is missing.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "query": #{
+                    "type": "string",
+                    "description": "What to search for, in plain words.",
+                },
+                "max_results": #{
+                    "type": "integer",
+                    "description": "How many results to return, 1 to 10. Default 5.",
+                },
+            },
+            "required": ["query"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let query = `${input.get("query").unwrap_or("")}`.trim();
+    if query == "" {
+        return Err("websearch_search needs a non-empty `query`");
+    }
+    let max = match max_results(input) {
+        Ok(m) => m,
+        Err(e) => return Err(e),
+    };
+    let body = json::to_string(#{ "query": query, "max_results": max })?;
+    // The descriptor names the endpoint and the secret's NAME. eidolon puts the key in
+    // the header itself, so this script never holds it.
+    let sent = match eidolon::api_request(endpoint(), "POST", "/api/web_search", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => return Err(`websearch_search failed: ${e}`),
+    };
+    reply_text(sent, query)
+}
+
+// parse:begin
+// Everything from here to `parse:end` is pure: no network, no host. run.sh copies it into
+// the test workflow, so the tests run these bytes and not a second copy.
+
+// The first 200 characters of a string, for an error that quotes what came back.
+fn head(s) {
+    let out = "";
+    let n = 0;
+    for c in s.chars() {
+        if n == 200 {
+            break;
+        }
+        out += `${c}`;
+        n += 1;
+    }
+    out
+}
+
+// A field of one result as text; absent or not a string is "" and the caller decides.
+fn field(item, name) {
+    if item is Object {
+        match item.get(name) {
+            Some(v) => if v is String { v } else { `${v}` },
+            None => "",
+        }
+    } else {
+        ""
+    }
+}
+
+// max_results: absent is 5, an integer is clamped to 1..10, anything else is refused by name.
+pub fn max_results(input) {
+    match input.get("max_results") {
+        None => Ok(5),
+        Some(n) => if n is i64 {
+            if n < 1 { Ok(1) } else if n > 10 { Ok(10) } else { Ok(n) }
+        } else {
+            Err(`websearch_search: max_results must be a whole number from 1 to 10, got ${n}`)
+        },
+    }
+}
+
+// The eidolon answer (a JSON envelope {status, body}) turned into the text the model reads.
+pub fn reply_text(sent, query) {
+    let envelope = match json::from_string(sent) {
+        Ok(r) => r,
+        Err(e) => return Err(`websearch_search: eidolon's answer is not JSON (${e}): ${head(sent)}`),
+    };
+    let status = match envelope.get("status") {
+        Some(s) => s,
+        None => 0,
+    };
+    let body = match envelope.get("body") {
+        Some(b) => `${b}`,
+        None => "",
+    };
+    if status != 200 {
+        return Err(`Ollama web search answered HTTP ${status}: ${head(body)}`);
+    }
+    let answer = match json::from_string(body) {
+        Ok(a) => a,
+        Err(e) => return Err(`websearch_search: Ollama answered 200 with a body that is not JSON (${e}): ${head(body)}`),
+    };
+    if !(answer is Object) {
+        return Err(`websearch_search: Ollama's answer is not an object: ${head(body)}`);
+    }
+    let results = match answer.get("results") {
+        Some(rs) => rs,
+        None => return Err(`websearch_search: Ollama's answer has no "results" list: ${head(body)}`),
+    };
+    if !(results is Vec) {
+        return Err(`websearch_search: Ollama's "results" is not a list: ${head(body)}`);
+    }
+    let text = "";
+    let n = 0;
+    for r in results {
+        n += 1;
+        let title = field(r, "title");
+        let url = field(r, "url");
+        let content = field(r, "content");
+        if title == "" {
+            title = "(no title)";
+        }
+        if url == "" {
+            url = "(no url)";
+        }
+        text += `${n}. ${title}\n   ${url}\n`;
+        if content != "" {
+            text += `   ${content}\n`;
+        }
+    }
+    if n == 0 {
+        return Ok(`no results for: ${query}`);
+    }
+    Ok(text.trim_end())
+}
+// parse:end
+
+// The endpoint this tool reaches, and nothing else: the host is fixed here, and the
+// descriptor's base_url is the only place a request can go.
+//
+// `token_secret` is "ollama" on purpose, unlike the advice in eidolon's endpoint.rs
+// (give a tool a secret name of its own). It is the Ollama provider's own key: the
+// operator already holds it under this name for the built-in provider, and a second
+// copy would be a second key to rotate. So the secret is shared, not this plugin's to
+// delete: `plugins uninstall websearch` leaves it where it is.
+fn endpoint() {
+    #{
+        name: "ollama_web_search",
+        base_url: "https://ollama.com",
+        token_secret: "ollama",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 30,
+    }
+}
