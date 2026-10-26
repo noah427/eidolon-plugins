@@ -341,6 +341,19 @@ else
     cp -r "$repo/coordinator" "$plug/coordinator"
     mkdir -p "$plug/coordinator/workflows"
     cp "$here/scenario.rn" "$plug/coordinator/workflows/scenario.rn"
+    # The refusal under test is "this session has no durable seat", which is a
+    # fact about the swarm, not something a tool can be asked to imagine. Make
+    # it true instead of relying on the environment: with swarm disabled the
+    # session registers nothing, the roster carries no row for it, and the tool
+    # refuses before it ever dials. On a machine where swarm is enabled by
+    # default this check used to fail — not because a boundary was missing, but
+    # because the condition it asserts never held, and the run reached the
+    # transport instead and was refused there by the policy gate.
+    mkdir -p "$XDG_CONFIG_HOME/eidolon"
+    cat >"$XDG_CONFIG_HOME/eidolon/config.toml" <<'CFG'
+[swarm]
+enabled = false
+CFG
     "$eidolon" plugins trust coordinator >/dev/null
     "$eidolon" workflow run "$plug/coordinator" scenario --args '{}' --provider mock \
         >"$work/scenario.txt" 2>&1 || true
@@ -350,6 +363,23 @@ else
     check "and they name the roster call they read" "$out" 'swarm_call(\"roster\"'
     check "and they say they will not parse prose" "$out" "will not parse"
     check "and they never invent an address" "$out" "will not invent one"
+
+    # The other side of the same boundary, proved rather than assumed: with the
+    # swarm on, the session has a seat, the tool gets past the roster and is
+    # refused by the policy gate because nobody granted it the token source.
+    # That is a different refusal from a different layer, and it must not be
+    # mistaken for the no-seat one.
+    cat >"$XDG_CONFIG_HOME/eidolon/config.toml" <<'CFG'
+[swarm]
+enabled = true
+CFG
+    "$eidolon" workflow run "$plug/coordinator" scenario --args '{}' --provider mock \
+        >"$work/scenario-seated.txt" 2>&1 || true
+    seated=$(cat "$work/scenario-seated.txt")
+    check "seated and ungranted, the same tool is refused at the policy gate" \
+        "$seated" "has no grant covering it"
+    check "and the refusal is not the no-seat one" \
+        "$(printf '%s' "$seated" | grep -c 'no durable seat in the roster' || true)" "0"
 fi
 
 # Smoke: every verb the plugin ships reaches the monitor it declares, and the
