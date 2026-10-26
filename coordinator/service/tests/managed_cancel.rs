@@ -24,9 +24,11 @@ fn fixture() -> (Store, Host) {
     let mut store = Store::default();
     store.starts.push(StartRecord {
         request: Request { caller: "caller".into(), operation: "op".into(), workspace: "/fixture".into(), model: "mock".into(),
-            persona: None, brief: "task".into() },
+            persona: None, brief: "task".into(),
+            rank: None, rank_digest: None,
+            shape: eidolon_coordinator::managed_start::LaunchShape::Headless, destination: None },
         phase: Phase::Supervised, session: Some("child".into()), adoption_epoch: Some(1), brief: BriefState::NotAttempted,
-        cancellation: None,
+        brief_delivery_key: None, brief_binding_digest: None, cancellation: None,
     });
     store.records.push(Adoption { epoch: 1, coordinator: "caller".into(), coordinator_id: String::new(), worker: "child".into(),
         worker_id_seen: String::new(), name: String::new(), note: String::new(), adopted_at_ms: 1,
@@ -127,7 +129,7 @@ impl managed_start::Host for Host {
     fn inspect(&mut self, _: &Request) -> Result<managed_start::LaunchState, String> { panic!("cancelled start must not inspect or release") }
     fn prepare(&mut self, _: &Request) -> Result<(), String> { panic!("cancelled start must not prepare") }
     fn release(&mut self, _: &Request, _: &str) -> Result<(), String> { panic!("cancelled start must not release") }
-    fn deliver_brief(&mut self, _: &Request, _: &str) -> Result<eidolon_coordinator::Delivery, String> { panic!("no brief") }
+    fn deliver_brief(&mut self, _: &Request, _: &str, _: &str, _: &str) -> Result<managed_start::Correlated, String> { panic!("no brief") }
 }
 #[test]
 fn pending_cancel_survives_reload_blocks_start_and_refuses_changed_reason() {

@@ -19,6 +19,11 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ./service
+      # The rank blocks are not compiled in — the monitor reads them from the
+      # installed plugin folder at run time — but `cargo test -p eidolon-coordinator`
+      # asserts that the shipped blocks are placeholders, so the check phase needs
+      # them in the source it starts from.
+      ./ranks
       # The workspace has more than one member; cargo loads every member's
       # manifest, so each package's source has to carry the other one.
       ../browser/service

@@ -26,7 +26,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use eidolon_coordinator::{
-    addresses_established, adopt, cycle as scan_cycle, release_adoption, store, AdoptRequest,
+    addresses_established, adopt, cycle as scan_cycle, rank, release_adoption, store, AdoptRequest,
     Delivery, Gate, Notice, Outcome, Roster, Row, Store, Transport,
 };
 use subtle::ConstantTimeEq;
@@ -82,6 +82,70 @@ impl Roster for CliRoster {
 /// writes an inbox itself.
 struct CliTransport {
     eidolon: String,
+}
+
+impl eidolon_coordinator::managed_start::BriefTransport for CliTransport {
+    /// One correlated delivery: `eidolon send` with the key and digest the
+    /// state machine minted. **No `--wake`** — a correlated delivery writes the
+    /// record into the recipient's log and never starts a turn, and the
+    /// harness refuses the flag rather than dropping it silently. There is no
+    /// legacy send behind this: an answer this monitor cannot read is
+    /// `Unknown`, never a downgrade.
+    fn send_correlated(
+        &self,
+        to: &str,
+        delivery_key: &str,
+        binding_digest: &str,
+        text: &str,
+    ) -> Result<eidolon_coordinator::managed_start::Correlated, String> {
+        use eidolon_coordinator::managed_start::Correlated;
+        // A transport that never ran has established no acceptance and no
+        // absence, which is exactly `Unknown` in the contract's words.
+        let ran = Command::new(&self.eidolon)
+            .args([
+                "send", "--json", "--from", "coordinator",
+                "--delivery-key", delivery_key, "--binding-digest", binding_digest,
+                to, "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match ran {
+            Ok(child) => child,
+            Err(e) => return Ok(Correlated::Unknown { why: format!("running `{} send`: {e}", self.eidolon) }),
+        };
+        if let Some(stdin) = child.stdin.as_mut()
+            && let Err(e) = stdin.write_all(text.as_bytes())
+        {
+            return Ok(Correlated::Unknown { why: format!("writing the brief to `send`: {e}") });
+        }
+        let out = match child.wait_with_output() {
+            Ok(out) => out,
+            Err(e) => return Ok(Correlated::Unknown { why: format!("waiting for `send`: {e}") }),
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // The harness prints the outcome as JSON and exits 1 for every answer
+        // that is not journaled, so the shape is read first and the status only
+        // decides when there is nothing to read.
+        match serde_json::from_str::<serde_json::Value>(&stdout) {
+            Ok(value) => Ok(match serde_json::from_value::<Correlated>(value) {
+                Ok(outcome) => outcome,
+                Err(e) => Correlated::Unknown {
+                    why: format!("`send` answered a correlated outcome this monitor does not know ({e}): {stdout}"),
+                },
+            }),
+            Err(e) => Ok(Correlated::Unknown {
+                why: format!(
+                    "`eidolon send --json --delivery-key` exited {:?} and did not print an outcome as JSON ({e}): {}{}",
+                    out.status.code(),
+                    stdout,
+                    if stderr.is_empty() { String::new() } else { format!(" ({stderr})") }
+                ),
+            }),
+        }
+    }
 }
 
 impl Transport for CliTransport {
@@ -150,6 +214,9 @@ struct App {
     gate: Gate,
     file: PathBuf,
     token: String,
+    /// The per-rank text the children are told. Read by this process, never named
+    /// by a caller beyond the rank itself.
+    blocks: rank::Blocks,
     roster: Box<dyn Roster>,
     transport: Box<dyn Transport>,
     // Lock order is always Gate, then process host. No caller-provided executable.
@@ -217,6 +284,22 @@ fn root() -> PathBuf {
         format!("{home}/.local/state")
     });
     PathBuf::from(base).join("eidolon/coordinator")
+}
+
+/// Where the plugin's rank blocks live: one file per rank, `<rank>.md`.
+///
+/// The plugin folder *is* the plugin directory, so the blocks ship inside it and an
+/// operator edits them where the plugin was installed. `EIDOLON_COORDINATOR_RANKS`
+/// overrides the directory for a fixture or a hand-run monitor.
+fn ranks_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("EIDOLON_COORDINATOR_RANKS") {
+        return PathBuf::from(p);
+    }
+    let cfg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{home}/.config")
+    });
+    PathBuf::from(cfg).join("eidolon/plugins/coordinator/ranks")
 }
 
 fn token_path() -> PathBuf {
@@ -293,11 +376,27 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
     let mut store = app.gate.enter()?;
     match method {
         "start" => {
-            let request: eidolon_coordinator::managed_start::Request = serde_json::from_value(args.clone())
+            // The rank is a name a caller may give. The digest is not: it is this
+            // monitor's reading of the block's bytes, bound into the immutable input
+            // below. A caller that names one is asking to be trusted about content
+            // nobody hashed, which is the thing the binding exists to prevent.
+            if args.get("rank_digest").is_some_and(|v| !v.is_null()) {
+                return Err(
+                    "`rank_digest` is not a caller's input: the monitor reads the rank block as it prepares \
+                     the launch and binds the digest of those exact bytes. Name the `rank`; do not name its \
+                     hash"
+                        .into(),
+                );
+            }
+            let mut request: eidolon_coordinator::managed_start::Request = serde_json::from_value(args.clone())
                 .map_err(|e| format!("invalid managed-start request: {e}"))?;
             if request.brief.trim().is_empty() || request.brief.len() > 65536 {
                 return Err("managed start needs a nonempty brief of at most 65536 bytes".into());
             }
+            // Read the block now, before the intent is made durable: the digest that
+            // goes into the record is the digest of the bytes this launch will hand
+            // the child. A rank with no written block binds nothing and adds nothing.
+            request.rank_digest = app.blocks.resolve(request.rank.as_deref())?.map(|block| block.digest);
             let mut host = app.launches.lock().map_err(|_| "managed host lock poisoned")?;
             if !store.starts.iter().any(|r| r.request.caller == caller && r.request.operation == request.operation) {
                 host.register_fresh(&request)?;
@@ -315,12 +414,34 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
                 Ok(started) => Ok(serde_json::json!({
                     "status": "managed", "operation": request.operation,
                     "session": started.session, "adoption_epoch": started.adoption_epoch,
-                    "brief_transport": started.brief_outcome.word(), "brief_consumption": "not established",
+                    // The receipt as the log gave it, never a transport sentence:
+                    // `Journaled`/`Existing` say the record is in that log, and
+                    // neither says the model read it.
+                    "rank": request.rank, "rank_block_sha256": request.rank_digest,
+                    "brief": started.brief, "brief_consumption": "not established",
                 }).to_string()),
                 Err(error) => {
-                    use eidolon_coordinator::managed_start::Host;
+                    use eidolon_coordinator::managed_start::{Host, LaunchState, Phase};
                     let observed = host.inspect(&request);
-                    Err(format!("managed start {} is partial/unconfirmed: {error}; host evidence: {observed:?}", request.operation))
+                    // A refusal before anything was created is not a partial start.
+                    // The host says NotCreated and the record is still a bare intent;
+                    // calling that "partial/unconfirmed" would claim an attempt that
+                    // never happened — which is what a refused rank block is.
+                    let untouched = matches!(observed, Ok(LaunchState::NotCreated))
+                        && store.starts.iter().any(|r| {
+                            r.request.caller == caller
+                                && r.request.operation == request.operation
+                                && r.phase == Phase::Intent
+                                && r.session.is_none()
+                        });
+                    if untouched {
+                        Err(format!(
+                            "managed start {} was refused before anything was created: {error}; host evidence: {observed:?}",
+                            request.operation
+                        ))
+                    } else {
+                        Err(format!("managed start {} is partial/unconfirmed: {error}; host evidence: {observed:?}", request.operation))
+                    }
                 }
             }
         }
@@ -431,8 +552,14 @@ fn render_adoptions(
     let mine = store.records.iter().filter(|r| r.coordinator == caller);
     let mut out = String::new();
     for start in store.starts.iter().filter(|r| r.request.caller == caller) {
-        out.push_str(&format!("managed start {}: durable phase {:?}, session {:?}, adoption epoch {:?} (not current liveness)\n",
-            start.request.operation, start.phase, start.session, start.adoption_epoch));
+        out.push_str(&format!("managed start {}: {}; durable phase {:?}, session {:?}, adoption epoch {:?} (not current liveness)\n",
+            start.request.operation,
+            match (&start.request.rank, &start.request.rank_digest) {
+                (None, _) => "no rank".to_string(),
+                (Some(rank), None) => format!("rank `{rank}`, no rank block (nothing appended)"),
+                (Some(rank), Some(digest)) => format!("rank `{rank}`, block sha256 {digest}"),
+            },
+            start.phase, start.session, start.adoption_epoch));
         out.push_str(&format!("  cancellation: {:?} (historical exit receipt, not current liveness)\n", start.cancellation));
     }
     match &rows {
@@ -680,12 +807,33 @@ async fn main() {
         gate: Gate::new(opened),
         file,
         token,
+        // The same directory the request's digest is read from, handed to the host
+        // so it can re-read the block itself right before the spawn.
+        blocks: rank::Blocks::new(ranks_dir()),
         roster: Box::new(CliRoster { eidolon: eidolon.clone() }),
         transport: Box::new(CliTransport { eidolon: eidolon.clone() }),
-        launches: Mutex::new(eidolon_coordinator::process_host::ProcessHost::new(
-            PathBuf::from(&eidolon), dir.join("launches"),
-            Box::new(CliRoster { eidolon: eidolon.clone() }), Box::new(CliTransport { eidolon }),
-        )),
+        // **The visible path is wired, and it refuses at its own guard.** A
+        // terminal and a compositor are offered here so that a visible request
+        // reaching this host is answered with the reason that actually applies —
+        // "this host cannot establish a no-focus map" — rather than with "this
+        // host has no terminal configured", which would be true but not the
+        // point. Nothing establishes a no-focus map, so guard four still refuses
+        // every visible launch before a process exists; wiring the other two
+        // changes the sentence, not the behaviour.
+        launches: Mutex::new(
+            eidolon_coordinator::process_host::ProcessHost::new(
+                PathBuf::from(&eidolon), dir.join("launches"),
+                Box::new(CliRoster { eidolon: eidolon.clone() }), Box::new(CliTransport { eidolon }),
+            )
+            .with_terminal(
+                std::env::var("EIDOLON_COORDINATOR_TERMINAL").unwrap_or_else(|_| "foot".to_string()),
+            )
+            .with_placement(std::sync::Arc::new(eidolon_coordinator::ancestry::Hyprland))
+            // The host re-reads a block here, right before it spawns, and compares
+            // it with the digest the operation was recorded with — the same
+            // directory this process read the digest from, never a caller's path.
+            .with_ranks(rank::Blocks::new(ranks_dir())),
+        ),
         blind: Mutex::new(Vec::new()),
         now: now_ms,
     });

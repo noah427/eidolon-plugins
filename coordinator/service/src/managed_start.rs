@@ -4,7 +4,8 @@
 //! endpoint may bypass these contracts: the process Host enforces the pre-turn hold.
 
 use serde::{Deserialize, Serialize};
-use crate::{Adoption, Delivery, Outcome, Store, next_epoch, reconcile, store::SaveError};
+use sha2::{Digest, Sha256};
+use crate::{Adoption, Outcome, Store, next_epoch, reconcile, store::SaveError};
 
 /// Immutable admitted launch input. `caller` is harness-derived, never model input.
 /// An operation id identifies an attempt, not an address a peer resolver accepts.
@@ -16,6 +17,47 @@ pub struct Request {
     pub model: String,
     pub persona: Option<String>,
     pub brief: String,
+    /// The rank whose block is appended beside the persona at spawn. Only the
+    /// **name**: the addition's content is bound by `rank_digest` below, which the
+    /// monitor computes from the block's bytes and a caller may not supply.
+    ///
+    /// Defaulted on read so a store written before ranks existed still loads, and
+    /// `None` for an unranked launch, which is every launch that names no rank.
+    #[serde(default)]
+    pub rank: Option<String>,
+    /// SHA-256 of the exact bytes of that rank's block, or `None` when the rank has
+    /// no written block (so nothing is appended). Part of the immutable input on
+    /// purpose: a retry that reads a changed file is a *different* request and is
+    /// refused rather than spawning a child with text nobody reviewed.
+    #[serde(default)]
+    pub rank_digest: Option<String>,
+    /// How the child reaches the harness, which decides how its pid is
+    /// verified. Defaulted for stores written before this existed: every
+    /// launch up to then was headless.
+    #[serde(default)]
+    pub shape: LaunchShape,
+    /// Where a **visible** child's window belongs, resolved by the caller
+    /// immediately before the call — the launch performs the placement, it
+    /// does not decide the policy of where workers go. Absent for a headless
+    /// launch, which has no window; required for a terminal one, which refuses
+    /// rather than guessing a workspace.
+    #[serde(default)]
+    pub destination: Option<i64>,
+}
+
+/// **Which honest identity check applies** — the shape is a fact of the
+/// launch, not a guess made from what answers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaunchShape {
+    /// The service spawns the harness itself: the child's pid *is* the
+    /// harness's, and equality is the whole check. Left strict — a headless
+    /// launch that suddenly has a grandchild is a fault, not a terminal.
+    #[default]
+    Headless,
+    /// The service spawns a terminal, which spawns the harness: the harness
+    /// is a **descendant**, never the child, so equality is false for a
+    /// launch that is entirely ours.
+    Terminal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,9 +72,111 @@ pub enum BriefState {
     #[default]
     NotAttempted,
     /// Write-ahead intent: after a crash, whether send happened is ambiguous.
+    /// Under a correlated delivery the delivery key stored beside it is what
+    /// makes a repeat safe; an `Attempted` with no key is an older receipt.
     Attempted,
-    /// Transport acceptance only, never consumption or execution proof.
+    /// Transport acceptance only, never consumption or execution proof. The
+    /// legacy inbox path wrote this and nothing writes it now; its meaning is
+    /// unchanged and it is never reported as a correlated receipt.
     Accepted { outcome: Outcome, words: String },
+    /// This call appended the record to the recipient's log. The receipt is
+    /// what the log holds, not what the transport returned.
+    Journaled { receipt: Receipt },
+    /// An earlier call had appended it, under the same key and the same
+    /// binding. Nothing was sent again.
+    Existing { receipt: Receipt },
+    /// The recipient's owner answered and declined. `kind` is the refusal's
+    /// own word — invalid, conflict, log, unconfirmed.
+    Refused { kind: String, why: String },
+    /// No durable acceptance and no evidence of absence. The delivery key
+    /// stays durable, so a repeat is safe; nothing here may be read as a
+    /// delivery that happened.
+    Unknown { why: String },
+    /// The recipient's build does not know the correlated op. Fail closed:
+    /// no legacy message was sent in its place.
+    Unsupported,
+}
+
+/// The receipt one correlated delivery produced — the recipient's log's own
+/// evidence.
+///
+/// A mirror of `eidolon_core::correlated::Receipt`, carried here because this
+/// service is a plugin and does not link the harness. The field names and
+/// meanings are the contract's; the store keeps the receipt rather than a
+/// summary of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Receipt {
+    /// The session address the record is in — the log's stem.
+    pub session: String,
+    /// The correlation key, as the record holds it.
+    pub delivery_key: String,
+    /// The binding digest, as the record holds it.
+    pub binding_digest: String,
+    /// The record's own id in that log.
+    pub record: u64,
+    /// The recipient's file identity at the moment it answered. Evidence
+    /// about that host then, never a durable name.
+    pub log_binding: LogBinding,
+    /// Whether the record is on the branch ending at the head. **Not** whether
+    /// the recipient's next prompt will contain it.
+    pub on_current_branch: bool,
+}
+
+/// The on-host identity of the recipient's log, as the receipt reported it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogBinding {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// What became of one correlated brief delivery: the five answers the harness
+/// contract distinguishes.
+///
+/// Two of them are success and they mean different things — `Journaled` is this
+/// call putting the record in the recipient's log, `Existing` is an earlier call
+/// having done so — and none of them is consumption, a started turn or proof the
+/// work happened. The other three are not success, and none is permission to
+/// resend as an ordinary message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Correlated {
+    Journaled(Receipt),
+    Existing(Receipt),
+    Refused {
+        /// `invalid`, `conflict`, `log` or `unconfirmed` — the recipient's own
+        /// classification, passed through rather than reinvented.
+        kind: String,
+        /// The refusal's sentence, verbatim.
+        why: String,
+    },
+    Unknown {
+        /// What the transport observed, in its own words.
+        why: String,
+    },
+    /// The recipient's build does not know the correlated op. Fail closed.
+    Unsupported,
+}
+
+impl Correlated {
+    /// Whether a durable record is known to exist — the only case in which
+    /// this monitor may say the brief reached the recipient's log. Still not
+    /// evidence that the model read it.
+    pub fn is_journaled(&self) -> bool {
+        matches!(self, Correlated::Journaled(_) | Correlated::Existing(_))
+    }
+}
+
+/// Where a brief's correlated delivery goes: one record in the recipient's log,
+/// under the key this monitor minted. Distinct from [`crate::Transport`], which
+/// carries notices as inbox mail: a brief that went down that path would be a
+/// second path to the same session, and this seam exists to have exactly one.
+pub trait BriefTransport: Send + Sync {
+    fn send_correlated(
+        &self,
+        to: &str,
+        delivery_key: &str,
+        binding_digest: &str,
+        text: &str,
+    ) -> Result<Correlated, String>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,6 +187,18 @@ pub struct StartRecord {
     pub adoption_epoch: Option<u64>,
     #[serde(default)]
     pub brief: BriefState,
+    /// The opaque correlation key for this operation's brief, minted once and
+    /// persisted **before** the first transport call. A repeat sends under this
+    /// same key and the recipient deduplicates on it. It is correlation, not
+    /// authority: it grants nothing on the far side.
+    #[serde(default)]
+    pub brief_delivery_key: Option<String>,
+    /// The digest of the immutable input the key is bound to, persisted beside
+    /// it. The recipient does not verify it; it enforces that a repeat under
+    /// one key carries the same digest, so a key is never silently reused for
+    /// different bytes.
+    #[serde(default)]
+    pub brief_binding_digest: Option<String>,
     #[serde(default)]
     pub cancellation: Option<Cancellation>,
 }
@@ -108,14 +264,26 @@ pub trait Host {
     fn inspect(&mut self, request: &Request) -> Result<LaunchState, String>;
     fn prepare(&mut self, request: &Request) -> Result<(), String>;
     fn release(&mut self, request: &Request, session: &str) -> Result<(), String>;
-    fn deliver_brief(&mut self, request: &Request, session: &str) -> Result<Delivery, String>;
+    /// Send the brief as one correlated delivery under the key and digest the
+    /// state machine minted and persisted. There is no legacy inbox alternative
+    /// here: a caller that cannot compose this must answer `Unsupported` or
+    /// `Unknown`, never fall back.
+    fn deliver_brief(
+        &mut self,
+        request: &Request,
+        session: &str,
+        delivery_key: &str,
+        binding_digest: &str,
+    ) -> Result<Correlated, String>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Started {
     pub session: String,
     pub adoption_epoch: u64,
-    pub brief_outcome: Outcome,
+    /// What the recipient's log established about the brief. Only `Journaled`
+    /// or `Existing` can be reported here, and neither means it was read.
+    pub brief: Correlated,
 }
 
 fn persist(
@@ -142,6 +310,54 @@ fn session_of(state: &LaunchState) -> Option<&str> {
     }
 }
 
+/// Why a retry under the same operation is not the same request. When the only
+/// thing that differs is the rank binding, say that the file changed, because that
+/// is the thing an operator can check — a launch that re-read a rewritten block
+/// would tell the child text nobody reviewed for this operation.
+fn changed_input(recorded: &Request, request: &Request) -> String {
+    if recorded.rank == request.rank && recorded.rank_digest != request.rank_digest {
+        return format!(
+            "the `{}` rank block changed since this operation was recorded: the operation is bound to {}, \
+             and the block's bytes now hash to {}. Refusing to reuse the operation — this launch would \
+             inject different rank text, and an operation id is bound to one immutable input",
+            request.rank.as_deref().unwrap_or_default(),
+            recorded.rank_digest.as_deref().unwrap_or("no block (nothing was appended)"),
+            request.rank_digest.as_deref().unwrap_or("no block (nothing would be appended)"),
+        );
+    }
+    "operation already exists with different immutable launch input".into()
+}
+
+/// A delivery key: opaque, minted once per operation, and **not** a capability.
+///
+/// 128 random bits, hex, well inside the contract's bound. Minted here and
+/// persisted with the operation before the transport is given anything, so a
+/// repeat carries the same key and the recipient deduplicates on it instead of
+/// receiving a second brief.
+fn mint_delivery_key() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
+        .map_err(|e| format!("minting a brief delivery key: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The digest of the immutable input the delivery key is bound to: who asked,
+/// which operation, which recipient and the brief's exact bytes.
+///
+/// Length-prefixed and domain-separated, so two different inputs cannot share
+/// one encoding. It is this sender's assertion — the recipient only enforces
+/// that a repeat under one key carries the same digest.
+fn binding_digest(request: &Request, session: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"eidolon.coordinator.brief.v1");
+    for part in [request.caller.as_str(), request.operation.as_str(), session, request.brief.as_str()] {
+        h.update((part.len() as u64).to_be_bytes());
+        h.update(part.as_bytes());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Complete or resume one admitted start. Errors describe partial/unknown state,
 /// never managed success. Intent, supervision and completion are separate durable
 /// checkpoints; retrying the same request reconciles them rather than spawning anew.
@@ -159,6 +375,17 @@ pub fn start(
     {
         return Err("managed start needs an operation, caller, workspace and model".into());
     }
+    // The rank is a name from the operator's vocabulary, and a digest only exists
+    // because a block's bytes were read for it. Neither is a model's to invent.
+    if let Some(rank) = &request.rank {
+        if !crate::rank::RANKS.contains(&rank.as_str()) {
+            return Err(crate::rank::unknown_rank(rank));
+        }
+    } else if request.rank_digest.is_some() {
+        return Err("managed start binds a rank digest with no rank; a digest names the bytes of a block \
+                    nobody named, and there is no session to append it to"
+            .into());
+    }
     let matching: Vec<usize> = store.starts.iter().enumerate()
         .filter(|(_, r)| r.request.caller == request.caller && r.request.operation == request.operation)
         .map(|(i, _)| i).collect();
@@ -167,13 +394,13 @@ pub fn start(
             let mut next = store.clone();
             next.starts.push(StartRecord {
                 request: request.clone(), phase: Phase::Intent, session: None, adoption_epoch: None, brief: BriefState::NotAttempted,
-                cancellation: None,
+                brief_delivery_key: None, brief_binding_digest: None, cancellation: None,
             });
             persist(store, next, save, load)?;
             store.starts.len() - 1
         }
         [index] if store.starts[*index].request == *request => *index,
-        [_] => return Err("operation already exists with different immutable launch input".into()),
+        [index] => return Err(changed_input(&store.starts[*index].request, request)),
         _ => return Err("multiple records claim this operation; refusing to guess".into()),
     };
     let record = store.starts[index].clone();
@@ -184,10 +411,6 @@ pub fn start(
         || (record.phase != Phase::Intent && (record.session.is_none() || record.adoption_epoch.is_none()))
     {
         return Err("managed start has inconsistent durable phase/binding; repair required".into());
-    }
-
-    if store.starts[index].brief == BriefState::Attempted {
-        return Err("brief delivery is ambiguous; write-ahead attempt exists without durable acceptance; never resending blindly".into());
     }
 
     let mut observed = host.inspect(request)?;
@@ -255,34 +478,107 @@ pub fn start(
     if observed != (LaunchState::Running { session: session.clone() }) {
         return Err(format!("running state not established; supervision retained: {observed:?}"));
     }
-    if store.starts[index].brief == BriefState::NotAttempted {
-        if store.starts[index].phase == Phase::Running {
-            return Err("older running receipt has no brief evidence; explicit reconciliation required".into());
+    // ---- The brief: one correlated delivery, one journaled receipt. ----
+    //
+    // What a repeat means is decided here, and only from durable facts.
+    let previous = store.starts[index].brief.clone();
+    let resend = match &previous {
+        BriefState::NotAttempted => {
+            if store.starts[index].phase == Phase::Running {
+                return Err("older running receipt has no brief evidence; explicit reconciliation required".into());
+            }
+            true
         }
+        // The key below was persisted before the first attempt, so a repeat is
+        // not blind: it carries the same key and the recipient answers
+        // `Existing` if the first one landed rather than receiving a second
+        // brief. An `Attempted` with no stored key is an older receipt from the
+        // legacy inbox path, where the ambiguity is real and a resend could
+        // arrive beside a delivery that already happened.
+        BriefState::Attempted | BriefState::Unknown { .. } => {
+            if store.starts[index].brief_delivery_key.is_none()
+                || store.starts[index].brief_binding_digest.is_none()
+            {
+                return Err("brief delivery is ambiguous; the write-ahead attempt carries no delivery key, so a resend could arrive beside a delivery that already happened; never resending blindly".into());
+            }
+            true
+        }
+        // Settled under the correlated contract: the record is in the log, and
+        // nothing is sent again. This is the repeat that does not re-send.
+        BriefState::Journaled { .. } | BriefState::Existing { .. } => false,
+        BriefState::Refused { kind, why } => return Err(format!(
+            "brief delivery was refused ({kind}): {why}; a refusal is not a licence to resend, and no \
+             ordinary message was sent in its place"
+        )),
+        BriefState::Unsupported => return Err(
+            "the recipient's build does not support correlated delivery; nothing was sent, and no legacy \
+             message was sent in its place".into(),
+        ),
+        // A receipt from the legacy inbox path. Its meaning is unchanged —
+        // transport acceptance, never a record — so it is not reported as one.
+        BriefState::Accepted { .. } => return Err(
+            "this operation's brief was accepted by the legacy inbox transport, which left no correlated \
+             receipt; an explicit reconciliation is required, not a claim of delivery".into(),
+        ),
+    };
+    if resend {
+        // The plan is durable BEFORE the transport is given anything, and it
+        // never changes for this operation: one key, one digest, every repeat.
         let mut next = store.clone();
+        if next.starts[index].brief_delivery_key.is_none() {
+            next.starts[index].brief_delivery_key = Some(mint_delivery_key()?);
+            next.starts[index].brief_binding_digest = Some(binding_digest(request, &session));
+        }
         next.starts[index].brief = BriefState::Attempted;
         persist(store, next, save, load)?;
-        let delivery = host.deliver_brief(request, &session)
+        let delivery_key = store.starts[index].brief_delivery_key.clone()
+            .ok_or("brief delivery key was not durably stored")?;
+        let digest = store.starts[index].brief_binding_digest.clone()
+            .ok_or("brief binding digest was not durably stored")?;
+        // A correlated delivery does **not** wake the recipient: the record is
+        // in its log and it reads that at its next turn. This monitor does not
+        // invent a wake to make a journaled record look like a started turn.
+        let answer = host.deliver_brief(request, &session, &delivery_key, &digest)
             .map_err(|e| format!("brief send attempted; acceptance ambiguous, never retry blindly: {e}"))?;
-        if !matches!(delivery.outcome, Outcome::Delivered | Outcome::Queued) {
-            return Err(format!("brief transport reported {}; no success or blind retry: {}", delivery.outcome.word(), delivery.words));
-        }
         let mut next = store.clone();
-        next.starts[index].brief = BriefState::Accepted { outcome: delivery.outcome, words: delivery.words };
+        next.starts[index].brief = match &answer {
+            Correlated::Journaled(receipt) => BriefState::Journaled { receipt: receipt.clone() },
+            Correlated::Existing(receipt) => BriefState::Existing { receipt: receipt.clone() },
+            Correlated::Refused { kind, why } => BriefState::Refused { kind: kind.clone(), why: why.clone() },
+            Correlated::Unknown { why } => BriefState::Unknown { why: why.clone() },
+            Correlated::Unsupported => BriefState::Unsupported,
+        };
         persist(store, next, save, load)?;
+        // Only `Journaled` and `Existing` are a record in the log. The other
+        // three are said exactly: no delivery, no downgrade, no resend here.
+        match answer {
+            Correlated::Journaled(_) | Correlated::Existing(_) => {}
+            Correlated::Refused { kind, why } => return Err(format!(
+                "brief delivery was refused ({kind}): {why}; a refusal is not a licence to resend, and no \
+                 ordinary message was sent in its place"
+            )),
+            Correlated::Unknown { why } => return Err(format!(
+                "brief delivery is unconfirmed: no durable acceptance and no evidence of absence ({why}); the \
+                 delivery key is durable, so repeating this operation re-sends under the same key and answers \
+                 `existing` if the first attempt landed — never as an ordinary message"
+            )),
+            Correlated::Unsupported => return Err(
+                "the recipient's build does not support correlated delivery; nothing was sent, and no legacy \
+                 message was sent in its place".into(),
+            ),
+        }
     }
-    let BriefState::Accepted { outcome: brief_outcome, .. } = store.starts[index].brief else {
-        return Err("brief acceptance not established".into());
+    let brief = match store.starts[index].brief.clone() {
+        BriefState::Journaled { receipt } => Correlated::Journaled(receipt),
+        BriefState::Existing { receipt } => Correlated::Existing(receipt),
+        _ => return Err("brief acceptance not established".into()),
     };
-    if !matches!(brief_outcome, Outcome::Delivered | Outcome::Queued) {
-        return Err("stored brief receipt is not transport acceptance".into());
-    }
     if store.starts[index].phase != Phase::Running {
         let mut next = store.clone();
         next.starts[index].phase = Phase::Running;
         persist(store, next, save, load)?;
     }
-    Ok(Started { session, adoption_epoch: epoch, brief_outcome })
+    Ok(Started { session, adoption_epoch: epoch, brief })
 }
 
 /// Explicitly admitted cancellation, under the same Gate then Host lock order.

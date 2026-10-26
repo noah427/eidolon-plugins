@@ -56,6 +56,31 @@ caller), so the tool must refuse and name that — and say it will not invent an
 address and will not parse prose — instead of answering as if nobody had been
 adopted. `scenario.rn` is the workflow, copied into the temp plugin and not shipped.
 
+## `rank-launch.py` — a ranked start, and the binding that refuses a retry
+
+```bash
+python3 tests/coordinator/rank-launch.py target/debug/eidolon-coordinator
+```
+
+The monitor, its HTTP door and the process host, with a stand-in `eidolon` that
+records its own argv and answers the held receipt on the channel it was handed, and
+claims `--system-append` in its own `chat --help`. Six checks: the monitor reads
+`ranks/miles.md` and binds the SHA-256 of its exact bytes into the operation's
+immutable request; the argv the host builds ends with `--system-append <a
+launch-private file>`, and that file's bytes hash to the recorded digest (it is not
+the block's path — the CLI reads the file itself, and a path would let that read
+differ from the digest); the answer is a partial/unconfirmed start and not a managed
+one (a fixture child is not a session); a caller-supplied `rank_digest` is refused and
+nothing is recorded; the launch's copy still hashes to the digest after the block is
+edited; and a retry of that operation is refused by name, with the record unchanged.
+
+It is **not** evidence that `eidolon chat` accepts `--system-append`. That flag is the
+core/CLI lane's: the installed binary at this plugin's ref has it on no subcommand,
+and the core lane's head on `run` only. The stand-in child accepts anything; the
+monitor's own preflight (`chat --help`) is what refuses a harness that does not list
+the flag, and `cargo test -p eidolon-coordinator` covers that refusal. It is evidence
+of this plugin's half of the contract.
+
 ## `ack-failure.sh` — the process, when it cannot write what it just did
 
 ```bash

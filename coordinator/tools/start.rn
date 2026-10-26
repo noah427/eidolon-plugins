@@ -4,7 +4,7 @@
 pub fn manifest() {
     #{
         name: "coordinator_start",
-        description: "Start and adopt one managed worker as one operation. The harness holds the child before its first model turn; adoption is made durable before release. Name an operation id and retry ONLY the same immutable input to reconcile. A partial/ambiguous outcome is not success and never causes a blind replacement or brief resend. The child currently uses persistent headless chat; desktop/persona enforcement is not implied. Model/spend/workspace permissions are decided by this call's dispatcher, not by rank. A transport-accepted brief is not proof it was consumed or executed.",
+        description: "Start and adopt one managed worker as one operation. The harness holds the child before its first model turn; adoption is made durable before release. Name an operation id and retry ONLY the same immutable input to reconcile. An optional rank appends that rank's block (the plugin's ranks/<rank>.md) beside the persona at spawn; the monitor binds the digest of the block's exact bytes into the operation, so editing the file and retrying the same operation is refused, not re-told. A partial outcome is not success and never causes a blind replacement. The brief is one correlated delivery: a key minted once and stored before the send, so repeating this same operation carries the same key and the worker deduplicates it instead of receiving a second brief. The child currently uses persistent headless chat; desktop/persona enforcement is not implied. Model/spend/workspace permissions are decided by this call's dispatcher, not by rank. A journaled receipt says the record is in the worker's log; it is not proof the model read it, that a turn ran, or that the work happened. A correlated delivery does not wake the recipient.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
@@ -14,7 +14,9 @@ pub fn manifest() {
                 "workspace": #{ "type": "string", "description": "Existing working directory for the child; no worktree is created." },
                 "model": #{ "type": "string", "description": "Explicit provider:model key; this may spend within the admitted scope." },
                 "persona": #{ "type": "string", "description": "Optional requested persona; not an authority grant or verified visibility claim." },
-                "brief": #{ "type": "string", "description": "Bounded assignment delivered as one peer message after durable supervision." },
+                "rank": #{ "type": "string", "enum": ["imperator", "legatus", "tribunus", "miles", "centurio"],
+                    "description": "Optional rank whose block under the plugin's ranks/ is appended beside the persona at spawn, through the CLI's generic --system-append. The monitor reads the block and binds the digest of its exact bytes into this operation's immutable input; a rank with no written block appends nothing. Not a persona rewrite, not an enforcement, and not a permission." },
+                "brief": #{ "type": "string", "description": "Bounded assignment journaled into the worker's own log after durable supervision, under a key minted once for this operation; not an inbox message, and it does not wake the worker." },
             },
             "required": ["operation", "workspace", "model", "brief"],
         },
@@ -36,6 +38,16 @@ pub async fn call(input) {
     }
     match text_of(input.get("persona")) {
         Some(persona) => { args.insert("persona", persona); }
+        None => {}
+    }
+    // The rank's name only. There is no `rank_digest` argument to send: the
+    // monitor reads the block itself and binds the digest of those exact bytes,
+    // so a retry whose file changed refuses instead of injecting new text.
+    match text_of(input.get("rank")) {
+        Some(rank) => match refuse_control_chars("rank", rank) {
+            Some(e) => return Err(e),
+            None => { args.insert("rank", rank); }
+        },
         None => {}
     }
     call_service("start", args).await

@@ -35,14 +35,23 @@ mechanism. Token possession is transport auth, not proof of a caller's role.
 `EIDOLON_COORDINATOR_BIN` must name a harness with the enforced startup hold.
 The current child is persistent headless chat, not a desktop-visibility claim.
 
-Durable intent precedes launch; durable adoption precedes release. Brief send has
-its own write-ahead Attempted/Accepted record. Accepted is the transport's word,
-not consumption or execution proof. An ambiguous attempt is never blindly resent.
-Retry the same immutable operation to reconcile; never change its input under the
-same id. After monitor restart, missing process/channel receipts mean Unknown,
-not permission to respawn. Monitor death closes the chat's owned stdin; the child
-exits at its input boundary and journals the closure. No automatic recovery budget,
-context compaction, retirement policy or live deployment is implied.
+Durable intent precedes launch; durable adoption precedes release. The brief is
+one **correlated delivery**: a key is minted once, stored on the operation before
+the transport is given anything, and the record that key names in the worker's own
+log is the whole of the delivery — there is no inbox message beside it. The store
+keeps the answer as itself: `Journaled` (this call appended the record), `Existing`
+(an earlier call did, and nothing was sent again), `Refused` with the recipient's
+own kind, `Unknown` (no durable acceptance and no evidence of absence), or
+`Unsupported` (the worker's build does not know the op — nothing was sent and no
+legacy message was sent in its place). None of them is consumption or execution
+proof, and a correlated delivery does not wake the recipient: the record is in its
+log and it reads that at its next turn. A repeat of the same immutable operation
+re-sends under the same key, which the recipient deduplicates, and retrying an
+operation whose record is already journaled sends nothing at all. After monitor
+restart, missing process/channel receipts mean Unknown, not permission to respawn.
+Monitor death closes the chat's owned stdin; the child exits at its input boundary
+and journals the closure. No automatic recovery budget, context compaction,
+retirement policy or live deployment is implied.
 
 ### Current operational limits
 
@@ -73,12 +82,87 @@ cleanup or failed receipt persistence. This does not add general retirement poli
 Stopping a whole monitor still closes all its owned pipes; it is not a substitute
 for this scoped operation or permission to restart a live fleet.
 
-Attempted-without-Accepted brief delivery remains ambiguous and is not resent.
-There is currently no supported resolution verb: do not repair it by silently
-editing the store or treating transcript absence as proof of non-delivery. A future
-explicitly admitted resolution must preserve who decided, when, observed evidence
-and the chosen action. It must not claim exactly-once delivery. Until that surface
-exists, this operation remains blocked/ambiguous rather than declared complete.
+A brief delivery that ended `Unknown`, or whose send was cut off before any answer
+(the durable write-ahead `Attempted`), is resumed by repeating the same immutable
+operation: the delivery key and binding digest were durable before the first send,
+so the repeat carries them and the recipient answers `Existing` rather than taking
+a second brief. That is correlation, not a claim: nothing here reports delivery on
+`Unknown`, and a `Refused` or `Unsupported` answer is never retried or downgraded
+to the legacy inbox path. A store written before correlated delivery has an
+`Attempted` with no key, and there the ambiguity is real — it is not resent, do not
+repair it by silently editing the store or treating transcript absence as proof of
+non-delivery. A legacy `Accepted` receipt likewise stays readable and is never
+reported as a correlated record. Neither claims exactly-once delivery.
+
+## Rank blocks: what a child is told beside its persona
+
+A managed start may name a rank: `imperator`, `legatus`, `tribunus`, `miles`, or
+optionally `centurio`. The names are the operator's convention — this plugin adds,
+renames and infers none of them, and writes no doctrine into a block.
+
+The rank's text lives in one file per rank under the plugin's own `ranks/`
+directory (`<plugin>/ranks/<rank>.md`, override the directory with
+`EIDOLON_COORDINATOR_RANKS`). Those are ordinary files an operator edits and
+reviews, and they ship as placeholders that say they are unwritten: **nothing is
+appended while a block holds only whitespace and its placeholder comment, and a
+rank with no file at all appends nothing either.** A rank without text is a
+session told no rank text, never a failed launch.
+
+The addition is delivered through the CLI's generic flag:
+
+```
+eidolon … chat --model <model> --system-append <launches>/<instance>.system-append
+```
+
+That file holds **the exact bytes that were hashed** for this launch: written 0600
+into the launch's own 0700 directory, flushed, made read-only (0400), re-read and
+re-hashed against the recorded digest before the spawn, and left there with the log.
+It is appended to
+the resolved system prompt before the session exists, so the harness's
+`SessionStart` record captures the prompt the child actually had. It sits beside the
+persona; it is **not** a persona rewrite (never folded into `--persona`, whose
+semantics are the persona note's), and it enforces nothing.
+
+The binding is the part that matters. When the launch is prepared the monitor reads
+the block's bytes, hashes them (SHA-256), and puts **the rank name and that digest**
+into the operation's immutable request before the intent is durably recorded. A
+caller names the rank and never the digest: a digest the monitor did not compute
+from the file is refused. The block is read again immediately before the child is
+spawned, and bytes that no longer hash to the recorded digest refuse the spawn with
+`the <rank> rank block … changed after this launch was prepared`. A retry of the
+same operation after somebody edited the block is therefore refused, not re-told
+different text; changing a rank's text means a new operation. A refusal to start
+leaves the host reporting `NotCreated`, because no child was made — it is not an
+attempt whose outcome is unknown.
+
+**The digest travels with the text.** The block's *path* is never handed onward: a
+path promises that the file will still say the same thing when the CLI reads it, and
+that promise is exactly what a digest replaces. The host writes the hashed bytes to
+a launch-private file and passes that, so the text the CLI composes is the text the
+record names. The remaining exposure is a deliberate same-user rewrite of the
+launch's own read-only copy in the moment between that final re-read and the child's
+open — the same user could rewrite the store just as easily. It is not the operator
+editing a block after a launch was prepared, which is the case the binding exists for,
+and which is refused by name.
+
+`--system-append` is the core/CLI lane's flag, and it is **per subcommand**. Before
+spawning a ranked child the monitor asks the harness (`chat --help`) whether that
+subcommand carries the flag, and a harness whose `chat` does not is refused by name
+rather than started unranked:
+
+```
+this harness's `chat` does not accept `--system-append`, so the `miles` rank block
+cannot be appended to the child's resolved system prompt: `eidolon chat --help`
+exited 0 and its help does not list the flag. Refusing to start — …
+```
+
+The installed harness at this plugin's ref (`c66e430`) has no `--system-append` on
+any subcommand, and the core lane's current head (`c78dc43`) carries it on `run`
+only — not on `chat`. So **a ranked start refuses on today's harness**, by the
+sentence above, before anything is created: the plugin's half is complete and
+exercised against a stand-in child, and the child half needs `chat --system-append`
+in the CLI. Nothing here folds rank text into `--persona` to work around it, and a
+ranked start is never reported as managed when it cannot be delivered.
 
 ## What a notice is, and what it is not
 
@@ -204,6 +288,9 @@ than only a process death. Three rules beside that:
 ## Prerequisites
 
 - eidolon with the plugin runtime and the structured roster, and `eidolon` on `PATH`.
+- `eidolon chat` with the generic `--system-append <path>` flag, if any start names a
+  rank. A harness without it fails a ranked launch rather than starting the session
+  without the rank text (see **Rank blocks**).
 - Rust (or Nix) to build the monitor.
 
 ## Install
@@ -233,7 +320,9 @@ HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
   bash tests/coordinator/run.sh                     # the fixture: 43 checks
 HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
   bash tests/coordinator/ack-failure.sh             # the process stops when it cannot write: 8 checks
-cargo test -p eidolon-coordinator                   # the monitor's own 37
+python3 tests/coordinator/rank-launch.py target/debug/eidolon-coordinator
+                                                    # the ranked launch and its binding: 6 checks
+cargo test -p eidolon-coordinator                   # the monitor's own 103 (one ignored fixture entry)
 ```
 
 The fixture drives the real monitor against a stand-in harness — its own port, its
@@ -252,3 +341,8 @@ rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/eidolon/coordinator"
 
 The state directory holds the adoption records and the notices; deleting it is what
 ends them, and there is nothing else to clean up.
+
+The rank blocks live inside the plugin folder (`ranks/`), because that folder is the
+plugin directory. `eidolon plugins uninstall` removes it, so copy any block you wrote
+before uninstalling: the operator's own words are not something the plugin can
+recreate.
