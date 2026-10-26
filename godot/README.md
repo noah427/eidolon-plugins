@@ -72,7 +72,9 @@ of that block, and an edit to the command asks again.
 ## Install
 
 ```bash
-eidolon plugins install dxcently/eidolon-plugins godot
+eidolon plugins install noah427/eidolon-plugins godot
+
+*(This repository is a fork of `dxcently/eidolon-plugins`; the install line above names the fork, because the fork is where this plugin ships from.)*
 eidolon plugins trust godot
 for v in status tree node set call scene run; do
     eidolon plugins grant "godot_$v" "file:~/.config/eidolon/godot.token"

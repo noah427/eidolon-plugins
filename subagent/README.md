@@ -278,7 +278,7 @@ answer.
 ## Install
 
 ```bash
-eidolon plugins install dxcently/eidolon-plugins subagent
+eidolon plugins install noah427/eidolon-plugins subagent
 eidolon plugins trust subagent
 ```
 

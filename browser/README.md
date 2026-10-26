@@ -39,7 +39,7 @@ page scripts.
 
    ```bash
    # Nix: builds it with Chromium included
-   nix profile install github:dxcently/eidolon-plugins#browser
+   nix profile install github:noah427/eidolon-plugins#browser
    ```
 
    ```bash
@@ -55,7 +55,7 @@ page scripts.
    ```
 
    (A symlink keeps one copy: `ln -s "$PWD/browser" ~/.config/eidolon/plugins/browser`.
-   From a Nix-only install without a clone: `git clone https://github.com/dxcently/eidolon-plugins` first.)
+   From a Nix-only install without a clone: `git clone https://github.com/noah427/eidolon-plugins` first.)
 
    Then vouch its verbs — that is what stops the gate asking on every call — and
    grant the token file each verb reads, so the credential is a recorded

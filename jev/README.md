@@ -95,7 +95,7 @@ is an error, which a graph routes to its `ERROR` event.
 1. The plugin, from this repo (installing does not trust):
 
    ```bash
-   eidolon plugins install dxcently/eidolon-plugins jev
+   eidolon plugins install noah427/eidolon-plugins jev
    ```
 
    or, from a clone, `cp -r jev ~/.config/eidolon/plugins/jev`.
@@ -138,7 +138,7 @@ needs a model key; no step spends anything.
 
 ```bash
 P=~/.config/eidolon/plugins/jev
-R=<your checkout of dxcently/eidolon-plugins>   # the test scaffolding is here, not in $P
+R=<your checkout of noah427/eidolon-plugins>   # the test scaffolding is here, not in $P
 
 # 0. the install carries no test scaffolding: none of these exist under $P
 find $P \( -name 'test*' -o -name '*.py' -o -path "$P/*/plugin.rn" \) | wc -l
