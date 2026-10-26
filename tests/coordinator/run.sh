@@ -58,7 +58,7 @@ check_absent() { # check_absent <name> <haystack> <needle>
 # every test that exercises only the tools on one side of the split, and fails
 # in service with "not answering" against a monitor that is running fine.
 declared_port=$(sed -n 's/.*readiness: #{ port: \([0-9]*\).*/\1/p' "$repo/coordinator/plugin.rn" | head -1)
-default_port=$(grep -oE 'unwrap_or\([0-9]{4}\)' "$repo/coordinator/service/src/main.rs" | head -1 | tr -dc '0-9')
+default_port=$(sed -n 's/.*const DEFAULT_PORT: u16 = \([0-9]*\).*/\1/p' "$repo/coordinator/service/src/main.rs" | head -1)
 for tool in "$repo"/coordinator/tools/*.rn; do
     dialed=$(sed -n 's/.*base_url: "http:\/\/127\.0\.0\.1:\([0-9]*\)".*/\1/p' "$tool" | head -1)
     [ -z "$dialed" ] && continue
@@ -80,16 +80,16 @@ check_count() { # check_count <name> <haystack> <expected> <pattern>
     fi
 }
 
-# ---- the monitor's own port: never the operator's. -------------------------
-service_port=
-for p in 8095 8094 8095 8096 8097 8098; do
-    if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; then
-        service_port=$p
-        break
-    fi
-done
-if [ -z "$service_port" ]; then
-    say "FAIL no free port to start the monitor on"
+# ---- the monitor's port: fixed, and this run must own it. ------------------
+# 8095 is what `plugin.rn` declares and what every tool's `service()` dials, and the
+# monitor cannot be told to use another — so the isolation cannot be a number this
+# script picks. If something is already answering there, this run is not isolated and
+# says so instead of quietly testing a split. A coordinator on the host is what that
+# usually means: run this inside `unshare -rn` and 8095 is nobody's until the monitor
+# below takes it (README, "The port").
+service_port=8095
+if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$service_port" 2>/dev/null; then
+    say "FAIL 127.0.0.1:$service_port is already answering, and the monitor cannot use another port"
     exit 1
 fi
 say "monitor port: $service_port"
@@ -166,7 +166,6 @@ if [ ! -x "$bin" ]; then say "FAIL no monitor binary at $bin"; exit 1; fi
 root=$work/state
 export EIDOLON_COORDINATOR_ROOT=$root
 export EIDOLON_COORDINATOR_BIN=$work/eidolon
-export EIDOLON_COORDINATOR_PORT=$service_port
 export EIDOLON_COORDINATOR_INTERVAL_S=1
 export EIDOLON_COORDINATOR_TOKEN=$XDG_CONFIG_HOME/eidolon/coordinator.token
 

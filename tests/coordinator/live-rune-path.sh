@@ -52,11 +52,11 @@ check() { # check <name> <actual> <expected>
         say "FAIL $1: wanted [$3], got [$2]"; fail=$((fail + 1)); fi
 }
 
-port=
-for p in 8095 8094 8095 8096 8097 8098; do
-    if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; then port=$p; break; fi
-done
-[ -n "$port" ] || { say "FAIL no free port"; exit 1; }
+# Fixed, like the plugin declares it; the monitor cannot be told to use another.
+port=8095
+if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+    say "FAIL 127.0.0.1:$port is already answering, and the monitor cannot use another port"; exit 1
+fi
 
 w=$(mktemp -d)
 mkdir -p "$w/run" "$w/.config/eidolon"
@@ -139,7 +139,7 @@ check "the worker's session id is a minted id, not a path" \
     "$(printf '%s' "$WORKER" | grep -cE '^[0-9]+(-[0-9]+)?$')" "1"
 say "worker: $WORKER    service-path coordinator (supplied by this script): $SERVICE_COORD"
 
-export EIDOLON_COORDINATOR_ROOT=$w/store EIDOLON_COORDINATOR_BIN=$EID EIDOLON_COORDINATOR_PORT=$port EIDOLON_COORDINATOR_INTERVAL_S=1 EIDOLON_COORDINATOR_TOKEN=$HOME/.config/eidolon/coordinator.token
+export EIDOLON_COORDINATOR_ROOT=$w/store EIDOLON_COORDINATOR_BIN=$EID EIDOLON_COORDINATOR_INTERVAL_S=1 EIDOLON_COORDINATOR_TOKEN=$HOME/.config/eidolon/coordinator.token
 COORD=$repo/target/debug/eidolon-coordinator
 [ -x "$COORD" ] || (cd "$repo" && cargo build -q -p eidolon-coordinator)
 token=$("$COORD" --print-token | sed -n '1p')

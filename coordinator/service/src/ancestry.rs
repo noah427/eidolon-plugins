@@ -843,8 +843,12 @@ impl NoFocusGuard for PersistentRuleGuard {}
 /// The value is read once at start and must not predate that start, so a stamp
 /// composed by the launching shell (`@$(date +%s)`) would otherwise fail by exec
 /// latency — punishing the honest procedure and rewarding a stamp written into the
-/// future. A few seconds of tolerance admits the honest case; a leftover stamp from
-/// a previous run is minutes or hours old and is still refused.
+/// future. A few seconds of tolerance admits the honest case, and it is a real window:
+/// a stamp written **up to three seconds before this process started** passes, which is
+/// to say a leftover from a restart *inside* that window rather than from the last boot.
+/// The window is bounded by the compositor-instance match: a stamp naming another
+/// instance is refused whatever its age, so it cannot cross a compositor restart.
+/// Anything older than the tolerance is refused outright.
 pub const ATTESTATION_GRACE_S: u64 = 3;
 
 pub fn instance_start(signature: &str) -> Option<u64> {

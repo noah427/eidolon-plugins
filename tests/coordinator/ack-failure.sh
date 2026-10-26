@@ -41,15 +41,13 @@ check() {
     fi
 }
 
-port=
-for p in 8095 8094 8095 8096 8097 8098; do
-    if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; then
-        port=$p
-        break
-    fi
-done
-if [ -z "$port" ]; then
-    say "FAIL no free port for the monitor"
+# Fixed, like the plugin declares it — and deliberately NOT isolated with a user
+# namespace: this fixture's subject is a store the process must fail to write, and
+# `unshare -rn` maps the caller to uid 0, which writes into a read-only directory
+# regardless. It needs a free 8095 on the host rather than a private one.
+port=8095
+if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+    say "FAIL 127.0.0.1:$port is already answering, and the monitor cannot use another port"
     exit 1
 fi
 
@@ -109,7 +107,6 @@ fi
 
 export EIDOLON_COORDINATOR_ROOT=$root
 export EIDOLON_COORDINATOR_BIN=$work/eidolon
-export EIDOLON_COORDINATOR_PORT=$port
 export EIDOLON_COORDINATOR_INTERVAL_S=1
 export EIDOLON_COORDINATOR_TOKEN=$XDG_CONFIG_HOME/eidolon/coordinator.token
 

@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -30,11 +29,10 @@ with tempfile.TemporaryDirectory(prefix="eidolon-managed-cancel-") as directory:
     work.mkdir()
     plugin = config / "plugins/coordinator"
     shutil.copytree(SOURCE, plugin)
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    for tool in (plugin / "tools").glob("*.rn"):
-        tool.write_text(tool.read_text().replace("127.0.0.1:8095", f"127.0.0.1:{port}"))
+    # The monitor binds 8095 and every tool's `service()` dials it; neither can be told
+    # otherwise, so this run owns that port instead of choosing one — and the tools under
+    # test are the SHIPPED bytes, never a copy rewritten to point somewhere else.
+    port = 8095
     (plugin / "workflows").mkdir(exist_ok=True)
     (plugin / "workflows/cancel-only.rn").write_text('''
 pub fn workflow() { #{ name: "cancel-only", description: "gate probe", approval: "mutating", params: #{ "type": "object" } } }
@@ -66,7 +64,7 @@ while channel.recv(4096):
 sys.stdin.buffer.read()
 '''.replace('REAL_HARNESS', repr(EIDOLON)))
     child.chmod(0o700)
-    env.update(EIDOLON_COORDINATOR_PORT=str(port), EIDOLON_COORDINATOR_BIN=str(child), EIDOLON_COORDINATOR_INTERVAL_S="60")
+    env.update(EIDOLON_COORDINATOR_BIN=str(child), EIDOLON_COORDINATOR_INTERVAL_S="60")
     monitor_root = root / "monitor"
     log_file = (root / "monitor.log").open("wb")
     monitor = None
