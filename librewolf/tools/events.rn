@@ -1,0 +1,72 @@
+// `librewolf_events`: the source tool the harness dispatches for this plugin's DECLARED
+// events, and the delta read a model makes after a wake. Read-only.
+pub fn manifest() {
+    #{
+        name: "librewolf_events",
+        description: "Sample a declared browser event or read its bounded delta. document_ready is scoped by tab_id and reports identified-document readiness. control_appeared is scoped by tab_id plus the watch_id returned by librewolf_watch; it reports CSS DOM presence, not visibility. Both return {epoch,seq,holds}; epoch identifies the subscription/source, seq counts false-to-true edges, and holds is the current level. An initial true level is not a control-appearance edge. since is {epoch,seq}; source loss, replacement, or expired retention yields a declared terminal code. delta:true additionally returns at most 256 records, never page text. Event sampling installs nothing; observer installation is the separate mutating watch tool. The tab must already have been enabled by a person's toolbar click.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "event": #{
+                    "type": "string",
+                    "description": "The declared event's name. document_ready or control_appeared.",
+                },
+                "filter": #{
+                    "type": "object",
+                    "description": "Scoping for the event, validated by the harness against the declaration's filter schema and passed through verbatim. document_ready needs tab_id; control_appeared needs tab_id and watch_id returned by librewolf_watch.",
+                },
+                "since": #{
+                    "type": "object",
+                    "description": "A cursor: {epoch, seq}. With delta, the records after it are returned; a cursor from another epoch is not a continuation of this source.",
+                },
+                "delta": #{
+                    "type": "boolean",
+                    "description": "Return the records after the cursor as well. The harness never sets this and never reads it.",
+                },
+            },
+            "required": ["event", "filter"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("events", input).await
+}
+// Everything below is the same in every librewolf_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed
+// over whole.
+
+// The bridge host (../service). LibreWolf starts it, not eidolon: the browser
+// runs it as its native messaging host, so there is no `eidolon plugins service
+// start librewolf` to name. Change the port here and the host's
+// EIDOLON_LIBREWOLF_PORT together.
+fn service() {
+    #{
+        name: "librewolf",
+        base_url: "http://127.0.0.1:8091",
+        token_file: "~/.config/eidolon/librewolf.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the browser is not running with the extension, or
+    // no profile has it loaded. There is no command that fixes that, so the
+    // answer names the one act that does instead of leaving a refusal to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the LibreWolf bridge is not answering on 127.0.0.1:8091 — LibreWolf must be running with the librewolf bridge extension connected, because the browser starts this host and eidolon cannot; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`librewolf bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok { Ok(out.result) } else { Err(out.error) }
+}

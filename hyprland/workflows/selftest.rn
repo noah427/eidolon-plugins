@@ -1,0 +1,543 @@
+// The plugin checked against fixed answers instead of a live session: the harness
+// (tests/hyprland/run.sh) puts fake `hyprctl`, `grim`, `wlrctl` and `wtype` first on PATH
+// and runs one case of this workflow with `--args '{"case":"..."}'`. Every check here is
+// about what a tool does with a given world — a target that moved, died, was replaced, is
+// hidden, is not focused — and the harness is what reads the fake clients' logs afterwards
+// to prove that a refusal injected nothing.
+//
+// Cases: inspect, inspect-pinned, inspect-special, inspect-special-closed, visibility, click,
+// click-stale, click-gone, click-replaced, click-no-button, click-pointer-miss, click-hidden,
+// click-pinned, click-special-closed, click-monitor-switch, click-monitor-switch-mid-count,
+// click-moved-midway, click-hidden-midway, click-unmapped-midway, click-input-refused-midway,
+// click-pointer-drift, scroll-monitor-switch, scroll, scroll-hidden, type, type-not-focused,
+// type-focus-first, type-control, type-hidden, key, key-bad-mod, key-hidden,
+// screenshot-monitor, screenshot-window, screenshot-region, screenshot-hidden,
+// screenshot-special-closed, tools-missing, focus-window, focus-workspace, focus-refused.
+
+pub fn workflow() {
+    #{
+        name: "selftest",
+        description: "Check the hyprland tools against fixed compositor answers: observation (including the visibility the compositor's own fields do not answer — off-workspace, pinned and special), focus, and every refusal (stale, moved, replaced, gone, off screen, unfocused, missing input client). Needs fake hyprctl/grim/wlrctl/wtype first on PATH; tests/hyprland/run.sh sets that up, one case per run. The `visibility` case reads nothing but hyprland_inspect, so it also runs against a live session (tests/hyprland/check-live.sh). Completes if every check holds, fails naming the ones that do not.",
+        approval: "read_only",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "case": #{ "type": "string", "description": "Which case to run, e.g. click-stale." },
+                "class": #{ "type": "string", "description": "Class of the window the case aims at. Default foot." },
+                "text": #{ "type": "string", "description": "Text the type cases send. Default a fixed sentence." },
+                "expect_windows": #{ "type": "integer", "description": "How many windows the inspect case should see. Default 3." },
+            },
+            "required": ["case"],
+        },
+    }
+}
+
+pub async fn run(input) {
+    let case = match input.get("case") {
+        Some(c) => if c is String { c } else { "" },
+        None => "",
+    };
+    let class = match input.get("class") {
+        Some(c) => if c is String { c } else { "foot" },
+        None => "foot",
+    };
+    let text = match input.get("text") {
+        Some(t) => if t is String { t } else { "hello from the selftest" },
+        None => "hello from the selftest",
+    };
+    let out = [];
+    let bad = [];
+
+    let seen = match inspect().await {
+        Ok(v) => v,
+        Err(e) => return fatal("hyprland_inspect did not answer: " + `${e}`),
+    };
+    let windows = seen.windows;
+    let target = match window_by_class(windows, class) {
+        Some(w) => w,
+        None => return fatal(`no window of class ${class} in the fixture: ${window_classes(windows)}`),
+    };
+
+    if case == "inspect" || case == "inspect-pinned" || case == "inspect-special"
+        || case == "inspect-special-closed" {
+        let want = match input.get("expect_windows") {
+            Some(n) => if n is i64 { n } else { 3 },
+            None => 3,
+        };
+        check(out, bad, "inspect sees every window", windows.len(), want);
+        check(out, bad, "inspect sees both monitors", seen.monitors.len(), 2);
+        check(out, bad, "the cursor position is read", seen.cursor.x, 1148);
+        if case == "inspect" {
+            check(out, bad, "a window carries the layout rect it is on", target.rect, "1934,69 1892x997");
+            check(out, bad, "geometry is in layout coordinates, one space for every tool", target.at.x, 1934);
+            check(out, bad, "the focused window is marked", target.focused, true);
+            check(out, bad, "the active address is the focused one", seen.active, target.address);
+            check(out, bad, "the fingerprint has identity, workspace and geometry", target.fingerprint.split("|").collect::<Vec>().len(), 7);
+            check(out, bad, "the fingerprint names the window's own process", target.fingerprint.contains(`${target.pid}`), true);
+            check(out, bad, "the second monitor's scale and transform are reported", monitor_named(seen.monitors, "DP-2").scale, 2.0);
+            check(out, bad, "the second monitor's transform is reported", monitor_named(seen.monitors, "DP-2").transform, 1);
+            // The world is the compositor's own shape, and this is what that means: the fields
+            // upstream really sends, `visible` among them, saying what upstream really says.
+            check(out, bad, "a workspace the first output is showing is visible", workspace_named(seen.workspaces, "1").visible, true);
+            check(out, bad, "a workspace the second output is showing is visible", workspace_named(seen.workspaces, "11").visible, true);
+            check(out, bad, "a workspace nobody is showing is reported as not visible", workspace_named(seen.workspaces, "12").visible, false);
+            check(out, bad, "an ordinary workspace is not called special", workspace_named(seen.workspaces, "12").special, false);
+            let hidden = match window_by_class(windows, "hidden-app") {
+                Some(h) => h,
+                None => return fatal("no window of class hidden-app in the fixture"),
+            };
+            check(out, bad, "the fixture keeps the compositor's own visible field", hidden.compositor_visible, true);
+            check(out, bad, "so the window on a workspace nobody is showing is not visible", hidden.visible, false);
+            check(out, bad, "and it is still mapped, unhidden and unpinned", `${hidden.mapped}/${hidden.hidden}/${hidden.pinned}`, "true/false/false");
+        }
+        if case == "inspect-pinned" {
+            let pinned = match window_by_class(windows, "pinned-app") {
+                Some(w) => w,
+                None => return fatal("no window of class pinned-app in the fixture"),
+            };
+            check(out, bad, "the workspace a pinned window is on is still not visible", workspace_named(seen.workspaces, "12").visible, false);
+            check(out, bad, "the compositor calls the pinned window visible", pinned.compositor_visible, true);
+            check(out, bad, "a pinned window is reported as pinned", pinned.pinned, true);
+            check(out, bad, "and it is on screen anyway: a pinned window follows its output", pinned.visible, true);
+        }
+        if case == "inspect-special" {
+            let ws = workspace_named(seen.workspaces, "special:scratch");
+            check(out, bad, "the open special workspace is visible", ws.visible, true);
+            check(out, bad, "a special workspace is reported as special", ws.special, true);
+            check(out, bad, "the monitor names the special workspace it is showing", monitor_named(seen.monitors, "DP-2").special_workspace, "special:scratch");
+            check(out, bad, "the workspace underneath an open special is still shown", workspace_named(seen.workspaces, "11").visible, true);
+            check(out, bad, "a window on the open special workspace is on screen", match window_by_class(windows, "scratch-app") {
+                Some(w) => w.visible,
+                None => "missing",
+            }, true);
+        }
+        if case == "inspect-special-closed" {
+            let ws = workspace_named(seen.workspaces, "special:scratch");
+            check(out, bad, "a special workspace nobody has open is not visible", ws.visible, false);
+            check(out, bad, "it is still reported as special", ws.special, true);
+            check(out, bad, "the monitor says no special workspace is open", monitor_named(seen.monitors, "DP-2").special_workspace, "");
+            check(out, bad, "a window on it is off screen", match window_by_class(windows, "scratch-app") {
+                Some(w) => w.visible,
+                None => "missing",
+            }, false);
+        }
+        return report(out, bad);
+    }
+
+    if case == "visibility" {
+        // The same rule the tools use, worked out again from the monitors inspect itself
+        // reported — so this case says the same thing in the fixture world and against a live
+        // session (tests/hyprland/check-live.sh runs this one case live).
+        let disagree = [];
+        for ws in seen.workspaces {
+            if ws.visible != derived_workspace_visible(seen.monitors, ws) {
+                disagree.push(`workspace ${ws.name} ${ws.visible} vs ${derived_workspace_visible(seen.monitors, ws)}`);
+            }
+        }
+        for w in seen.windows {
+            if w.visible != derived_window_visible(seen.monitors, w) {
+                disagree.push(`window ${w.address} ${w.visible} vs ${derived_window_visible(seen.monitors, w)}`);
+            }
+        }
+        check(out, bad, "every record's visibility is what the monitors say", disagree.len(), 0);
+        if disagree.len() > 0 {
+            out.push(`     ${join(disagree, "; ")}`);
+        }
+        // What the derivation exists for: windows the compositor's own field calls visible that
+        // no output is showing. They are reported, not asserted — a session where every window
+        // happens to be on the workspace on screen has none, and that is not a failure.
+        let off = [];
+        for w in seen.windows {
+            if w.compositor_visible && !w.visible {
+                off.push(`${w.class} on workspace ${w.workspace.id}`);
+            }
+        }
+        out.push(`note: ${off.len()} window(s) the compositor's own visible calls visible that no output is showing: ${join(off, ", ")}`);
+        return report(out, bad);
+    }
+
+    // The click family: the point, the revalidation, and the refusals that must not
+    // inject anything.
+    if case == "click" || case == "click-no-button" || case == "click-stale"
+        || case == "click-gone" || case == "click-replaced" || case == "click-pointer-miss" {
+        let call = #{ window: target.address, expect: target.fingerprint, x: 100, y: 50, button: "left" };
+        if case == "click-no-button" {
+            call = #{ window: target.address, expect: target.fingerprint, x: 100, y: 50 };
+        }
+        let got = call_tool("hyprland_click", call).await;
+        if case == "click" {
+            ok_with(out, bad, "a fresh target is clicked", got, "clicked left ×1 at layout 2034,119 (window-relative 100,50)");
+            ok_with(out, bad, "the answer says where the pointer came from", got, "pointer: 1148,362 -> 2034,119");
+            ok_with(out, bad, "the answer says the window is unchanged", got, "the window is still the one that was inspected");
+            ok_with(out, bad, "the answer names what is not guaranteed", got, "separate compositor calls");
+        } else if case == "click-stale" {
+            refused(out, bad, "a window that moved since the inspection is refused", got, "is not the window that was inspected");
+            refused(out, bad, "the refusal names what moved", got, "at 1934,69 -> 1934,169");
+        } else if case == "click-gone" {
+            refused(out, bad, "a window that is gone is refused", got, "no open window has address");
+        } else if case == "click-replaced" {
+            refused(out, bad, "an address reused by another window is refused", got, "is not the window that was inspected");
+            refused(out, bad, "the refusal names the different process", got, "pid 133265 -> 999");
+        } else if case == "click-no-button" {
+            // Either the tool's own sentence or the harness's schema check: both name the
+            // missing field and refuse. What matters is that no click was constructed.
+            refused(out, bad, "a click with no button is refused", got, "button");
+            refused(out, bad, "the refusal says the field is required", got, "required");
+        } else {
+            refused(out, bad, "a pointer that did not arrive is refused", got, "the compositor says it is at");
+            refused(out, bad, "the refusal says nothing was clicked", got, "nothing was clicked or scrolled");
+        }
+        return report(out, bad);
+    }
+
+    // The guard that runs immediately before an input event, against a world that changed while
+    // the pointer was moving. The monitors case is the one a fingerprint cannot answer: the
+    // window is the same window on the same workspace, and its output is showing another one, so
+    // the target is on screen nowhere and a click at its layout coordinates would land on
+    // whatever is at that place now.
+    if case == "click-monitor-switch" || case == "click-moved-midway"
+        || case == "click-hidden-midway" || case == "click-unmapped-midway"
+        || case == "click-input-refused-midway" || case == "click-pointer-drift" {
+        let got = call_tool("hyprland_click", #{ window: target.address, expect: target.fingerprint, x: 100, y: 50, button: "left" }).await;
+        refused(out, bad, "the guard before the press refuses and nothing was clicked", got, "nothing was clicked");
+        if case == "click-monitor-switch" {
+            refused(out, bad, "the refusal names the output that switched away from the workspace", got, "switched away from workspace 11");
+            refused(out, bad, "and points at the explicit way to switch", got, "hyprland_focus");
+        } else if case == "click-moved-midway" {
+            refused(out, bad, "a window that moved between the move and the press is refused", got, "is not the window that was inspected");
+        } else if case == "click-hidden-midway" {
+            refused(out, bad, "a target that became hidden is refused", got, "is hidden again");
+        } else if case == "click-unmapped-midway" {
+            refused(out, bad, "a target that stopped being mapped is refused", got, "is not mapped any more");
+        } else if case == "click-input-refused-midway" {
+            refused(out, bad, "a target that stopped taking input is refused", got, "stopped accepting input");
+        } else {
+            refused(out, bad, "a pointer that moved after it arrived is refused", got, "not 2034,119 any more");
+        }
+        return report(out, bad);
+    }
+
+    // Every press is guarded on its own, so a world that changes after the first press stops the
+    // rest — and the answer counts the presses that went in, because saying "nothing happened"
+    // would be false and saying "clicked three times" would be false the other way.
+    if case == "click-monitor-switch-mid-count" {
+        let got = call_tool("hyprland_click", #{ window: target.address, expect: target.fingerprint, x: 100, y: 50, button: "left", count: 3 }).await;
+        ok_with(out, bad, "the presses that went in are counted", got, "clicked left ×1 of 3");
+        ok_with(out, bad, "and the answer says why it stopped", got, "switched away from workspace 11");
+        return report(out, bad);
+    }
+
+    if case == "scroll-monitor-switch" {
+        let got = call_tool("hyprland_scroll", #{ window: target.address, expect: target.fingerprint, dy: 3 }).await;
+        refused(out, bad, "the guard before the scroll refuses when the output switched away", got, "switched away from workspace 11");
+        refused(out, bad, "and the refusal says nothing was scrolled", got, "nothing was scrolled");
+        return report(out, bad);
+    }
+
+    if case == "click-hidden" {
+        let hidden = match window_by_class(windows, class) {
+            Some(h) => h,
+            None => return fatal(`no window of class ${class} in the fixture`),
+        };
+        let got = call_tool("hyprland_click", #{ window: hidden.address, expect: hidden.fingerprint, x: 5, y: 5, button: "left" }).await;
+        refuted_hidden(out, bad, got);
+        return report(out, bad);
+    }
+
+    // A pinned window is on screen on whatever workspace its output is showing, so aiming at it
+    // is not the off-screen case and must go through.
+    if case == "click-pinned" {
+        let pinned = match window_by_class(windows, class) {
+            Some(w) => w,
+            None => return fatal(`no window of class ${class} in the fixture`),
+        };
+        let got = call_tool("hyprland_click", #{ window: pinned.address, expect: pinned.fingerprint, x: 100, y: 50, button: "left" }).await;
+        ok_with(out, bad, "a pinned window on a workspace nobody is showing is clickable", got, "clicked left ×1 at layout 2034,119");
+        ok_with(out, bad, "the answer says where the pointer came from", got, "pointer: 1148,362 -> 2034,119");
+        return report(out, bad);
+    }
+
+    // Every other verb that aims at a window refuses a target no output is showing — the same
+    // refusal, in each tool's own words. The harness asserts that nothing was injected.
+    if case == "click-special-closed" || case == "scroll-hidden" || case == "type-hidden"
+        || case == "key-hidden" || case == "screenshot-special-closed" {
+        let away = match window_by_class(windows, class) {
+            Some(w) => w,
+            None => return fatal(`no window of class ${class} in the fixture`),
+        };
+        let got = if case == "click-special-closed" {
+            call_tool("hyprland_click", #{ window: away.address, expect: away.fingerprint, x: 5, y: 5, button: "left" }).await
+        } else if case == "scroll-hidden" {
+            call_tool("hyprland_scroll", #{ window: away.address, expect: away.fingerprint, dy: 3 }).await
+        } else if case == "type-hidden" {
+            call_tool("hyprland_type", #{ window: away.address, expect: away.fingerprint, text: text }).await
+        } else if case == "key-hidden" {
+            call_tool("hyprland_key", #{ window: away.address, expect: away.fingerprint, key: "Escape" }).await
+        } else {
+            call_tool("hyprland_screenshot", #{ target: "window", window: away.address, expect: away.fingerprint }).await
+        };
+        refuted_hidden(out, bad, got);
+        return report(out, bad);
+    }
+
+    if case == "scroll" {
+        let got = call_tool("hyprland_scroll", #{ window: target.address, expect: target.fingerprint, dy: 3 }).await;
+        ok_with(out, bad, "a scroll lands in the middle of the window by default", got, "with the pointer at layout 2880,567 (window-relative 946,498)");
+        ok_with(out, bad, "the amounts that were sent are reported", got, "scrolled dy=3 dx=0");
+        ok_with(out, bad, "the answer says the amount is the client's business", got, "how far the target scrolled");
+        return report(out, bad);
+    }
+
+    if case == "type" || case == "type-not-focused" || case == "type-focus-first" || case == "type-control" {
+        let call = #{ window: target.address, expect: target.fingerprint, text: text };
+        if case == "type-focus-first" {
+            call = #{ window: target.address, expect: target.fingerprint, text: text, focus_first: true };
+        }
+        if case == "type-control" {
+            call = #{ window: target.address, expect: target.fingerprint, text: "first line\nsecond line" };
+        }
+        let got = call_tool("hyprland_type", call).await;
+        if case == "type" {
+            ok_with(out, bad, "text goes to a focused window", got, `typed ${text.chars().count()} characters`);
+            ok_with(out, bad, "the focus was checked before the keys", got, "focus was verified immediately before the keys");
+            ok_with(out, bad, "the focus is unchanged through the text", got, "unchanged through the text");
+        } else if case == "type-not-focused" {
+            refused(out, bad, "text is refused when the target is not focused", got, "typing or keys would go to the wrong client");
+            refused(out, bad, "the refusal names focus_first", got, "Pass focus_first: true");
+        } else if case == "type-focus-first" {
+            ok_with(out, bad, "focus_first focuses the window and types", got, "focused it first");
+        } else {
+            refused(out, bad, "a newline in text is refused", got, "text contains a newline");
+            refused(out, bad, "the refusal names the key that types it", got, "hyprland_key types them");
+        }
+        return report(out, bad);
+    }
+
+    if case == "key" || case == "key-bad-mod" {
+        let call = #{ window: target.address, expect: target.fingerprint, key: "Escape", mods: ["ctrl"] };
+        if case == "key-bad-mod" {
+            call = #{ window: target.address, expect: target.fingerprint, key: "Escape", mods: ["hyper"] };
+        }
+        let got = call_tool("hyprland_key", call).await;
+        if case == "key" {
+            ok_with(out, bad, "a chord goes to a focused window", got, "pressed ctrl+Escape");
+            ok_with(out, bad, "the answer says the modifiers are released by name, not by exit", got, "pressed and released by name");
+            ok_with(out, bad, "and that nothing is left held down", got, "nothing is left held down");
+        } else {
+            refused(out, bad, "an unknown modifier is refused", got, `mods are shift, ctrl, alt, logo, win, altgr, capslock, not "hyper"`);
+        }
+        return report(out, bad);
+    }
+
+    if case == "screenshot-monitor" || case == "screenshot-window" || case == "screenshot-region" {
+        let call = #{ target: "monitor", monitor: "DP-2" };
+        if case == "screenshot-window" {
+            call = #{ target: "window", window: target.address, expect: target.fingerprint };
+        }
+        if case == "screenshot-region" {
+            call = #{ target: "window", window: target.address, expect: target.fingerprint, region: #{ x: 100, y: 50, w: 100, h: 50 } };
+        }
+        let got = call_tool("hyprland_screenshot", call).await;
+        ok_with(out, bad, "the capture is described as taken", got, "captured ");
+        if case == "screenshot-monitor" {
+            ok_with(out, bad, "a monitor capture is the whole output", got, "grim: -o DP-2");
+            ok_with(out, bad, "the monitor's scale is reported so pixels can be worked out", got, "scale 2");
+            ok_with(out, bad, "the monitor's transform is reported", got, "transform 1");
+            ok_with(out, bad, "the file is named", got, "file: /tmp/");
+        } else if case == "screenshot-window" {
+            ok_with(out, bad, "a window capture is the window's rectangle", got, `grim: -g "1934,69 1892x997"`);
+            ok_with(out, bad, "the occlusion caveat is stated", got, "anything overlapping");
+        } else {
+            ok_with(out, bad, "a region is a crop inside the window", got, `-g "2034,119 100x50"`);
+        }
+        return report(out, bad);
+    }
+
+    if case == "screenshot-hidden" {
+        let hidden = match window_by_class(windows, class) {
+            Some(h) => h,
+            None => return fatal(`no window of class ${class} in the fixture`),
+        };
+        let got = call_tool("hyprland_screenshot", #{ target: "window", window: hidden.address, expect: hidden.fingerprint }).await;
+        refuted_hidden(out, bad, got);
+        return report(out, bad);
+    }
+
+    if case == "tools-missing" {
+        let click = call_tool("hyprland_click", #{ window: target.address, expect: target.fingerprint, x: 10, y: 10, button: "left" }).await;
+        refused(out, bad, "a click with no pointer client is refused by name", click, "`wlrctl` is not on PATH");
+        refused(out, bad, "the refusal names what provides it", click, "the runtime package provides grim, wlrctl and wtype");
+        let typing = call_tool("hyprland_type", #{ window: target.address, expect: target.fingerprint, text: "x" }).await;
+        refused(out, bad, "typing with no keyboard client is refused by name", typing, "`wtype` is not on PATH");
+        return report(out, bad);
+    }
+
+    if case == "focus-window" || case == "focus-refused" {
+        let got = call_tool("hyprland_focus", #{ window: target.address, expect: target.fingerprint }).await;
+        if case == "focus-window" {
+            ok_with(out, bad, "a window is focused and the answer says it was verified", got, "verified against the compositor's own activewindow");
+        } else {
+            refused(out, bad, "a compositor that will not focus is reported", got, "would not focus");
+        }
+        return report(out, bad);
+    }
+
+    if case == "focus-workspace" {
+        let got = call_tool("hyprland_focus", #{ workspace: "11" }).await;
+        ok_with(out, bad, "a workspace is focused", got, "this is on the operator's screen now");
+        return report(out, bad);
+    }
+
+    fatal(`unknown case "${case}" — see the workflow's header for the list`)
+}
+
+// ---------------------------------------------------------------------------
+// Checks, and the two ways a tool answers one: the refusal text is the whole answer.
+
+fn fatal(msg) {
+    #{ content: msg, is_error: true }
+}
+
+fn check(out, bad, name, got, want) {
+    if `${got}` == `${want}` {
+        out.push("ok   " + name);
+    } else {
+        out.push("FAIL " + name + ": got " + `${got}` + ", want " + `${want}`);
+        bad.push(name);
+    }
+}
+
+fn refused(out, bad, name, result, needle) {
+    if !result.ok && result.text.contains(needle) {
+        out.push("ok   " + name);
+    } else {
+        out.push("FAIL " + name + ": answered " + result.text);
+        bad.push(name);
+    }
+}
+
+// An answer that should have worked, and should say the thing the case is about.
+fn ok_with(out, bad, name, result, needle) {
+    if result.ok && result.text.contains(needle) {
+        out.push("ok   " + name);
+    } else {
+        out.push("FAIL " + name + ": answered " + result.text);
+        bad.push(name);
+    }
+}
+
+fn refuted_hidden(out, bad, result) {
+    refused(out, bad, "a window on a workspace nobody is showing is refused", result, "which no output is showing");
+    refused(out, bad, "the refusal points at the explicit way to switch", result, "hyprland_focus");
+}
+
+async fn call_tool(name, input) {
+    match eidolon::tool_call(name, input).await {
+        Ok(t) => #{ ok: true, text: t },
+        Err(e) => #{ ok: false, text: e },
+    }
+}
+
+async fn inspect() {
+    match eidolon::tool_call("hyprland_inspect", #{ format: "json" }).await {
+        Ok(t) => json::from_string(t),
+        Err(e) => Err(e),
+    }
+}
+
+fn window_by_class(windows, class) {
+    for w in windows {
+        if w.class == class {
+            return Some(w);
+        }
+    }
+    None
+}
+
+fn window_classes(windows) {
+    let names = [];
+    for w in windows {
+        names.push(w.class);
+    }
+    join(names, ", ")
+}
+
+// The rule the tools derive visibility with, worked out again from the monitors
+// hyprland_inspect itself reported: a workspace is shown when it is an enabled output's active
+// workspace or the special workspace that output has open, and a window is on screen when it is
+// mapped, unhidden and either on such a workspace or pinned to such an output. Read from the
+// same upstream behaviour (CWorkspace::isVisibleNotCovered, IHyprRenderer::shouldRenderWindow)
+// but from the records, so it checks them rather than copying the code that made them — and it
+// is what makes the `visibility` case mean the same thing against a live session.
+fn derived_workspace_visible(monitors, ws) {
+    for m in monitors {
+        if m.disabled {
+            continue;
+        }
+        if m.active_workspace.id > 0 && m.active_workspace.id == ws.id {
+            return true;
+        }
+        if ws.name != "" && m.special_workspace == ws.name {
+            return true;
+        }
+    }
+    false
+}
+
+fn derived_window_visible(monitors, w) {
+    if !w.mapped || w.hidden {
+        return false;
+    }
+    if w.pinned {
+        for m in monitors {
+            if m.id == w.monitor && !m.disabled {
+                return true;
+            }
+        }
+        return false;
+    }
+    derived_workspace_visible(monitors, w.workspace)
+}
+
+fn monitor_named(monitors, name) {
+    for m in monitors {
+        if m.name == name {
+            return m;
+        }
+    }
+    #{}
+}
+
+fn workspace_named(workspaces, name) {
+    for ws in workspaces {
+        if ws.name == name {
+            return ws;
+        }
+    }
+    #{}
+}
+
+fn join(parts, sep) {
+    let out = "";
+    let first = true;
+    for p in parts {
+        if first {
+            first = false;
+        } else {
+            out += sep;
+        }
+        out += p;
+    }
+    out
+}
+
+fn report(out, bad) {
+    let text = "";
+    for l in out {
+        text += l + "\n";
+    }
+    if bad.len() > 0 {
+        return fatal(text + "selftest: " + `${bad.len()}` + " check(s) failed");
+    }
+    text + "selftest: " + `${out.len()}` + " checks hold"
+}

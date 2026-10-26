@@ -1,0 +1,31 @@
+// The plugin manifest for `godot` — the directory's name is the namespace every
+// verb it ships is registered under (`godot_status`, ...), so this file says only
+// what the plugin says about itself.
+pub fn manifest() {
+    #{
+        name: "godot",
+        version: "0.1.0",
+        description: "work on the scene a Godot editor is editing, through the bridge addon that editor has enabled: its tree, one node's script and exported properties, a property set as an undoable edit, a method call, opening and saving scenes, and playing or stopping the project",
+        // The daemon, declared: `eidolon plugins service approve godot` records the
+        // operator's yes against THIS text by hash, so an edit here asks again, and
+        // `service start` then runs it detached with readiness taken from the same
+        // `readiness` block the tools use. The `command` is resolved on PATH —
+        // `nix profile install <this repo>#godot` puts `eidolon-godot` there — and
+        // the service makes the token file on its first run.
+        //
+        // This is the half that faces the tools. The other half is the addon in
+        // `addon/`, which the operator enables in the project they want to lend:
+        // Godot starts nothing for us, so the editor dials out to this process
+        // rather than the other way round, and nothing here can start it.
+        service: #{
+            command: "eidolon-godot",
+            readiness: #{ port: 8092, health: "/health" },
+            ready_timeout_s: 30,
+        },
+        claims: #{
+            tools: ["status", "tree", "node", "set", "call", "scene", "run"],
+            workflows: ["selftest"],
+            grants: ["file:~/.config/eidolon/godot.token"],
+        },
+    }
+}

@@ -1,0 +1,61 @@
+// `librewolf_select`: choose option(s) in one <select> of an enabled tab, named by a
+// ref. Selection is its own act, not typing and not a click. `options` is the desired
+// SET: it replaces the selection, and an empty options clears it.
+pub fn manifest() {
+    #{
+        name: "librewolf_select",
+        description: "Choose the option(s) of one <select> in an enabled LibreWolf tab, named by a ref from librewolf_structure taken against the document the tab is showing now. A single select takes option; a multiple select takes options — the selection you want, which REPLACES the current one, and an empty options clears it entirely. Each selector names exactly one of index, value or label, so there is no precedence to get wrong; a value or label that matches more than one option is refused and the candidates are listed as index and label; a disabled option, or one in a disabled optgroup, is refused before anything is changed. The answer reports the selection as index and label only, read back from the live options after the page's handlers ran, plus changed and reached — an option's value is form data and is librewolf_field_value's alone. Asking for the selection that is already in place is a no-op and dispatches nothing. The tab must already be enabled by a person's click on the extension's toolbar button, and the request is refused rather than acted on if the document changed since the snapshot. It changes the page's state, which is why it is mutating.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "tab_id": #{ "type": "integer", "description": "The id of an enabled tab, from librewolf_tabs or librewolf_status." },
+                "ref": #{ "type": "string", "description": "A ref like e12-ab12cd34 from librewolf_structure for this tab, taken against its current document." },
+                "option": #{ "type": "object", "description": "A single <select>: the option to select. Exactly one of index, value or label.", "properties": #{ "index": #{ "type": "integer" }, "value": #{ "type": "string" }, "label": #{ "type": "string" } } },
+                "options": #{ "type": "array", "description": "A <select multiple>: the selection you want. It REPLACES the current one; an empty array clears the selection. Each entry names exactly one of index, value or label.", "items": #{ "type": "object", "properties": #{ "index": #{ "type": "integer" }, "value": #{ "type": "string" }, "label": #{ "type": "string" } } } },
+            },
+            "required": ["tab_id", "ref"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("select", input).await
+}
+// Everything below is the same in every librewolf_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed
+// over whole.
+
+// The bridge host (../service). LibreWolf starts it, not eidolon: the browser
+// runs it as its native messaging host, so there is no `eidolon plugins service
+// start librewolf` to name. Change the port here and the host's
+// EIDOLON_LIBREWOLF_PORT together.
+fn service() {
+    #{
+        name: "librewolf",
+        base_url: "http://127.0.0.1:8091",
+        token_file: "~/.config/eidolon/librewolf.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the browser is not running with the extension, or
+    // no profile has it loaded. There is no command that fixes that, so the
+    // answer names the one act that does instead of leaving a refusal to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the LibreWolf bridge is not answering on 127.0.0.1:8091 — LibreWolf must be running with the librewolf bridge extension connected, because the browser starts this host and eidolon cannot; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`librewolf bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok { Ok(out.result) } else { Err(out.error) }
+}

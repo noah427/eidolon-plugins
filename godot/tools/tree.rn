@@ -1,0 +1,67 @@
+// `godot_tree`: the shape of the scene the editor is editing.
+//
+// Paths are relative to the *edited scene's* root, and that is not where it looks:
+// an editor instantiates the scene inside its own viewport, under a path like
+// /root/@EditorNode@19507/.../SubViewport, so "/root/Main/Player" names nothing.
+// The root is ".", its children are "Player", "Player/Sprite".
+pub fn manifest() {
+    #{
+        name: "godot_tree",
+        description: "Walk the scene a Godot editor is editing and report its nodes: the path from the edited scene's root (the root itself is \".\"), name, class, the script attached to it, the scene file an instanced node came from, how many children it has, its owner, and the fingerprint that godot_set and godot_call require. depth is how far down to walk — default 2, -1 for the whole tree — and max caps how many nodes come back (default 300, at most 5000), with the answer saying whether it truncated. Nothing here changes anything. Use godot_node for one node's exported properties, signals and script methods, and pass its fingerprint, not this one, to a mutating verb.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "path": #{ "type": "string", "description": "Where to start, relative to the edited scene's root: \".\" (the default) is the root itself, \"Player\" a child of it, \"Player/Sprite\" a grandchild. A path beginning with \"/\" is refused: it is not one of these." },
+                "depth": #{ "type": "integer", "description": "How many levels below the start to include. Default 2; -1 walks the whole subtree." },
+                "max": #{ "type": "integer", "description": "The most nodes to return, 1 to 5000. Default 300." },
+            },
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("tree", input).await
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is the same in every godot_*.rn: upstream compiles each of
+// these files on its own, and a tool file is meant to be handed over whole.
+
+// The bridge host (../service). `eidolon plugins service start godot` runs it, and
+// the editor's addon dials it; the tools come in the other side. Change the port
+// here and the host's EIDOLON_GODOT_PORT together, and the token file here and
+// EIDOLON_GODOT_TOKEN_FILE.
+fn service() {
+    #{
+        name: "godot",
+        base_url: "http://127.0.0.1:8092",
+        token_file: "~/.config/eidolon/godot.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the host is not running. There is one command that
+    // fixes that, so the answer names it rather than leaving a connection refusal
+    // to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the godot bridge is not answering on 127.0.0.1:8092 — the eidolon-godot service has to be running (\`eidolon plugins service start godot\`); see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`the godot bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok {
+        Ok(out.result)
+    } else {
+        Err(out.error)
+    }
+}

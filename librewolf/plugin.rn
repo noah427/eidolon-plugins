@@ -1,0 +1,45 @@
+// The plugin manifest for `librewolf` — the directory's name is the namespace
+// every verb it ships is registered under (`librewolf_status`, ...), so this file
+// says only what the plugin says about itself.
+pub fn manifest() {
+    #{
+        name: "librewolf",
+        version: "0.3.0",
+        description: "work with the tabs a person enables in their own LibreWolf session by clicking the extension's toolbar button on each one: an inventory of every tab by title and id, and read, outline, click, type, scroll, navigate and go back on an enabled one",
+        // No `service:` block, on purpose. The process that has to be running is
+        // the native messaging host LibreWolf spawns because the extension names
+        // it — and `eidolon plugins service start` cannot start a browser. What
+        // this plugin reuses from the rest of the repo is the token, the
+        // `api_request` endpoint and the "answers with the reason it isn't there"
+        // error; the plugin's README says what an operator has to do instead.
+        // Events this plugin DECLARES it can emit, per the frozen contract
+        // (the plugin-event contract note in the operator's vault).
+        // Only what works is declared: document_ready is emitted on the confirmed false->true
+        // edge of a tab's document — the click's confirmation, a new document settling, or a
+        // same-document restoration — and the source tool answers from the host's own log.
+        // control_appeared is a document-bound CSS-presence subscription.
+        events: #{
+            control_appeared: #{
+                description: "a CSS selector acquired a matching DOM element in an explicitly installed observer",
+                filter_schema: #{ "type": "object", "properties": #{ "tab_id": #{ "type": "integer" }, "watch_id": #{ "type": "string" } }, "required": ["tab_id", "watch_id"], "additionalProperties": false },
+                source: #{ tool: "librewolf_events", args: #{}, every: 1 },
+                requires_subscription: true,
+                reasons: ["source_restarted", "observer_dropped", "cursor_expired", "cursor_invalid"],
+            },
+            document_ready: #{
+                description: "an enabled tab's document became identified and usable: the click's confirmation, a new document settling, or a same-document restoration",
+                filter_schema: #{ "type": "object", "properties": #{ "tab_id": #{ "type": "integer" } }, "required": ["tab_id"], "additionalProperties": false },
+                source: #{ tool: "librewolf_events", args: #{}, every: 1 },
+                reasons: ["source_restarted", "source_missing", "cursor_expired"],
+            },
+        },
+        claims: #{
+            tools: [
+                "status", "tabs", "read", "structure", "field_value", "click", "type",
+                "select", "set_checked", "submit", "screenshot", "download", "events", "watch",
+                "scroll", "navigate", "back", "detach",
+            ],
+            grants: ["file:~/.config/eidolon/librewolf.token"],
+        },
+    }
+}

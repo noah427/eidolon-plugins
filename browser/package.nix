@@ -18,15 +18,26 @@ rustPlatform.buildRustPackage {
       ../Cargo.lock
       ./service
       # The workspace has more than one member; cargo loads every member's
-      # manifest, so this package's source has to carry the other one.
+      # manifest, so each package's source has to carry all of them.
+      ../librewolf/service
+      ../claude/service
+      ../godot/service
       ../coordinator/service
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;
 
-  # One package, one program: without this the workspace's other member builds
-  # too, and `.#browser` -- which is also the flake default -- would carry it.
+  # The workspace has more than one member. Without this, `cargo build` builds every
+  # member and `$out/bin` ships both binaries: `nix build .#librewolf` would carry
+  # eidolon-browser, and `.#browser` would carry this one. One package, one program.
   cargoBuildFlags = [ "-p" "eidolon-browser" ];
+
+  # The same scope for the check phase, and it has to be said out loud: without it
+  # `cargo test` runs every workspace member's tests — claude's and librewolf's
+  # included — so this package fails on tests that are not its own and reports their
+  # verdict as its build's. The claude tests in particular drive a fake CLI through a
+  # Python shebang, an input this package does not declare. `cargo test
+  # -p eidolon-browser` is what runs here, and what a person runs by hand.
   cargoTestFlags = [ "-p" "eidolon-browser" ];
 
   nativeBuildInputs = [ makeWrapper ];

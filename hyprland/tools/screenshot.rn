@@ -1,0 +1,631 @@
+// `hyprland_screenshot`: hand the model a picture of a monitor, a workspace or a window,
+// by capturing to a file the operator's own machine can see and reading it back as an
+// image block (`view_image`'s shape, through the host's `image_read`).
+//
+// What it will not do: switch to a workspace that is not on a screen. A compositor only
+// renders what is visible, so a workspace that nobody is showing cannot be captured at
+// all — this tool refuses and names the alternative (hyprland_focus, which is an
+// explicit, visible change to what the operator sees) instead of switching on its own.
+//
+// A window is captured as a *region of the visible desktop*: grim's `-T` wants a
+// foreign-toplevel identifier, and nothing on this machine maps a Hyprland address to
+// one, so the crop is exactly the window's rectangle — anything overlapping it appears
+// as it does on screen. Both facts are in the result.
+
+// `mutating` — because of the disk, not the screen. The caller names where the PNG goes
+// (default `/tmp/eidolon-hyprland/<target-slug>.png`, in a 0700 directory) and the bytes
+// land there, overwriting whatever is at that path; that is the reach `write` carries, so
+// it is the class this tool carries. What the session shows is still only ever read: this
+// verb focuses nothing, switches nothing, injects nothing.
+pub fn manifest() {
+    #{
+        name: "hyprland_screenshot",
+        description: "Screenshot a Hyprland session and look at it: target monitor (a whole output, `-o`), workspace (the output showing it), or window (a crop of the window's rectangle). Returns the picture itself plus a text summary: what was captured, its logical layout rect, the owning monitor's scale and transform, and the file it was written to. Refuses a workspace that is not currently visible rather than switching to it, and refuses a window that moved or died since it was inspected when `expect` is given. Window captures include whatever overlaps the window, since only the visible desktop can be captured.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "target": #{ "type": "string", "enum": ["monitor", "workspace", "window"], "description": "What to capture." },
+                "monitor": #{ "type": "string", "description": "Output name (DP-1) for target=monitor, or the output to capture for target=workspace." },
+                "workspace": #{ "type": "string", "description": "Workspace id or name (\"11\") for target=workspace. It must be visible on some output." },
+                "window": #{ "type": "string", "description": "A window address from hyprland_inspect (\"0x562e1ac89e30\") or \"active\" for the focused window, for target=window." },
+                "expect": #{ "type": "string", "description": "The fingerprint hyprland_inspect reported for that window. Required when window is an address: a window that moved, resized, changed workspace or died since is refused rather than captured as if it were the one inspected." },
+                "region": #{ "type": "object", "description": "Optional crop, window-relative, for target=window: {x, y, w, h} in logical pixels inside the window's rectangle. Refused if it does not fit inside.", "properties": #{ "x": #{ "type": "integer" }, "y": #{ "type": "integer" }, "w": #{ "type": "integer" }, "h": #{ "type": "integer" } }, "required": ["x", "y", "w", "h"] },
+                "path": #{ "type": "string", "description": "Where to write the PNG. Default /tmp/eidolon-hyprland/<target-slug>.png, in a 0700 directory. The file is left in place; the image block is the same bytes." },
+            },
+            "required": ["target"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let target = word(input, "target");
+    if target != "monitor" && target != "workspace" && target != "window" {
+        return Err(`target is "monitor", "workspace" or "window", not "${target}"`);
+    }
+    let monitors = hypr_json(["-j", "monitors"]).await?;
+    let workspaces = hypr_json(["-j", "workspaces"]).await?;
+    let clients = hypr_json(["-j", "clients"]).await?;
+    let active = hypr_json(["-j", "activewindow"]).await?;
+
+    let plan = if target == "monitor" {
+        match monitor_plan(monitors, word(input, "monitor")) {
+            Ok(p) => p,
+            Err(m) => return Ok(refuse(m)),
+        }
+    } else if target == "workspace" {
+        match workspace_plan(monitors, workspaces, input) {
+            Ok(p) => p,
+            Err(m) => return Ok(refuse(m)),
+        }
+    } else {
+        match window_plan(monitors, clients, active, input) {
+            Ok(p) => p,
+            Err(m) => return Ok(refuse(m)),
+        }
+    };
+
+    let what = plan.what;
+    let logical_rect = plan.rect;
+    let region = plan.region;
+    let output = plan.output;
+    let monitor_name = plan.monitor;
+    let scale = plan.scale;
+    let transform = plan.transform;
+    let note = plan.note;
+    let cropped = plan.rect_only;
+
+    let path = match input.get("path") {
+        Some(p) => if p is String { p } else { "" },
+        None => "",
+    };
+    if path == "" {
+        path = `/tmp/eidolon-hyprland/${slug(plan.slug)}.png`;
+    }
+    let dir = parent_dir(path);
+    if dir != "" {
+        // 0700 so a screenshot of the operator's screen is not readable by others on the
+        // machine; `install -d` fixes the mode when the directory already exists.
+        let made = eidolon::exec("install", ["-d", "-m", "0700", dir], Some(EXEC_TIMEOUT_S)).await?;
+        if exec_failed(made) {
+            return Err(`could not make ${dir}: ${made.trim()}`);
+        }
+    }
+
+    let args = if cropped {
+        ["-g", region.clone(), path.clone()]
+    } else {
+        ["-o", output.clone(), path.clone()]
+    };
+    let shot = eidolon::exec("grim", args, Some(30)).await?;
+    if exec_failed(shot) {
+        return Err(`grim ${join(args, " ")} failed: ${shot.trim()} -- grim is part of the plugin's runtime package (see the README), and an operator who enforces Hyprland's permissions must give it screencopy: hl.permission(".../grim", "screencopy", "allow")`);
+    }
+    // `image_read` takes the path by value (Rune moves a variable handed straight to a
+    // host primitive), and the answer names the file afterwards — so it gets a copy.
+    let image = match eidolon::image_read(path.clone()).await {
+        Ok(i) => json::from_string(i)?,
+        Err(e) => return Err(`captured ${path} but could not read it back: ${e}`),
+    };
+
+    let lines = [];
+    lines.push(`captured ${what}`);
+    lines.push(`  file: ${path}`);
+    lines.push(`  logical rect: ${logical_rect}`);
+    if cropped {
+        lines.push(`  grim: -g "${region}" (a crop of the visible desktop; anything overlapping ${what} appears as it does on screen)`);
+    } else {
+        lines.push(`  grim: -o ${output} (the whole output, including bars and other layer surfaces)`);
+    }
+    lines.push(`  monitor: ${monitor_name} scale ${scale} transform ${transform} (logical coordinates are what every other tool here uses; the picture's pixels are the rect times scale, rotated when transform is 1 or 3)`);
+    if note != "" {
+        lines.push(`  ${note}`);
+    }
+    lines.push(`  image: ${image.label}`);
+    Ok(#{
+        content: join(lines, "\n"),
+        images: [#{
+            media_type: image.media_type,
+            data: image.data,
+            alt: image.name,
+        }],
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is the same in every hyprland tool file: upstream compiles each
+// tool file on its own, and a tool file is meant to be handed over whole.
+
+const HYPRCTL = "hyprctl";
+const EXEC_TIMEOUT_S = 15;
+
+fn join(parts, sep) {
+    let out = "";
+    let first = true;
+    for p in parts {
+        if first {
+            first = false;
+        } else {
+            out += sep;
+        }
+        out += p;
+    }
+    out
+}
+
+fn exec_failed(out) {
+    out.starts_with("[exit code") || out.starts_with("[timed out")
+        || out.starts_with("[cancelled") || out.starts_with("[killed")
+}
+
+fn refuse(msg) {
+    #{ content: msg, is_error: true }
+}
+
+async fn hypr(args) {
+    let out = eidolon::exec(HYPRCTL, args, Some(EXEC_TIMEOUT_S)).await?;
+    if exec_failed(out) {
+        return Err(`hyprctl ${join(args, " ")} failed: ${out.trim()} -- is Hyprland running, and is this process inside its session (WAYLAND_DISPLAY, HYPRLAND_INSTANCE_SIGNATURE)?`);
+    }
+    Ok(out)
+}
+
+async fn hypr_json(args) {
+    let out = hypr(args).await?;
+    match json::from_string(out) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(`hyprctl ${join(args, " ")} did not answer JSON (${e}): ${out.trim()}`),
+    }
+}
+
+fn word(input, name) {
+    match input.get(name) {
+        Some(v) => if v is String { v.trim() } else { `${v}` },
+        None => "",
+    }
+}
+
+fn as_int(v) {
+    if v is i64 {
+        v
+    } else if v is f64 {
+        v as i64
+    } else {
+        0
+    }
+}
+
+fn str_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is String { v } else { `${v}` },
+        None => "",
+    }
+}
+
+fn int_field(m, name) {
+    match m.get(name) {
+        Some(v) => as_int(v),
+        None => 0,
+    }
+}
+
+fn bool_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is bool { v } else { false },
+        None => false,
+    }
+}
+
+fn float_field(m, name, dflt) {
+    match m.get(name) {
+        Some(v) => if v is f64 { v } else if v is i64 { v as f64 } else { dflt },
+        None => dflt,
+    }
+}
+
+fn vec_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is Vec { v } else { [] },
+        None => [],
+    }
+}
+
+fn pair(m, name) {
+    let v = vec_field(m, name);
+    if v.len() == 2 {
+        [as_int(v[0]), as_int(v[1])]
+    } else {
+        [0, 0]
+    }
+}
+
+fn geometry_known(m) {
+    vec_field(m, "at").len() == 2 && vec_field(m, "size").len() == 2
+}
+
+fn fingerprint(w) {
+    let at = pair(w, "at");
+    let size = pair(w, "size");
+    let ws = match w.get("workspace") {
+        Some(v) => v,
+        None => #{},
+    };
+    `${str_field(w, "address")}|${str_field(w, "stableId")}|${int_field(w, "pid")}|${str_field(w, "class")}|${str_field(ws, "name")}|${at[0]},${at[1]}|${size[0]}x${size[1]}`
+}
+
+fn find_window(clients, address) {
+    for w in clients {
+        if str_field(w, "address") == address {
+            return Some(w);
+        }
+    }
+    None
+}
+
+fn explain(expected, got) {
+    let a = expected.split("|").collect::<Vec>();
+    let b = got.split("|").collect::<Vec>();
+    if a.len() != 7 || b.len() != 7 {
+        return "";
+    }
+    let names = ["address", "stable_id", "pid", "class", "workspace", "at", "size"];
+    let out = [];
+    let i = 0;
+    while i < 7 {
+        if a[i] != b[i] {
+            out.push(`${names[i]} ${a[i]} -> ${b[i]}`);
+        }
+        i += 1;
+    }
+    if out.len() == 0 {
+        ""
+    } else {
+        " (" + join(out, ", ") + ")"
+    }
+}
+
+// `None` means the window is the one the caller inspected; `Some(reason)` is the refusal.
+fn check_target(clients, address, expect) {
+    let w = match find_window(clients, address) {
+        Some(w) => w,
+        None => return Some(`no open window has address ${address} any more. Hyprland reuses addresses, so a window that appeared with the same address is not the one inspected — inspect again and use the new fingerprint`),
+    };
+    if expect == "" {
+        return Some(`expect is required: the fingerprint hyprland_inspect reported for ${address}. Without it a window that moved or died since the inspection would be acted on as if it were the one seen`);
+    }
+    let got = fingerprint(w);
+    if expect != got {
+        return Some(`target ${address} is not the window that was inspected: the fingerprint was ${expect}, it is now ${got}${explain(expect, got)} — inspect again and act on the window as it is now`);
+    }
+    None
+}
+
+fn monitor_named(monitors, name) {
+    for m in monitors {
+        if str_field(m, "name") == name {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn monitor_of_window(monitors, w) {
+    let id = int_field(w, "monitor");
+    for m in monitors {
+        if int_field(m, "id") == id {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn workspace_of(workspaces, key) {
+    for ws in workspaces {
+        if `${int_field(ws, "id")}` == key || str_field(ws, "name") == key {
+            return Some(ws);
+        }
+    }
+    None
+}
+
+fn workspace_of_window(w) {
+    match w.get("workspace") {
+        Some(v) => v,
+        None => #{},
+    }
+}
+
+// Whether an output is showing this workspace right now. hyprctl's workspace records carry no
+// `visible` field at all (Hyprland 0.56 prints id, name, monitor, monitorID, windows,
+// hasfullscreen, lastwindow, lastwindowtitle, ispersistent, tiledLayout), so it has to be
+// worked out from the monitors: a workspace is on a screen when it is an enabled output's
+// active workspace, or the special workspace that output has open — specials are named
+// `special:<name>` and the monitor reports that same name, which is how the two are matched.
+// This is the compositor's own rule (CWorkspace::isVisibleNotCovered), and an open special does
+// not stop the workspace underneath it from being shown: opening one never clears the other's
+// visible flag (Monitor::setSpecialWorkspace), so both answer true here.
+fn shown_by(monitors, ws) {
+    let id = int_field(ws, "id");
+    let name = str_field(ws, "name");
+    for m in monitors {
+        if bool_field(m, "disabled") {
+            continue;
+        }
+        match m.get("activeWorkspace") {
+            Some(a) => {
+                if id > 0 && int_field(a, "id") == id {
+                    return Some(str_field(m, "name"));
+                }
+            }
+            None => {}
+        }
+        match m.get("specialWorkspace") {
+            Some(s) => {
+                if name != "" && str_field(s, "name") == name {
+                    return Some(str_field(m, "name"));
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn workspace_shown(monitors, ws) {
+    match shown_by(monitors, ws) {
+        Some(name) => name != "",
+        None => false,
+    }
+}
+
+// A special workspace is the compositor's own id range for one (WorkspaceQueryCore: ids from
+// SPECIAL_WORKSPACE_START, -99, up to -2), not a field hyprctl reports.
+fn is_special_workspace(ws) {
+    let id = int_field(ws, "id");
+    id >= -99 && id <= -2
+}
+
+fn monitor_by_id(monitors, id) {
+    for m in monitors {
+        if int_field(m, "id") == id {
+            return Some(m);
+        }
+    }
+    None
+}
+
+// Whether the window is on a screen right now — which is *not* what hyprctl's per-window
+// `visible` says. Upstream defines that one as `!m_hidden && m_isMapped && surface &&
+// visibleByAlpha()` (CWindow::visible): it describes the window's own surface inside its
+// workspace, not which workspace an output is showing. Measured on this session (Hyprland
+// 0.56), a mapped, unhidden window on a workspace no output is showing answers
+// `visible: true` — so it cannot be used to decide whether acting on it would land on what is
+// on screen. On screen means: mapped, not hidden, and either the window's workspace is one an
+// output is showing, or the window is pinned — a pinned window is rendered on whatever
+// workspace its output is showing, whatever its own workspace field says
+// (IHyprRenderer::shouldRenderWindow returns true for a pinned window). Neither this nor
+// anything else here accounts for occlusion: a window behind a fullscreen one is reported on
+// screen, and the capture and input verbs say in their answers that they cannot bind to a
+// window.
+fn window_on_screen(monitors, w) {
+    if !bool_field(w, "mapped") {
+        return false;
+    }
+    if bool_field(w, "hidden") {
+        return false;
+    }
+    if bool_field(w, "pinned") {
+        match monitor_by_id(monitors, int_field(w, "monitor")) {
+            Some(m) => !bool_field(m, "disabled"),
+            None => false,
+        }
+    } else {
+        workspace_shown(monitors, workspace_of_window(w))
+    }
+}
+
+fn monitor_rect(m) {
+    let x = int_field(m, "x");
+    let y = int_field(m, "y");
+    let w = int_field(m, "width");
+    let h = int_field(m, "height");
+    `${x},${y} ${w}x${h}`
+}
+
+// What grim is asked for, and what the answer says about it.
+fn monitor_plan(monitors, name) {
+    if name == "" {
+        return Err("monitor is required for target=monitor: an output name from hyprland_inspect, e.g. DP-1");
+    }
+    let m = match monitor_named(monitors, name) {
+        Some(m) => m,
+        None => return Err(`no output named "${name}". hyprland_inspect lists them`),
+    };
+    if bool_field(m, "disabled") {
+        return Err(`output ${name} is disabled, so there is nothing on it to capture`);
+    }
+    Ok(#{
+        what: `output ${name}`,
+        output: name,
+        region: monitor_rect(m),
+        rect: monitor_rect(m),
+        rect_only: false,
+        monitor: name,
+        scale: float_field(m, "scale", 1.0),
+        transform: int_field(m, "transform"),
+        slug: `monitor-${name}`,
+        note: "",
+    })
+}
+
+fn workspace_plan(monitors, workspaces, input) {
+    let key = word(input, "workspace");
+    if key == "" {
+        return Err("workspace is required for target=workspace: an id or name from hyprland_inspect");
+    }
+    let ws = match workspace_of(workspaces, key) {
+        Some(ws) => ws,
+        None => return Err(`no workspace "${key}" exists right now. hyprland_inspect lists the ones that do`),
+    };
+    let output = match shown_by(monitors, ws) {
+        Some(name) => name,
+        None => return Err(`workspace ${key} is not on any screen right now: a compositor only renders the workspace an output is showing, so it cannot be captured without switching to it first. That switch is a visible change to the operator's session and this tool will not make it silently — hyprland_focus with workspace="${key}" does it, on purpose, and says so`),
+    };
+    if word(input, "monitor") != "" && word(input, "monitor") != output {
+        return Err(`workspace ${key} is shown on ${output}, not on ${word(input, "monitor")}`);
+    }
+    let m = match monitor_named(monitors, output) {
+        Some(m) => m,
+        None => return Err(`workspace ${key} says it is on ${output}, which is not a monitor hyprctl lists`),
+    };
+    Ok(#{
+        what: `workspace ${key} (on ${output})`,
+        output: output,
+        region: monitor_rect(m),
+        rect: monitor_rect(m),
+        rect_only: false,
+        monitor: output,
+        scale: float_field(m, "scale", 1.0),
+        transform: int_field(m, "transform"),
+        slug: `workspace-${key}`,
+        note: `the whole output is captured, which is what the workspace covers; the window count is ${int_field(ws, "windows")}`,
+    })
+}
+
+fn window_plan(monitors, clients, active, input) {
+    let asked = word(input, "window");
+    if asked == "" {
+        return Err("window is required for target=window: an address from hyprland_inspect, or \"active\"");
+    }
+    let expect = word(input, "expect");
+    let address = if asked == "active" {
+        let a = str_field(active, "address");
+        if a == "" {
+            return Err("no window is focused right now, so window=\"active\" names nothing");
+        }
+        a
+    } else {
+        asked
+    };
+    if !looks_like_address(address) {
+        return Err(`window is a window address like 0x562e1ac89e30, or "active", not "${address}"`);
+    }
+    if asked != "active" {
+        match check_target(clients, address, expect) {
+            None => {}
+            Some(reason) => return Err(reason),
+        }
+    }
+    let w = match find_window(clients, address) {
+        Some(w) => w,
+        None => return Err(`no window with address ${address}`),
+    };
+    if !bool_field(w, "mapped") {
+        return Err(`window ${address} is not mapped (it is withdrawn or still mapping), so there is nothing on screen to capture`);
+    }
+    if bool_field(w, "hidden") {
+        return Err(`window ${address} is hidden: the compositor is not drawing it, so there is nothing on screen to capture`);
+    }
+    if !window_on_screen(monitors, w) {
+        let ws = match w.get("workspace") {
+            Some(v) => v,
+            None => #{},
+        };
+        return Err(`window ${address} is not visible: it is on workspace ${int_field(ws, "id")}, which no output is showing. Capturing it would mean switching to that workspace first — a visible change this tool will not make silently; hyprland_focus does it on purpose`);
+    }
+    if !geometry_known(w) {
+        return Err(`hyprctl reports no geometry for ${address}, so there is no rectangle to crop`);
+    }
+    let at = pair(w, "at");
+    let size = pair(w, "size");
+    let ws_id = int_field(match w.get("workspace") { Some(v) => v, None => #{} }, "id");
+    let rect = #{ x: at[0], y: at[1], w: size[0], h: size[1] };
+    let note = `the crop is the window's rectangle on the visible desktop; anything overlapping it appears as it does on screen (grim's -T wants a foreign-toplevel identifier, and no Hyprland address maps to one)`;
+    match input.get("region") {
+        Some(r) => {
+            let x = int_field(r, "x");
+            let y = int_field(r, "y");
+            let rw = int_field(r, "w");
+            let rh = int_field(r, "h");
+            if rw <= 0 || rh <= 0 {
+                return Err(`region needs a positive w and h, got ${rw}x${rh}`);
+            }
+            if x < 0 || y < 0 || x + rw > size[0] || y + rh > size[1] {
+                return Err(`region ${x},${y} ${rw}x${rh} is not inside the window's ${size[0]}x${size[1]} — window-relative, top-left origin`);
+            }
+            rect = #{ x: at[0] + x, y: at[1] + y, w: rw, h: rh };
+            note = `crop of region ${x},${y} ${rw}x${rh} inside the window; anything overlapping appears as it does on screen`;
+        }
+        None => {}
+    }
+    let m = monitor_of_window(monitors, w);
+    let scale = match m {
+        Some(mm) => float_field(mm, "scale", 1.0),
+        None => 1.0,
+    };
+    let transform = match m {
+        Some(mm) => int_field(mm, "transform"),
+        None => 0,
+    };
+    let output = match m {
+        Some(mm) => str_field(mm, "name"),
+        None => "",
+    };
+    let region = `${rect.x},${rect.y} ${rect.w}x${rect.h}`;
+    Ok(#{
+        what: `window ${address} (${str_field(w, "class")} "${str_field(w, "title")}", workspace ${ws_id})`,
+        output: output,
+        region: region,
+        rect: region,
+        rect_only: true,
+        monitor: output,
+        scale: scale,
+        transform: transform,
+        slug: `window-${address}`,
+        note: note,
+    })
+}
+
+fn looks_like_address(s) {
+    if !s.starts_with("0x") || s.len() < 3 || s.len() > 20 {
+        return false;
+    }
+    for c in s.get(2..).unwrap_or("").chars() {
+        let hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if !hex {
+            return false;
+        }
+    }
+    true
+}
+
+fn slug(s) {
+    let out = "";
+    for c in s.chars() {
+        let ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if ok {
+            out += `${c}`;
+        } else {
+            out += "_";
+        }
+    }
+    if out == "" {
+        "capture"
+    } else {
+        out
+    }
+}
+
+fn parent_dir(path) {
+    let parts = path.split("/").collect::<Vec>();
+    if parts.len() < 2 {
+        return "";
+    }
+    let out = [];
+    let i = 0;
+    while i < parts.len() - 1 {
+        out.push(parts[i]);
+        i += 1;
+    }
+    join(out, "/")
+}

@@ -1,0 +1,78 @@
+// `librewolf_download`: an explicit download of one artifact this tab's own session can
+// fetch, through the browser's downloads API. The operator grants the `downloads`
+// permission; nothing here can ask for it.
+pub fn manifest() {
+    #{
+        name: "librewolf_download",
+        description: "Download one artifact that an enabled LibreWolf tab's own session can fetch, by URL, through the browser's downloads API — so the request carries the browser's own cookies for that host, which is the whole point. The url must START on the origin the tab is enabled on; another site's url is refused, because the browser's cookies would go with it. What happens after that is the browser's: a redirect is followed by the browser, so this does not confine where the bytes finally come from, and the answer does not claim to. This needs the `downloads` permission, which an assistant cannot prompt for: grant it yourself in about:addons, on this extension's Permissions panel. The request is refused for a missing permission. save_as asks the browser for the file chooser, which is the default, so the destination is yours to pick. The answer says the download was started and its id; whether it finished is in the browser's own download list, not in this answer. It changes the page's state and the disk, which is why it is mutating.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "tab_id": #{
+                    "type": "integer",
+                    "description": "The id of an enabled tab, from librewolf_tabs or librewolf_status. The url must be on this tab's origin.",
+                },
+                "url": #{
+                    "type": "string",
+                    "description": "The artifact's URL, on the enabled tab's origin.",
+                },
+                "filename": #{
+                    "type": "string",
+                    "description": "Relative to the browser's download directory, if save_as is false. The browser rejects absolute paths and paths containing ...",
+                },
+                "save_as": #{
+                    "type": "boolean",
+                    "description": "Ask the browser for the file chooser, so the operator picks the destination. Default true.",
+                },
+                "conflict_action": #{
+                    "type": "string",
+                    "enum": ["uniquify", "overwrite", "prompt"],
+                    "description": "What the browser does about a filename conflict.",
+                },
+            },
+            "required": ["tab_id", "url"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("download", input).await
+}
+// Everything below is the same in every librewolf_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed
+// over whole.
+
+// The bridge host (../service). LibreWolf starts it, not eidolon: the browser
+// runs it as its native messaging host, so there is no `eidolon plugins service
+// start librewolf` to name. Change the port here and the host's
+// EIDOLON_LIBREWOLF_PORT together.
+fn service() {
+    #{
+        name: "librewolf",
+        base_url: "http://127.0.0.1:8091",
+        token_file: "~/.config/eidolon/librewolf.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the browser is not running with the extension, or
+    // no profile has it loaded. There is no command that fixes that, so the
+    // answer names the one act that does instead of leaving a refusal to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the LibreWolf bridge is not answering on 127.0.0.1:8091 — LibreWolf must be running with the librewolf bridge extension connected, because the browser starts this host and eidolon cannot; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`librewolf bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok { Ok(out.result) } else { Err(out.error) }
+}

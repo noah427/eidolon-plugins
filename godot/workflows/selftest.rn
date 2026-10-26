@@ -1,0 +1,384 @@
+// The plugin driven against a **real Godot editor**: tests/godot/run.sh builds the
+// service, writes a throwaway project with one scripted node, opens it in a headless
+// Godot with the addon enabled, and runs this once. Every check is about what a tool
+// answers for a world that is really there — a scene tree instantiated by an editor,
+// a fingerprint that came out of a live node, an edit that went through the editor's
+// own undo history and onto disk.
+//
+// What this does not cover, and must not be read as covering: `godot_run` with
+// `action: "play"`. Playing starts a second process — a window on somebody's screen
+// when the editor has one, a stray process even when it does not — so the checks
+// below only reach for a stop, which is refused because nothing is playing. That verb
+// needs a person in the room; see tests/godot/README.md.
+
+pub fn workflow() {
+    #{
+        name: "selftest",
+        description: "Check the godot tools against a real Godot editor: the status of the bridge and of the editor behind it, the scene tree with the fingerprints a mutating verb needs, one node's exports and script, a property set through the editor's undo history, a method call, the save and open guards of godot_scene, and the refusals of godot_run. Needs the service running and the fixture project open in Godot with the addon enabled; tests/godot/run.sh does both. Completes if every check holds, fails naming the ones that do not. godot_run with action play is deliberately not among them.",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "scene": #{ "type": "string", "description": "The scene the fixture project has open, as Godot writes it. Default res://main.tscn." },
+            },
+        },
+    }
+}
+
+pub async fn run(input) {
+    let scene = text(input, "scene", "res://main.tscn");
+    let out = [];
+    let bad = [];
+
+    // ---- the bridge and the editor behind it --------------------------------
+    let status = match answered("godot_status", #{}).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_status did not answer: " + `${e}`),
+    };
+    let editor = match status.get("editor_state") {
+        Some(v) => v,
+        None => return fatal(`no editor is attached to the bridge: ${str_field(status, "reason")}. tests/godot/run.sh starts the service and opens the fixture project`),
+    };
+    check(out, bad, "the bridge reports an editor attached", bool_field(status, "attached"), true);
+    check(out, bad, "the editor says which project it dialled in from", str_field(status, "project") != "", true);
+    check(out, bad, "the editor is editing the fixture scene", str_field(editor, "edited_scene"), scene);
+    check(out, bad, "the edited scene's root is named", str_field(editor, "edited_root"), "Main");
+    check(out, bad, "the project's main scene is the fixture's", str_field(editor, "main_scene"), scene);
+    check(out, bad, "nothing is playing", bool_field(editor, "playing"), false);
+    check(out, bad, "the scene has no unsaved changes yet", vec_field(editor, "unsaved_scenes").len(), 0);
+
+    // ---- the tree -----------------------------------------------------------
+    let tree = match answered("godot_tree", #{ depth: 2 }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_tree did not answer: " + `${e}`),
+    };
+    let nodes = vec_field(tree, "nodes");
+    check(out, bad, "the walk at depth 2 is the whole fixture scene", nodes.len(), 3);
+    check(out, bad, "the edited scene's root is \".\"", str_field(node_at(nodes, "."), "class"), "Node2D");
+    check(out, bad, "a child is named by its path from the root", str_field(node_at(nodes, "Player"), "name"), "Player");
+    check(out, bad, "a child's class is what the editor instantiated", str_field(node_at(nodes, "Player"), "class"), "CharacterBody2D");
+    check(out, bad, "the script attached to a node is reported", str_field(node_at(nodes, "Player"), "script"), "res://player.gd");
+    check(out, bad, "a grandchild is reachable by its path", str_field(node_at(nodes, "Player/Sprite"), "class"), "Sprite2D");
+    check(out, bad, "a node's owner is reported, so an instanced subtree is identifiable", str_field(node_at(nodes, "Player"), "owner"), "Main");
+    check(out, bad, "every node carries a three-part fingerprint", all_fingerprinted(nodes), true);
+
+    let shallow = match answered("godot_tree", #{ depth: 0 }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_tree did not answer: " + `${e}`),
+    };
+    check(out, bad, "a bounded walk stops where it was told to", vec_field(shallow, "nodes").len(), 1);
+
+    let nothing = call_tool("godot_tree", #{ path: "Player/Shadow" }).await;
+    refused(out, bad, "a path that names nothing is refused, listing what the parent holds", nothing, "What that parent holds: Sprite");
+
+    // ---- one node -----------------------------------------------------------
+    let player = match answered("godot_node", #{ path: "Player" }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_node did not answer: " + `${e}`),
+    };
+    let fingerprint = str_field(player, "fingerprint");
+    check(out, bad, "the fingerprint is the identity a path cannot be", parts_len(fingerprint, "|"), 3);
+    check(out, bad, "the exports are the script's, not the engine's", vec_field(player, "properties").len(), 3);
+    check(out, bad, "an exported float reads as the inspector would show it", prop_repr(player, "speed"), "12.5");
+    check(out, bad, "an exported string carries a JSON value too", prop_value(player, "nickname"), "player");
+    check(out, bad, "the node's own method is listed with its argument", method_arg(player, "poke"), "x");
+    check(out, bad, "the node's own signal is listed with its argument", signal_arg(player, "pinged"), "who");
+    check(out, bad, "a signal nothing is connected to says so", signal_connections(player, "pinged"), 0);
+    check(out, bad, "the node's children are listed", str_field(vec_field(player, "children")[0], "path"), "Player/Sprite");
+
+    let wide = match answered("godot_node", #{ path: "Player", all: true, filter: "position" }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_node did not answer: " + `${e}`),
+    };
+    check(out, bad, "all: true widens the properties to the inspector's, and filter narrows them", prop_repr(wide, "position"), "Vector2(0, 0)");
+
+    // ---- setting a property, through the editor's own history ---------------
+    let set = match answered("godot_set", #{ path: "Player", expect: fingerprint, property: "speed", value: 42.5 }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_set did not answer: " + `${e}`),
+    };
+    check(out, bad, "a property set through the undo history is reported as matched", bool_field(set, "matched"), true);
+    check(out, bad, "the reading before the edit is the value the scene had", nested(set, "before", "repr"), "12.5");
+    check(out, bad, "the reading after the edit is the value asked for", nested(set, "after", "repr"), "42.5");
+
+    let after = match answered("godot_status", #{}).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_status did not answer: " + `${e}`),
+    };
+    check(out, bad, "the edit marked the scene unsaved, as the inspector would", vec_field(editor_of(after), "unsaved_scenes").len(), 1);
+
+    let stale = call_tool("godot_set", #{ path: "Player", expect: "1|CharacterBody2D|res://player.gd", property: "speed", value: 1 }).await;
+    refused(out, bad, "a fingerprint that is not this node's is refused, and nothing is written", stale, "not the one that was inspected");
+
+    let missing = call_tool("godot_set", #{ path: "Player", expect: fingerprint, property: "speeed", value: 1 }).await;
+    refused(out, bad, "a property the node does not have is refused by name", missing, "no property \"speeed\"");
+
+    let literal = match answered("godot_set", #{ path: "Player", expect: fingerprint, property: "position", value_text: "Vector2(3, 4)" }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_set did not answer: " + `${e}`),
+    };
+    check(out, bad, "a Godot literal goes in as itself", nested(literal, "after", "repr"), "Vector2(3, 4)");
+
+    let from_json = match answered("godot_set", #{ path: "Player", expect: fingerprint, property: "position", value: #{ x: 7, y: 8 } }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_set did not answer: " + `${e}`),
+    };
+    check(out, bad, "a JSON object is made into the Vector2 the property already is", nested(from_json, "after", "repr"), "Vector2(7, 8)");
+
+    let refused_object = call_tool("godot_set", #{ path: "Player", expect: fingerprint, property: "shape", value_text: "Vector2(1, 2)" }).await;
+    refused(out, bad, "a property holding an Object is refused: this verb sets values, not references", refused_object, "sets values, not references");
+
+    // ---- calling a method ---------------------------------------------------
+    let poke = match answered("godot_call", #{ path: "Player", expect: fingerprint, method: "poke", args: [21] }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_call did not answer: " + `${e}`),
+    };
+    check(out, bad, "a script method is called and its return reported", nested(poke, "returned", "repr"), "42");
+
+    let emitted = match answered("godot_call", #{ path: "Player", expect: fingerprint, method: "emit_signal", args: ["pinged", "ada"] }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_call did not answer: " + `${e}`),
+    };
+    // `emit_signal` returns the engine's own Error code, and which code it is depends on
+    // the engine's mood rather than on this plugin: what is being checked is that an engine
+    // method is callable at all and that its return came back instead of being swallowed.
+    check(out, bad, "an engine method is callable, and what it returned is reported", nested(emitted, "returned", "type"), "int");
+
+    let denied = call_tool("godot_call", #{ path: "Player", expect: fingerprint, method: "queue_free" }).await;
+    refused(out, bad, "a method that would take the node out of the scene is refused", denied, "will not run");
+
+    let absent = call_tool("godot_call", #{ path: "Player", expect: fingerprint, method: "levitate" }).await;
+    refused(out, bad, "a method the node does not have is refused, naming what its script declares", absent, "Its script declares: poke");
+
+    // ---- scenes -------------------------------------------------------------
+    let dirty = call_tool("godot_scene", #{ open: scene }).await;
+    refused(out, bad, "opening a scene is refused while the editor holds unsaved changes", dirty, "unsaved changes");
+
+    let saved = match answered("godot_scene", #{ save: true }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_scene did not answer: " + `${e}`),
+    };
+    check(out, bad, "saving writes the scene it came from", str_field(saved, "saved"), scene);
+
+    let opened = match answered("godot_scene", #{ open: scene }).await {
+        Ok(v) => v,
+        Err(e) => return fatal("godot_scene did not answer: " + `${e}`),
+    };
+    check(out, bad, "opening a scene is confirmed by asking the editor what it is editing", bool_field(opened, "matched"), true);
+
+    let nowhere = call_tool("godot_scene", #{ open: "res://nope.tscn" }).await;
+    refused(out, bad, "a scene that is not in the project is refused", nowhere, "no scene at res://nope.tscn");
+
+    let fspath = call_tool("godot_scene", #{ open: "/tmp/main.tscn" }).await;
+    refused(out, bad, "a filesystem path is refused: a scene is named the way Godot names it", fspath, "not a filesystem path");
+
+    let neither = call_tool("godot_scene", #{}).await;
+    refused(out, bad, "naming neither act is refused", neither, "name exactly one of");
+
+    // ---- running ------------------------------------------------------------
+    let stop = call_tool("godot_run", #{ action: "stop" }).await;
+    refused(out, bad, "stopping a project that is not playing is refused", stop, "not playing");
+
+    let action = call_tool("godot_run", #{ action: "restart" }).await;
+    refused(out, bad, "an action that is neither play nor stop is refused", action, "must be one of");
+
+    out.push("ok   (godot_run play is not covered here: it starts a second process, and this harness must not open a window on somebody's screen)");
+
+    report(out, bad)
+}
+
+// ---------------------------------------------------------------------------
+
+fn text(input, name, fallback) {
+    match input.get(name) {
+        Some(v) => if v is String { v } else { fallback },
+        None => fallback,
+    }
+}
+
+fn str_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is String { v } else { `${v}` },
+        None => "",
+    }
+}
+
+fn bool_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is bool { v } else { false },
+        None => false,
+    }
+}
+
+fn vec_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is Vec { v } else { [] },
+        None => [],
+    }
+}
+
+fn nested(m, outer, inner) {
+    match m.get(outer) {
+        Some(v) => str_field(v, inner),
+        None => "",
+    }
+}
+
+// The parts a separator divides a string into, which is how a fingerprint's shape is
+// checked: three of them, or the identity is not the one the tools promise.
+fn parts_len(text, sep) {
+    text.split(sep).collect::<Vec>().len()
+}
+
+fn as_int(v) {
+    if v is i64 {
+        v
+    } else if v is f64 {
+        v as i64
+    } else {
+        -1
+    }
+}
+
+fn int_field(m, name) {
+    match m.get(name) {
+        Some(v) => as_int(v),
+        None => -1,
+    }
+}
+
+fn editor_of(status) {
+    match status.get("editor_state") {
+        Some(v) => v,
+        None => #{},
+    }
+}
+
+fn node_at(nodes, path) {
+    for n in nodes {
+        if str_field(n, "path") == path {
+            return n;
+        }
+    }
+    #{}
+}
+
+fn all_fingerprinted(nodes) {
+    for n in nodes {
+        if parts_len(str_field(n, "fingerprint"), "|") != 3 {
+            return false;
+        }
+    }
+    true
+}
+
+fn prop_of(node, name) {
+    for p in vec_field(node, "properties") {
+        if str_field(p, "name") == name {
+            return p;
+        }
+    }
+    #{}
+}
+
+fn prop_repr(node, name) {
+    nested(prop_of(node, name), "value", "repr")
+}
+
+fn prop_value(node, name) {
+    match prop_of(node, name).get("value") {
+        Some(v) => match v.get("value") {
+            Some(x) => `${x}`,
+            None => "",
+        },
+        None => "",
+    }
+}
+
+// The first argument name a script's method or signal declares, or "not listed" when
+// the node's script has no such name. `found` is bound and returned as a name, not
+// written inline: Rune will not parse a `return` statement whose expression opens with
+// a backtick template, so `return \`${args[0]}\`` is a compile error and this is not.
+fn arg_of(records, name) {
+    let found = "not listed";
+    for record in records {
+        if str_field(record, "name") == name {
+            let args = vec_field(record, "args");
+            if args.len() > 0 {
+                let first = args[0];
+                found = `${first}`;
+            } else {
+                found = "";
+            }
+            break;
+        }
+    }
+    found
+}
+
+fn method_arg(node, name) {
+    arg_of(vec_field(node, "methods"), name)
+}
+
+fn signal_arg(node, name) {
+    arg_of(vec_field(node, "signals"), name)
+}
+
+fn signal_connections(node, name) {
+    for s in vec_field(node, "signals") {
+        if str_field(s, "name") == name {
+            return int_field(s, "connections");
+        }
+    }
+    -1
+}
+
+async fn call_tool(name, input) {
+    match eidolon::tool_call(name, input).await {
+        Ok(t) => #{ ok: true, text: t },
+        Err(e) => #{ ok: false, text: `${e}` },
+    }
+}
+
+// The tool's answer parsed back into a value, for the checks that read fields out of
+// it. A tool that answered something which is not JSON is a failure of the case, not a
+// failed check: nothing below can say anything true about it.
+async fn answered(name, input) {
+    match eidolon::tool_call(name, input).await {
+        Ok(t) => json::from_string(t),
+        Err(e) => Err(e),
+    }
+}
+
+fn fatal(msg) {
+    #{ content: msg, is_error: true }
+}
+
+fn check(out, bad, name, got, want) {
+    if `${got}` == `${want}` {
+        out.push("ok   " + name);
+    } else {
+        out.push("FAIL " + name + ": got " + `${got}` + ", want " + `${want}`);
+        bad.push(name);
+    }
+}
+
+fn refused(out, bad, name, result, needle) {
+    if !result.ok && result.text.contains(needle) {
+        out.push("ok   " + name);
+    } else {
+        out.push("FAIL " + name + ": answered " + result.text);
+        bad.push(name);
+    }
+}
+
+fn report(out, bad) {
+    let text = "";
+    for l in out {
+        text += l + "\n";
+    }
+    if bad.len() > 0 {
+        return fatal(text + "selftest: " + `${bad.len()}` + " check(s) failed");
+    }
+    text + "selftest: " + `${out.len()}` + " checks hold"
+}

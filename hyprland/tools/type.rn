@@ -1,0 +1,622 @@
+// `hyprland_type`: type text into the window that was inspected and is focused.
+//
+// Two things are checked and one is refused outright. The window's identity and geometry
+// are re-read (the same `expect` fingerprint as the other verbs), and the compositor is
+// asked *who holds the keyboard focus* — text goes to the focused client, not to a window
+// named in an argument, so a call whose target is not focused refuses instead of typing
+// into whatever is in front. `focus_first: true` is the caller's explicit permission to
+// focus the window first, which is a visible change to the session. After typing, the
+// focus is read once more: a focus that moved mid-text is reported, because part of the
+// text may then have gone to another client.
+//
+// Text with a newline, carriage return or tab is refused: those are keys, not characters
+// (hyprland_key types Return or Tab), and the client maps each UTF-8 character through the
+// compositor's own keymap, so anything the layout can type goes through as it is.
+
+pub fn manifest() {
+    #{
+        name: "hyprland_type",
+        description: "Type text into a Hyprland window. window is an address from hyprland_inspect and expect is the fingerprint that was inspected; the window is re-read, and the compositor is asked which window holds the keyboard focus — text goes to the focused client, so this refuses unless the target is the focused window, or `focus_first: true` was passed to focus it first (a visible change). Newlines, tabs and carriage returns are refused: use hyprland_key to type Return or Tab. Text is typed as UTF-8 characters through the compositor's keymap, at delay_ms per keystroke. The focus is read back afterwards and a focus that moved mid-text is reported as an error, since part of the text may have gone elsewhere.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "window": #{ "type": "string", "description": "The window's address from hyprland_inspect." },
+                "expect": #{ "type": "string", "description": "The fingerprint hyprland_inspect reported for that window. Required." },
+                "text": #{ "type": "string", "description": "The text to type. No newline, carriage return or tab; at most 4000 characters." },
+                "focus_first": #{ "type": "boolean", "description": "Focus the window before typing if it is not the focused one. Default false: without it, a target that is not focused is refused, because the keys would go to another client." },
+                "delay_ms": #{ "type": "integer", "description": "Milliseconds between keystrokes. Default 0; useful for a client that drops keys when they arrive faster than it reads them." },
+            },
+            "required": ["window", "expect", "text"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let address = word(input, "window");
+    if address == "" {
+        return Ok(refuse("window is required: the address hyprland_inspect reported"));
+    }
+    if !looks_like_address(address) {
+        return Ok(refuse(`window is a window address like 0x562e1ac89e30, not "${address}"`));
+    }
+    let text = match input.get("text") {
+        Some(t) => if t is String { t } else { `${t}` },
+        None => "",
+    };
+    if text == "" {
+        return Ok(refuse("text is required and must not be empty"));
+    }
+    if text.chars().count() > 4000 {
+        return Ok(refuse(`text is at most 4000 characters (got ${text.chars().count()})`));
+    }
+    let bad = "";
+    if text.contains("\n") {
+        bad = "a newline";
+    } else if text.contains("\r") {
+        bad = "a carriage return";
+    } else if text.contains("\t") {
+        bad = "a tab";
+    }
+    if bad != "" {
+        return Ok(refuse(`text contains ${bad}: those are keys, and hyprland_key types them ("Return", "Tab"). Send the text in pieces and the key between them`));
+    }
+    let delay = int_input(input, "delay_ms", 0);
+    if delay < 0 || delay > 10000 {
+        return Ok(refuse(`delay_ms is 0 to 10000, not ${delay}`));
+    }
+
+    let expect = word(input, "expect");
+    let monitors = hypr_json(["-j", "monitors"]).await?;
+    let clients = hypr_json(["-j", "clients"]).await?;
+    match check_target(clients, address, expect) {
+        None => {}
+        Some(reason) => return Ok(refuse(reason)),
+    }
+    let w = match find_window(clients, address) {
+        Some(w) => w,
+        None => return Ok(refuse(`no window with address ${address}`)),
+    };
+    if !bool_field(w, "mapped") {
+        return Ok(refuse(`window ${address} is not mapped (withdrawn or still mapping)`));
+    }
+    if !bool_field(w, "acceptsInput") {
+        return Ok(refuse(`window ${address} does not accept input right now, so the keys would go nowhere`));
+    }
+    if bool_field(w, "hidden") {
+        return Ok(refuse(`window ${address} is hidden: the compositor is not drawing it, so nothing can hold the keyboard focus there`));
+    }
+    if !window_on_screen(monitors, w) {
+        let ws = workspace_of_window(w);
+        return Ok(refuse(`window ${address} is on workspace ${int_field(ws, "id")}, which no output is showing: nothing can hold the keyboard focus there, so no text can reach it. hyprland_focus would switch to it — a visible change this tool will not make on its own`));
+    }
+    require_tool(INPUT_KEYBOARD).await?;
+
+    let focused_by_us = match ensure_focused(input, w, bool_input(input, "focus_first", false)).await {
+        Ok(note) => note,
+        Err(e) => return Ok(refuse(`${e}`)),
+    };
+    // The identity is asked once more after any focus change, immediately before the keys.
+    let again = hypr_json(["-j", "clients"]).await?;
+    match check_target(again, address, expect) {
+        None => {}
+        Some(reason) => return Ok(refuse(`nothing was typed: ${reason}`)),
+    }
+
+    let args = if delay > 0 {
+        ["-d", `${delay}`, "--", text]
+    } else {
+        ["--", text]
+    };
+    run_client(INPUT_KEYBOARD, args).await?;
+
+    let after = active_address().await?;
+    let lines = [];
+    lines.push(`typed ${text.chars().count()} characters into ${describe(w)}`);
+    if focused_by_us != "" {
+        lines.push(`  ${focused_by_us}`);
+    }
+    lines.push(`  focus was verified immediately before the keys (${address})`);
+    if after != address {
+        lines.push(`  ERROR: the focused window is ${after} now, not ${address} — the focus moved while the text was going in, so some of it may have gone to another client. What arrived where is not knowable from here`);
+        return Ok(#{ content: join(lines, "\n"), is_error: true });
+    }
+    lines.push(`  focused now: ${address}, unchanged through the text`);
+    lines.push(`  what is not guaranteed: a virtual keyboard sends to whatever holds the focus at that instant, so the check above is a check and not a lock; the compositor's input path takes no window to bind to`);
+    Ok(join(lines, "\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is the same in every hyprland tool file: upstream compiles each
+// tool file on its own, and a tool file is meant to be handed over whole.
+
+const HYPRCTL = "hyprctl";
+const EXEC_TIMEOUT_S = 15;
+
+fn join(parts, sep) {
+    let out = "";
+    let first = true;
+    for p in parts {
+        if first {
+            first = false;
+        } else {
+            out += sep;
+        }
+        out += p;
+    }
+    out
+}
+
+// `exec` renders a failed call into its output rather than raising, so a command that
+// never ran has to be told apart from one that answered.
+fn exec_failed(out) {
+    out.starts_with("[exit code") || out.starts_with("[timed out")
+        || out.starts_with("[cancelled") || out.starts_with("[killed")
+}
+
+fn refuse(msg) {
+    #{ content: msg, is_error: true }
+}
+
+async fn hypr(args) {
+    let out = eidolon::exec(HYPRCTL, args, Some(EXEC_TIMEOUT_S)).await?;
+    if exec_failed(out) {
+        return Err(`hyprctl ${join(args, " ")} failed: ${out.trim()} -- is Hyprland running, and is this process inside its session (WAYLAND_DISPLAY, HYPRLAND_INSTANCE_SIGNATURE)?`);
+    }
+    Ok(out)
+}
+
+async fn hypr_json(args) {
+    let out = hypr(args).await?;
+    match json::from_string(out) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(`hyprctl ${join(args, " ")} did not answer JSON (${e}): ${out.trim()}`),
+    }
+}
+
+fn word(input, name) {
+    match input.get(name) {
+        Some(v) => if v is String { v.trim() } else { `${v}` },
+        None => "",
+    }
+}
+
+fn got(input, name) {
+    input.get(name)
+}
+
+fn as_int(v) {
+    if v is i64 {
+        v
+    } else if v is f64 {
+        v as i64
+    } else {
+        0
+    }
+}
+
+fn as_float(v) {
+    if v is f64 {
+        v
+    } else if v is i64 {
+        v as f64
+    } else {
+        0.0
+    }
+}
+
+fn num_input(input, name, dflt) {
+    match input.get(name) {
+        Some(v) => if v is i64 || v is f64 { as_float(v) } else { dflt },
+        None => dflt,
+    }
+}
+
+fn int_input(input, name, dflt) {
+    match input.get(name) {
+        Some(v) => if v is i64 || v is f64 { as_int(v) } else { dflt },
+        None => dflt,
+    }
+}
+
+fn bool_input(input, name, dflt) {
+    match input.get(name) {
+        Some(v) => if v is bool { v } else { dflt },
+        None => dflt,
+    }
+}
+
+fn str_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is String { v } else { `${v}` },
+        None => "",
+    }
+}
+
+fn int_field(m, name) {
+    match m.get(name) {
+        Some(v) => as_int(v),
+        None => 0,
+    }
+}
+
+fn bool_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is bool { v } else { false },
+        None => false,
+    }
+}
+
+fn float_field(m, name, dflt) {
+    match m.get(name) {
+        Some(v) => if v is f64 { v } else if v is i64 { v as f64 } else { dflt },
+        None => dflt,
+    }
+}
+
+fn vec_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is Vec { v } else { [] },
+        None => [],
+    }
+}
+
+// A pair of layout coordinates or a w×h: a missing or malformed one is [0, 0].
+fn pair(m, name) {
+    let v = vec_field(m, name);
+    if v.len() == 2 {
+        [as_int(v[0]), as_int(v[1])]
+    } else {
+        [0, 0]
+    }
+}
+
+fn geometry_known(m) {
+    vec_field(m, "at").len() == 2 && vec_field(m, "size").len() == 2
+}
+
+fn workspace_of_window(w) {
+    match w.get("workspace") {
+        Some(v) => v,
+        None => #{},
+    }
+}
+
+// Whether an output is showing this workspace right now. hyprctl's workspace records carry no
+// `visible` field at all (Hyprland 0.56 prints id, name, monitor, monitorID, windows,
+// hasfullscreen, lastwindow, lastwindowtitle, ispersistent, tiledLayout), so it has to be
+// worked out from the monitors: a workspace is on a screen when it is an enabled output's
+// active workspace, or the special workspace that output has open — specials are named
+// `special:<name>` and the monitor reports that same name, which is how the two are matched.
+// This is the compositor's own rule (CWorkspace::isVisibleNotCovered), and an open special does
+// not stop the workspace underneath it from being shown: opening one never clears the other's
+// visible flag (Monitor::setSpecialWorkspace), so both answer true here.
+fn shown_by(monitors, ws) {
+    let id = int_field(ws, "id");
+    let name = str_field(ws, "name");
+    for m in monitors {
+        if bool_field(m, "disabled") {
+            continue;
+        }
+        match m.get("activeWorkspace") {
+            Some(a) => {
+                if id > 0 && int_field(a, "id") == id {
+                    return Some(str_field(m, "name"));
+                }
+            }
+            None => {}
+        }
+        match m.get("specialWorkspace") {
+            Some(s) => {
+                if name != "" && str_field(s, "name") == name {
+                    return Some(str_field(m, "name"));
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn workspace_shown(monitors, ws) {
+    match shown_by(monitors, ws) {
+        Some(name) => name != "",
+        None => false,
+    }
+}
+
+// A special workspace is the compositor's own id range for one (WorkspaceQueryCore: ids from
+// SPECIAL_WORKSPACE_START, -99, up to -2), not a field hyprctl reports.
+fn is_special_workspace(ws) {
+    let id = int_field(ws, "id");
+    id >= -99 && id <= -2
+}
+
+fn monitor_by_id(monitors, id) {
+    for m in monitors {
+        if int_field(m, "id") == id {
+            return Some(m);
+        }
+    }
+    None
+}
+
+// Whether the window is on a screen right now — which is *not* what hyprctl's per-window
+// `visible` says. Upstream defines that one as `!m_hidden && m_isMapped && surface &&
+// visibleByAlpha()` (CWindow::visible): it describes the window's own surface inside its
+// workspace, not which workspace an output is showing. Measured on this session (Hyprland
+// 0.56), a mapped, unhidden window on a workspace no output is showing answers
+// `visible: true` — so it cannot be used to decide whether acting on it would land on what is
+// on screen. On screen means: mapped, not hidden, and either the window's workspace is one an
+// output is showing, or the window is pinned — a pinned window is rendered on whatever
+// workspace its output is showing, whatever its own workspace field says
+// (IHyprRenderer::shouldRenderWindow returns true for a pinned window). Neither this nor
+// anything else here accounts for occlusion: a window behind a fullscreen one is reported on
+// screen, and the capture and input verbs say in their answers that they cannot bind to a
+// window.
+fn window_on_screen(monitors, w) {
+    if !bool_field(w, "mapped") {
+        return false;
+    }
+    if bool_field(w, "hidden") {
+        return false;
+    }
+    if bool_field(w, "pinned") {
+        match monitor_by_id(monitors, int_field(w, "monitor")) {
+            Some(m) => !bool_field(m, "disabled"),
+            None => false,
+        }
+    } else {
+        workspace_shown(monitors, workspace_of_window(w))
+    }
+}
+
+// What a later call is held to: identity (address, stable id, pid, class), the
+// workspace, and the geometry that was on screen. The title is deliberately not in it —
+// a terminal rewrites its title as you work in it, and refusing a click because a shell
+// changed its prompt would be a false alarm.
+fn fingerprint(w) {
+    let at = pair(w, "at");
+    let size = pair(w, "size");
+    let ws = workspace_of_window(w);
+    `${str_field(w, "address")}|${str_field(w, "stableId")}|${int_field(w, "pid")}|${str_field(w, "class")}|${str_field(ws, "name")}|${at[0]},${at[1]}|${size[0]}x${size[1]}`
+}
+
+fn find_window(clients, address) {
+    for w in clients {
+        if str_field(w, "address") == address {
+            return Some(w);
+        }
+    }
+    None
+}
+
+// The fields that differ between the fingerprint the caller saw and the one on screen
+// now, so a refusal names what moved instead of only saying "stale".
+fn explain(expected, got_fp) {
+    let a = expected.split("|").collect::<Vec>();
+    let b = got_fp.split("|").collect::<Vec>();
+    if a.len() != 7 || b.len() != 7 {
+        return "";
+    }
+    let names = ["address", "stable_id", "pid", "class", "workspace", "at", "size"];
+    let out = [];
+    let i = 0;
+    while i < 7 {
+        if a[i] != b[i] {
+            out.push(`${names[i]} ${a[i]} -> ${b[i]}`);
+        }
+        i += 1;
+    }
+    if out.len() == 0 {
+        ""
+    } else {
+        " (" + join(out, ", ") + ")"
+    }
+}
+
+// `None` means the window is the one the caller inspected; `Some(reason)` is a refusal.
+fn check_target(clients, address, expect) {
+    let w = match find_window(clients, address) {
+        Some(w) => w,
+        None => return Some(`no open window has address ${address} any more. Hyprland reuses addresses, so a window that appeared with the same address is not the one inspected — inspect again and use the new fingerprint`),
+    };
+    if expect == "" {
+        return Some(`expect is required: the fingerprint hyprland_inspect reported for ${address}. Without it a window that moved or died since the inspection would be acted on as if it were the one seen`);
+    }
+    let now = fingerprint(w);
+    if expect != now {
+        return Some(`target ${address} is not the window that was inspected: the fingerprint was ${expect}, it is now ${now}${explain(expect, now)} — inspect again and act on the window as it is now`);
+    }
+    None
+}
+
+// The window's own summary, for the answer a call gives back.
+fn describe(w) {
+    let at = pair(w, "at");
+    let size = pair(w, "size");
+    let ws = workspace_of_window(w);
+    `${str_field(w, "address")} class=${str_field(w, "class")} title="${str_field(w, "title")}" pid=${int_field(w, "pid")} ws=${int_field(ws, "id")} at=${at[0]},${at[1]} size=${size[0]}x${size[1]}`
+}
+
+fn looks_like_address(s) {
+    if !s.starts_with("0x") || s.len() < 3 || s.len() > 20 {
+        return false;
+    }
+    for c in s.get(2..).unwrap_or("").chars() {
+        let hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if !hex {
+            return false;
+        }
+    }
+    true
+}
+
+// Names that go into a Lua expression (a monitor name, a workspace name) are held to a
+// plain charset and refused otherwise, so nothing a model writes can become Lua.
+fn plain_name(s) {
+    if s == "" {
+        return false;
+    }
+    for c in s.chars() {
+        let ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+            || c == '.' || c == '_' || c == '-' || c == '+' || c == ':';
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+fn num_text(n) {
+    let i = n as i64;
+    if (i as f64) == n {
+        `${i}`
+    } else {
+        `${n}`
+    }
+}
+
+async fn sleep_ms(ms) {
+    if ms <= 0 {
+        return Ok(());
+    }
+    let secs = `${ms as f64 / 1000.0}`;
+    let out = eidolon::exec("sleep", [secs], Some(EXEC_TIMEOUT_S)).await?;
+    if exec_failed(out) {
+        return Err(`sleep ${secs} failed: ${out.trim()}`);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The input clients. Both are short-lived programs that create a virtual device, send
+// what they were asked for and exit; nothing here keeps running, so there is no service.
+// `command -v` asks the shell whether a client is there *without running it*: a missing
+// one is a named refusal rather than a spawn error.
+
+const INPUT_POINTER = "wlrctl";
+const INPUT_KEYBOARD = "wtype";
+
+async fn require_tool(name) {
+    let out = eidolon::exec("sh", ["-c", `command -v ${name}`], Some(5)).await?;
+    if exec_failed(out) || out.trim() == "" {
+        return Err(`the input client \`${name}\` is not on PATH, and this Hyprland has no primitive of its own for pointer buttons, scroll or text. See the plugin's README: the runtime package provides grim, wlrctl and wtype`);
+    }
+    Ok(out.trim())
+}
+
+async fn run_client(name, args) {
+    let out = eidolon::exec(name, args, Some(EXEC_TIMEOUT_S)).await?;
+    if exec_failed(out) {
+        return Err(`${name} ${join(args, " ")} failed: ${out.trim()}`);
+    }
+    Ok(out.trim())
+}
+
+// Buttons are always named and checked against the client's own three, never left to
+// default: wlrctl's `pointer click` with no argument clicks the left button, which is
+// not something to fall into by omitting a field.
+const BUTTONS = ["left", "right", "middle"];
+
+fn checked_button(input) {
+    let b = word(input, "button");
+    if b == "" {
+        return Err(`button is required: "left", "right" or "middle". It is never defaulted — the client's own default is a bare left click`);
+    }
+    for ok in BUTTONS {
+        if b == ok {
+            return Ok(b);
+        }
+    }
+    Err(`button is "left", "right" or "middle", not "${b}"`)
+}
+
+// Where in the window the caller means, and where that is on the layout. Window-relative
+// by default (the coordinates a screenshot shows); `global: true` takes layout
+// coordinates instead, which must fall inside the window's rectangle.
+fn target_point(w, input, x, y) {
+    let at = pair(w, "at");
+    let size = pair(w, "size");
+    if !geometry_known(w) {
+        return Err(`hyprctl reports no geometry for ${str_field(w, "address")}, so a point cannot be placed in it`);
+    }
+    if bool_input(input, "global", false) {
+        if x < at[0] || y < at[1] || x >= at[0] + size[0] || y >= at[1] + size[1] {
+            return Err(`the point ${x},${y} is outside the window's ${size[0]}x${size[1]} at ${at[0]},${at[1]} in layout coordinates`);
+        }
+        return Ok(#{ x: x, y: y, local: #{ x: x - at[0], y: y - at[1] } });
+    }
+    if x < 0 || y < 0 || x >= size[0] || y >= size[1] {
+        return Err(`the point ${x},${y} is outside the window's ${size[0]}x${size[1]} (window-relative, top-left origin; pass global: true for layout coordinates)`);
+    }
+    Ok(#{ x: at[0] + x, y: at[1] + y, local: #{ x: x, y: y } })
+}
+
+// The pointer is moved by displacement: wlrctl's virtual pointer has `move <dx> <dy>`
+// and no absolute form, so the compositor's cursor position is read and the difference
+// sent. That is two calls, and the position is read back before anything is clicked —
+// if the pointer did not arrive, the caller gets a refusal instead of a click in the
+// wrong place. A person (or another client) moving the pointer between the read and the
+// move is not detectable from here, and neither is a window moving between the
+// re-check and the click; the result says so.
+async fn point_pointer_at(x, y, settle) {
+    let cursor = hypr_json(["-j", "cursorpos"]).await?;
+    let from = #{ x: int_field(cursor, "x"), y: int_field(cursor, "y") };
+    let dx = x - from.x;
+    let dy = y - from.y;
+    if dx != 0 || dy != 0 {
+        run_client(INPUT_POINTER, ["pointer", "move", `${dx}`, `${dy}`]).await?;
+        sleep_ms(settle).await?;
+    }
+    let after = hypr_json(["-j", "cursorpos"]).await?;
+    let to = #{ x: int_field(after, "x"), y: int_field(after, "y") };
+    if to.x != x || to.y != y {
+        return Err(`the pointer was moved from ${from.x},${from.y} by ${dx},${dy} but the compositor says it is at ${to.x},${to.y}, not ${x},${y} — the caller's screen may be moving under it, so nothing was clicked or scrolled`);
+    }
+    Ok(#{ from: from, to: to })
+}
+
+// Whichever window the compositor has focused, and whether it is the one aimed at.
+// Injection through a virtual device is not bound to a window: the compositor sends the
+// keys to whatever holds the keyboard focus at that instant, so the only honest check is
+// immediately before, and again after to say whether the focus moved during.
+async fn active_address() {
+    let active = hypr_json(["-j", "activewindow"]).await?;
+    Ok(str_field(active, "address"))
+}
+
+fn focus_window_expr(address) {
+    `(function()
+  local w = hl.get_window("address:${address}")
+  if w == nil then error("stale target: no window has address ${address}") end
+  if tostring(w.address) ~= "${address}" then error("address ${address} is now " .. tostring(w.address)) end
+  return hl.dsp.focus({ window = w })
+end)()`
+}
+
+// Focus the window aimed at, on the caller's explicit say-so, and report what the
+// compositor did with it. Focusing a window that is on another workspace switches to
+// that workspace, which is a visible change to the operator's session.
+async fn ensure_focused(input, w, allow_focus) {
+    let address = str_field(w, "address");
+    let now = active_address().await?;
+    if now == address {
+        return Ok("");
+    }
+    if !allow_focus {
+        return Err(`the focused window is ${now}, not ${address}: typing or keys would go to the wrong client. Pass focus_first: true to focus ${address} first — that is a visible change to the session, which is why it is not done by default`);
+    }
+    let out = match hypr(["dispatch", focus_window_expr(address)]).await {
+        Ok(out) => out,
+        Err(e) => return Err(`the compositor would not focus ${address}: ${e}`),
+    };
+    if out.trim() != "ok" {
+        return Err(`the compositor would not focus ${address}: ${out.trim()}`);
+    }
+    let after = active_address().await?;
+    if after != address {
+        return Err(`asked the compositor to focus ${address}, it answered ok, and the focused window is ${after} — refusing to type into a window that is not the one aimed at`);
+    }
+    Ok("focused it first")
+}

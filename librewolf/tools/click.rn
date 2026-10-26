@@ -1,0 +1,64 @@
+// `librewolf_click`: click one element of an enabled tab, named by a ref from
+// librewolf_structure. A synthesized activation, not a person's mouse.
+pub fn manifest() {
+    #{
+        name: "librewolf_click",
+        description: "Click one element of an enabled LibreWolf tab, named by a ref from librewolf_structure taken against the document the tab is showing now. The tab must already be enabled by a person's click on the extension's toolbar button, and the request is refused rather than acted on if the tab's document has changed since the snapshot — a ref belongs to one document, so a reload or any other new document needs a fresh snapshot. This is a synthesized activation of the element (HTMLElement.click, untrusted), not a person's pointer: it is enough for a link, a button or a checkbox, and a widget that insists on trusted input events will not take it. The answer reports dispatched — the activation was delivered — and an effect of not_observed: the bridge cannot see the page's response to it, so a click that did nothing and one that worked read the same, and an effect must be confirmed with a fresh librewolf_read or librewolf_structure. It changes the page's state, which is why it is mutating.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "tab_id": #{
+                    "type": "integer",
+                    "description": "The id of an enabled tab, from librewolf_tabs or librewolf_status.",
+                },
+                "ref": #{
+                    "type": "string",
+                    "description": "A ref like e12-ab12cd34 from librewolf_structure for this tab, taken against its current document. The tail names the snapshot the ref came from, so a ref from an earlier outline — of this document or of the one before a navigation — is refused rather than aimed at whatever element holds that index now.",
+                },
+            },
+            "required": ["tab_id", "ref"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    call_service("click", input).await
+}
+// Everything below is the same in every librewolf_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed
+// over whole.
+
+// The bridge host (../service). LibreWolf starts it, not eidolon: the browser
+// runs it as its native messaging host, so there is no `eidolon plugins service
+// start librewolf` to name. Change the port here and the host's
+// EIDOLON_LIBREWOLF_PORT together.
+fn service() {
+    #{
+        name: "librewolf",
+        base_url: "http://127.0.0.1:8091",
+        token_file: "~/.config/eidolon/librewolf.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the browser is not running with the extension, or
+    // no profile has it loaded. There is no command that fixes that, so the
+    // answer names the one act that does instead of leaving a refusal to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the LibreWolf bridge is not answering on 127.0.0.1:8091 — LibreWolf must be running with the librewolf bridge extension connected, because the browser starts this host and eidolon cannot; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`librewolf bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok { Ok(out.result) } else { Err(out.error) }
+}

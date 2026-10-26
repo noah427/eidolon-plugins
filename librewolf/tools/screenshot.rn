@@ -1,0 +1,85 @@
+// `librewolf_screenshot`: hand the model a picture of one enabled tab, captured the
+// narrow way. `mutating` — because of the disk, not the screen.
+pub fn manifest() {
+    #{
+        name: "librewolf_screenshot",
+        description: "A picture of one enabled LibreWolf tab, taken while it is the tab its window is showing, and written to a file the caller names (default under a 0700 directory in the temp dir). The tab must already be enabled by a person's click on the extension's toolbar button, and it must be the visible tab of its window: a tab can only be captured while it is on screen, and this refuses rather than bringing it to the front, because fronting a tab changes what the operator sees. That window, the visible tab, this tab's enablement and its document are each re-checked immediately before the capture and again before the picture is returned, and a picture that may be of another tab or another document is discarded. In Firefox the activeTab grant is tied to the document that was in the tab when it was enabled, so a tab that has loaded a new document since needs a fresh click; the refusal says so. On disk: the file is created mode 0600, never through a symlink, and an existing file is not replaced unless overwrite is true. The PNG check is a signature check, not full validation — the bytes begin with the PNG magic, and nothing here decodes the image. The capture is NOT atomically bound to the enabled tab: captureVisibleTab has no argument naming the surface it captured, so a tab that switches away and back within the same window between the checks is indistinguishable from one that never moved. The window is pinned and the visible tab is re-read before and after, which is what stops a tab that MOVED windows; a same-window switch is a residual. In Firefox the activeTab grant is tied to the document that was in the tab when it was enabled, so a tab that has loaded a new document since needs a fresh click; the refusal says so. This is a read of the screen written to disk, so it is mutating: the bytes land at the path you name, overwriting whatever is there.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "tab_id": #{
+                    "type": "integer",
+                    "description": "The id of an enabled tab, from librewolf_tabs or librewolf_status. It must be the visible tab of its window.",
+                },
+                "path": #{
+                    "type": "string",
+                    "description": "Absolute path for the PNG. Default: a directory private to this user and host process under the temp dir, tab-<id>.png. The file is created mode 0600, never through a symlink, and an existing file is NOT overwritten unless overwrite is true.",
+                },
+                "overwrite": #{
+                    "type": "boolean",
+                    "description": "Replace an existing file at path. False by default: a capture is not a reason to clobber a path somebody else chose. A symlink is refused either way.",
+                },
+            },
+            "required": ["tab_id"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let out = call_service("screenshot", input).await?;
+    let path = match out.get("path") {
+        Some(p) => p,
+        None => return Err("the bridge answered a screenshot with no path, so there is nothing to read back"),
+    };
+    let image = match eidolon::image_read(path.clone()).await {
+        Ok(i) => json::from_string(i)?,
+        Err(e) => return Err(`captured ${path} but could not read it back: ${e}`),
+    };
+    let content = `captured tab ${out.get("tab_id")} (${out.get("url")}) — file ${path} — ${out.get("bytes")} bytes — image ${image.label} — the picture is the visible tab only, re-checked before and after the capture`;
+    Ok(#{
+        content: content,
+        images: [#{
+            media_type: image.media_type,
+            data: image.data,
+            alt: image.name,
+        }],
+    })
+}
+// Everything below is the same in every librewolf_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed
+// over whole.
+
+// The bridge host (../service). LibreWolf starts it, not eidolon: the browser
+// runs it as its native messaging host, so there is no `eidolon plugins service
+// start librewolf` to name. Change the port here and the host's
+// EIDOLON_LIBREWOLF_PORT together.
+fn service() {
+    #{
+        name: "librewolf",
+        base_url: "http://127.0.0.1:8091",
+        token_file: "~/.config/eidolon/librewolf.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the browser is not running with the extension, or
+    // no profile has it loaded. There is no command that fixes that, so the
+    // answer names the one act that does instead of leaving a refusal to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the LibreWolf bridge is not answering on 127.0.0.1:8091 — LibreWolf must be running with the librewolf bridge extension connected, because the browser starts this host and eidolon cannot; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`librewolf bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok { Ok(out.result) } else { Err(out.error) }
+}

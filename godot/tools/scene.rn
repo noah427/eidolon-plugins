@@ -1,0 +1,159 @@
+// `godot_scene`: which scene the editor is editing, and the two acts that change
+// it — open one, or save the one that is open.
+//
+// Opening is the act that can lose somebody's work, so the unsaved guard fires
+// before anything is asked of the editor: a person gets a dialog in the same
+// situation, and a tool that silently answered "yes" to it would be answering for
+// them. Saving is the act that makes a change in the editor real on disk.
+pub fn manifest() {
+    #{
+        name: "godot_scene",
+        description: "Name exactly one act: `open` a scene in the project the editor has open (\"res://scenes/Main.tscn\"), or `save: true` to write the scene being edited back to its file. Opening is refused while the editor holds unsaved changes in any scene — this verb will not throw away the operator's edits behind a dialog they never saw — and refused for a path that is not a scene in this project, with the answer saying what the editor has open. Saving is refused for a scene that has never been written to a file, because the editor would then have to ask the operator where to put it. `open` returns as soon as the editor has agreed: opening happens on the editor's own frame, so the call waits (up to a few seconds) and reports what the editor says it is editing, rather than reporting the request as if it were the result.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "open": #{ "type": "string", "description": "A scene in this project, written the way Godot writes it: \"res://scenes/Main.tscn\". Not a filesystem path." },
+                "save": #{ "type": "boolean", "description": "Write the scene being edited back to the file it came from. Refused if that scene has never been saved. Exactly one of `open` and `save`." },
+            },
+        },
+    }
+}
+
+pub async fn call(input) {
+    let asked = word(input, "open");
+    let out = call_service("scene", input).await?;
+    if asked == "" {
+        return Ok(out);
+    }
+    // The editor swaps scenes on its own frame, so the answer above is what the
+    // addon saw at that instant. This asks the editor what it is editing until it
+    // agrees, because "asked it to open" is not "it is open".
+    let last = "";
+    for _ in 0..POLL_TRIES {
+        let status = call_service("status", #{}).await?;
+        if !bool_field(status, "attached") {
+            return Err(`the editor's bridge connection went away while waiting for ${asked} to open: ${str_field(status, "reason")}`);
+        }
+        let now = state_text(status, "edited_scene");
+        if now == asked {
+            return Ok(#{
+                opened: now,
+                root: state_text(status, "edited_root"),
+                requested: asked,
+                matched: true,
+            });
+        }
+        last = now;
+        sleep_ms(POLL_MS).await?;
+    }
+    Err(`asked the editor to open ${asked} and it is still editing "${last}" after ${POLL_TRIES * POLL_MS}ms — it did not open it, and this call will not report that it did`)
+}
+// ---------------------------------------------------------------------------
+// Waiting on an editor that does the thing on its own frame. A tool file has no
+// clock but `sleep`, and the wait is bounded by a count of tries rather than by a
+// deadline: what it buys is that a verb which asked for something verifies it
+// happened instead of trusting that it did.
+
+const POLL_TRIES = 15;
+const POLL_MS = 200;
+const EXEC_TIMEOUT_S = 15;
+
+fn word(input, name) {
+    match input.get(name) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+fn str_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is String { v } else { `${v}` },
+        None => "",
+    }
+}
+
+fn bool_field(m, name) {
+    match m.get(name) {
+        Some(v) => if v is bool { v } else { false },
+        None => false,
+    }
+}
+
+// The editor's own half of a status answer. "" and false when no editor is
+// attached, which every caller below checks for separately so that "not attached"
+// never reads as "the editor said no".
+fn state_text(status, name) {
+    match status.get("editor_state") {
+        Some(state) => str_field(state, name),
+        None => "",
+    }
+}
+
+fn state_bool(status, name) {
+    match status.get("editor_state") {
+        Some(state) => bool_field(state, name),
+        None => false,
+    }
+}
+
+// `exec` renders a failed call into its output rather than raising, so a command
+// that never ran has to be told apart from one that answered.
+fn exec_failed(out) {
+    out.starts_with("[exit code") || out.starts_with("[timed out")
+        || out.starts_with("[cancelled") || out.starts_with("[killed")
+}
+
+async fn sleep_ms(ms) {
+    if ms <= 0 {
+        return Ok(());
+    }
+    let secs = `${ms as f64 / 1000.0}`;
+    let out = eidolon::exec("sleep", [secs], Some(EXEC_TIMEOUT_S)).await?;
+    if exec_failed(out) {
+        return Err(`sleep ${secs} failed: ${out.trim()}`);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is the same in every godot_*.rn: upstream compiles each of
+// these files on its own, and a tool file is meant to be handed over whole.
+
+// The bridge host (../service). `eidolon plugins service start godot` runs it, and
+// the editor's addon dials it; the tools come in the other side. Change the port
+// here and the host's EIDOLON_GODOT_PORT together, and the token file here and
+// EIDOLON_GODOT_TOKEN_FILE.
+fn service() {
+    #{
+        name: "godot",
+        base_url: "http://127.0.0.1:8092",
+        token_file: "~/.config/eidolon/godot.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 180,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    // A dial that fails means the host is not running. There is one command that
+    // fixes that, so the answer names it rather than leaving a connection refusal
+    // to be read.
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the godot bridge is not answering on 127.0.0.1:8092 — the eidolon-godot service has to be running (\`eidolon plugins service start godot\`); see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`the godot bridge answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok {
+        Ok(out.result)
+    } else {
+        Err(out.error)
+    }
+}

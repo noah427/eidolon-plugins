@@ -262,8 +262,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "eidolon-claude"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "eidolon-coordinator"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "libc",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+]
+
+[[package]]
+name = "eidolon-godot"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "libc",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+]
+
+[[package]]
+name = "eidolon-librewolf"
+version = "0.3.0"
 dependencies = [
  "axum",
  "libc",

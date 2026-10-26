@@ -16,7 +16,11 @@
       # One package per extension that has something to run.
       packages = forAll (pkgs: rec {
         browser = pkgs.callPackage ./browser/package.nix { };
+        hyprland = pkgs.callPackage ./hyprland/package.nix { };
+        librewolf = pkgs.callPackage ./librewolf/package.nix { };
+        claude = pkgs.callPackage ./claude/package.nix { };
         coordinator = pkgs.callPackage ./coordinator/package.nix { };
+        godot = pkgs.callPackage ./godot/package.nix { };
         default = browser;
       });
 

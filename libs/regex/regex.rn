@@ -1,0 +1,419 @@
+// A small backtracking regex engine: a workflow's scope has no regex. The graphs need
+// three patterns:
+//
+//   ^(?:https://en\.wikipedia\.org)?/wiki/[^:#?]+$    a link's url bound
+//   ^COMMAND\s+PID\s+USER                             an observation's header
+//   ^(?P<path>[^:\n]+):(?P<line>\d+):                 a grep hit's path and line
+//
+// Supported: literals; `.`; `\s \S \d \D \w \W \n \t` and escaped punctuation; `[...]` and
+// `[^...]` with ranges and those escapes; groups `(...)`, `(?:...)`, `(?P<name>...)`;
+// `|`; greedy `* + ?`; `^` and `$` (always at line boundaries). Anything else is
+// refused by name at parse, never guessed at. Positions are in characters.
+
+fn rx_fail(msg) {
+    Err("regex: " + msg)
+}
+
+fn rx_peek(p) {
+    if p.i < p.cs.len() { Some(p.cs[p.i]) } else { None }
+}
+
+fn rx_class_of(c) {
+    match c {
+        's' => Some(#{ t: "cls", c: "s", neg: false }),
+        'S' => Some(#{ t: "cls", c: "s", neg: true }),
+        'd' => Some(#{ t: "cls", c: "d", neg: false }),
+        'D' => Some(#{ t: "cls", c: "d", neg: true }),
+        'w' => Some(#{ t: "cls", c: "w", neg: false }),
+        'W' => Some(#{ t: "cls", c: "w", neg: true }),
+        _ => None,
+    }
+}
+
+fn rx_escape_char(c) {
+    match c {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        _ => c,
+    }
+}
+
+fn rx_escape(p) {
+    let c = match rx_peek(p) {
+        Some(c) => c,
+        None => return rx_fail("pattern ends in a backslash"),
+    };
+    p.i += 1;
+    match rx_class_of(c) {
+        Some(n) => return Ok(n),
+        None => {}
+    }
+    if c == 'b' || c == 'B' || c == 'A' || c == 'z' || c == 'Z' {
+        return rx_fail("anchor \\" + `${c}` + " is not supported");
+    }
+    Ok(#{ t: "char", c: rx_escape_char(c) })
+}
+
+fn rx_parse_set(p) {
+    let neg = false;
+    match rx_peek(p) {
+        Some('^') => { neg = true; p.i += 1; }
+        _ => {}
+    }
+    let items = [];
+    let first = true;
+    loop {
+        let c = match rx_peek(p) {
+            Some(c) => c,
+            None => return rx_fail("unterminated ["),
+        };
+        p.i += 1;
+        if c == ']' && !first {
+            break;
+        }
+        first = false;
+        let lo = c;
+        if c == '\\' {
+            let e = rx_escape(p)?;
+            if e.t == "cls" {
+                items.push(e);
+                continue;
+            }
+            lo = e.c;
+        }
+        let is_range = false;
+        if p.i + 1 < p.cs.len() && p.cs[p.i] == '-' && p.cs[p.i + 1] != ']' {
+            is_range = true;
+        }
+        if is_range {
+            p.i += 1;
+            let hc = p.cs[p.i];
+            p.i += 1;
+            let hi = hc;
+            if hc == '\\' {
+                let e = rx_escape(p)?;
+                if e.t == "cls" {
+                    return rx_fail("a class cannot end a range");
+                }
+                hi = e.c;
+            }
+            items.push(#{ t: "range", lo: lo, hi: hi });
+        } else {
+            items.push(#{ t: "range", lo: lo, hi: lo });
+        }
+    }
+    Ok(#{ t: "set", neg: neg, items: items })
+}
+
+fn rx_parse_alt(p) {
+    let alts = [];
+    let seq = [];
+    loop {
+        let c = match rx_peek(p) {
+            Some(c) => c,
+            None => break,
+        };
+        if c == ')' {
+            break;
+        }
+        p.i += 1;
+        if c == '|' {
+            alts.push(seq);
+            seq = [];
+            continue;
+        }
+        let node = if c == '(' {
+            let idx = -1;
+            let name = "";
+            if p.i + 1 < p.cs.len() && p.cs[p.i] == '?' {
+                if p.cs[p.i + 1] == ':' {
+                    p.i += 2;
+                } else if p.cs[p.i + 1] == 'P' && p.i + 2 < p.cs.len() && p.cs[p.i + 2] == '<' {
+                    p.i += 3;
+                    while p.i < p.cs.len() && p.cs[p.i] != '>' {
+                        name += `${p.cs[p.i]}`;
+                        p.i += 1;
+                    }
+                    if p.i >= p.cs.len() {
+                        return rx_fail("unterminated group name");
+                    }
+                    p.i += 1;
+                    p.ngroups += 1;
+                    idx = p.ngroups;
+                    p.names.push(#{ idx: idx, name: name });
+                } else {
+                    return rx_fail("group syntax (?" + `${p.cs[p.i + 1]}` + " is not supported");
+                }
+            } else {
+                p.ngroups += 1;
+                idx = p.ngroups;
+            }
+            let inner = rx_parse_alt(p)?;
+            match rx_peek(p) {
+                Some(')') => { p.i += 1; }
+                _ => return rx_fail("unterminated ("),
+            }
+            #{ t: "group", idx: idx, alts: inner }
+        } else if c == '[' {
+            rx_parse_set(p)?
+        } else if c == '\\' {
+            rx_escape(p)?
+        } else if c == '.' {
+            #{ t: "any" }
+        } else if c == '^' {
+            #{ t: "bol" }
+        } else if c == '$' {
+            #{ t: "eol" }
+        } else if c == '*' || c == '+' || c == '?' || c == '{' {
+            return rx_fail("nothing to repeat before " + `${c}`);
+        } else {
+            #{ t: "char", c: c }
+        };
+        match rx_peek(p) {
+            Some('*') => { p.i += 1; node = #{ t: "rep", node: node, min: 0, max: -1 }; }
+            Some('+') => { p.i += 1; node = #{ t: "rep", node: node, min: 1, max: -1 }; }
+            Some('?') => { p.i += 1; node = #{ t: "rep", node: node, min: 0, max: 1 }; }
+            Some('{') => return rx_fail("{n,m} repetition is not supported"),
+            _ => {}
+        }
+        match rx_peek(p) {
+            Some('?') => return rx_fail("lazy repetition is not supported"),
+            Some('+') => return rx_fail("possessive repetition is not supported"),
+            _ => {}
+        }
+        seq.push(node);
+    }
+    alts.push(seq);
+    Ok(alts)
+}
+
+// A repeat of a nullable node is refused: it would loop without consuming.
+fn rx_nullable(node) {
+    let t = node.t;
+    if t == "bol" || t == "eol" {
+        true
+    } else if t == "group" {
+        let any = false;
+        for seq in node.alts {
+            let all = true;
+            for n in seq {
+                if !rx_nullable(n) { all = false; }
+            }
+            if all { any = true; }
+        }
+        any
+    } else if t == "rep" {
+        node.min == 0 || rx_nullable(node.node)
+    } else {
+        false
+    }
+}
+
+// Instructions are objects with an integer `op`:
+//   0 char c   1 any   2 one (a set or class, in `node`)   3 bol   4 eol
+//   5 split a b (try a, then b)   6 jmp to   7 save n   8 match
+fn rx_emit_node(node, prog) {
+    let t = node.t;
+    if t == "char" {
+        prog.push(#{ op: 0, c: node.c });
+    } else if t == "any" {
+        prog.push(#{ op: 1 });
+    } else if t == "set" || t == "cls" {
+        prog.push(#{ op: 2, node: node });
+    } else if t == "bol" {
+        prog.push(#{ op: 3 });
+    } else if t == "eol" {
+        prog.push(#{ op: 4 });
+    } else if t == "group" {
+        if node.idx >= 0 {
+            prog.push(#{ op: 7, n: node.idx * 2 });
+        }
+        rx_emit_alts(node.alts, prog);
+        if node.idx >= 0 {
+            prog.push(#{ op: 7, n: node.idx * 2 + 1 });
+        }
+    } else {
+        // min 0 or 1, max 1 or unbounded (the parser admits only * + ?)
+        if rx_nullable(node.node) {
+            return Err("regex: a repeat of something that can match nothing is not supported");
+        }
+        if node.min == 1 {
+            rx_emit_node(node.node, prog)?;
+        }
+        let at = prog.len();
+        prog.push(#{ op: 5, a: at + 1, b: 0 });
+        rx_emit_node(node.node, prog)?;
+        if node.max < 0 {
+            prog.push(#{ op: 6, to: at });
+        }
+        prog[at].b = prog.len();
+    }
+    Ok(())
+}
+
+fn rx_emit_seq(seq, prog) {
+    for n in seq {
+        rx_emit_node(n, prog)?;
+    }
+    Ok(())
+}
+
+fn rx_emit_alts(alts, prog) {
+    let jumps = [];
+    let i = 0;
+    while i < alts.len() {
+        if i + 1 < alts.len() {
+            let at = prog.len();
+            prog.push(#{ op: 5, a: at + 1, b: 0 });
+            rx_emit_seq(alts[i], prog)?;
+            jumps.push(prog.len());
+            prog.push(#{ op: 6, to: 0 });
+            prog[at].b = prog.len();
+        } else {
+            rx_emit_seq(alts[i], prog)?;
+        }
+        i += 1;
+    }
+    for j in jumps {
+        prog[j].to = prog.len();
+    }
+    Ok(())
+}
+
+// A compiled pattern: #{ prog, ngroups, names: [#{idx, name}] }.
+fn regex_compile(pattern) {
+    let p = #{ cs: pattern.chars().collect::<Vec>(), i: 0, ngroups: 0, names: [] };
+    let alts = rx_parse_alt(p)?;
+    if p.i < p.cs.len() {
+        return rx_fail("unmatched )");
+    }
+    let prog = [];
+    rx_emit_alts(alts, prog)?;
+    prog.push(#{ op: 8 });
+    Ok(#{ prog: prog, ngroups: p.ngroups, names: p.names })
+}
+
+fn rx_is_space(c) {
+    c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\x0b' || c == '\x0c'
+}
+
+fn rx_is_digit(c) {
+    c >= '0' && c <= '9'
+}
+
+fn rx_is_word(c) {
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+fn rx_cls_has(name, c) {
+    if name == "s" { rx_is_space(c) } else if name == "d" { rx_is_digit(c) } else { rx_is_word(c) }
+}
+
+fn rx_one(node, c) {
+    let t = node.t;
+    if t == "char" {
+        c == node.c
+    } else if t == "any" {
+        c != '\n'
+    } else if t == "cls" {
+        rx_cls_has(node.c, c) != node.neg
+    } else {
+        let hit = false;
+        for it in node.items {
+            if it.t == "range" {
+                if c >= it.lo && c <= it.hi { hit = true; }
+            } else if rx_cls_has(it.c, c) != it.neg {
+                hit = true;
+            }
+        }
+        hit != node.neg
+    }
+}
+
+fn rx_single(node) {
+    node.t == "char" || node.t == "any" || node.t == "cls" || node.t == "set"
+}
+
+// One attempt from `start`: depth-first with an explicit stack of [pc, pos, saves].
+// Answers the saves (slots 0 and 1 are the whole match) or [] for no match.
+fn rx_run(prog, text, start, nslots) {
+    let saves0 = [];
+    let i = 0;
+    while i < nslots {
+        saves0.push(-1);
+        i += 1;
+    }
+    let stack = [[0, start, saves0]];
+    while stack.len() > 0 {
+        let th = stack.pop().unwrap();
+        let pc = th[0];
+        let pos = th[1];
+        let saves = th[2];
+        let alive = true;
+        while alive {
+            let ins = prog[pc];
+            let op = ins.op;
+            if op == 0 {
+                if pos < text.len() && text[pos] == ins.c { pc += 1; pos += 1; } else { alive = false; }
+            } else if op == 1 {
+                if pos < text.len() && text[pos] != '\n' { pc += 1; pos += 1; } else { alive = false; }
+            } else if op == 2 {
+                if pos < text.len() && rx_one(ins.node, text[pos]) { pc += 1; pos += 1; } else { alive = false; }
+            } else if op == 3 {
+                if pos == 0 || text[pos - 1] == '\n' { pc += 1; } else { alive = false; }
+            } else if op == 4 {
+                if pos == text.len() || text[pos] == '\n' { pc += 1; } else { alive = false; }
+            } else if op == 5 {
+                stack.push([ins.b, pos, saves.clone()]);
+                pc = ins.a;
+            } else if op == 6 {
+                pc = ins.to;
+            } else if op == 7 {
+                saves[ins.n] = pos;
+                pc += 1;
+            } else {
+                saves[0] = start;
+                saves[1] = pos;
+                return saves;
+            }
+        }
+    }
+    let none = [];
+    none
+}
+
+// The first match of `re` (from regex_compile) in `text`, or None:
+// #{ start, end, groups: #{ name: text } } -- only groups that took part.
+fn regex_search_in(re, text) {
+    let cs = text.chars().collect::<Vec>();
+    let nslots = (re.ngroups + 1) * 2;
+    let start = 0;
+    while start <= cs.len() {
+        let saves = rx_run(re.prog, cs, start, nslots);
+        if saves.len() > 0 {
+            let groups = #{};
+            for nm in re.names {
+                let a = saves[nm.idx * 2];
+                let b = saves[nm.idx * 2 + 1];
+                if a >= 0 && b >= a {
+                    let s = "";
+                    let j = a;
+                    while j < b {
+                        s += `${cs[j]}`;
+                        j += 1;
+                    }
+                    groups[nm.name] = s;
+                }
+            }
+            return Some(#{ start: saves[0], end: saves[1], groups: groups });
+        }
+        start += 1;
+    }
+    None
+}
+
+fn regex_search(pattern, text) {
+    let re = regex_compile(pattern)?;
+    Ok(regex_search_in(re, text))
+}
