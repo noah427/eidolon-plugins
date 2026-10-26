@@ -16,6 +16,7 @@
       # One package per extension that has something to run.
       packages = forAll (pkgs: rec {
         browser = pkgs.callPackage ./browser/package.nix { };
+        coordinator = pkgs.callPackage ./coordinator/package.nix { };
         default = browser;
       });
 

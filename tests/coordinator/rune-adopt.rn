@@ -1,0 +1,36 @@
+// The live Rune-path fixture's workflow: the adoption is made **by the tool**, so the
+// caller is the identity the harness mints for this run and never a string a model
+// supplied. Copied into the disposable config's copy of the plugin by
+// `tests/coordinator/live-rune-path.sh`; not shipped in the plugin's own `workflows/`.
+
+pub fn workflow() {
+    #{
+        name: "rune-adopt",
+        description: "Adopt one worker through the plugin's own tool: `coordinator_adopt` reads this session's own row from the roster itself, so the coordinator on the record is the harness's identity for this run. args: {session: \"<worker session id>\"}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "session": #{ "type": "string", "description": "The worker's session id, as the roster publishes it" },
+            },
+            "required": ["session"],
+        },
+    }
+}
+
+pub async fn run(args) {
+    let session = match args.get("session") {
+        Some(s) => `${s}`,
+        None => return Err("rune-adopt needs `session`: the worker's session id"),
+    };
+    let out = "";
+    match eidolon::tool_call("coordinator_adopt", #{ "session": session, "name": "rune path" }).await {
+        Ok(t) => out += `ADOPT-OK: ${t}\n`,
+        Err(e) => out += `ADOPT-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(t) => out += `ADOPTIONS-OK: ${t}\n`,
+        Err(e) => out += `ADOPTIONS-ERR: ${e}\n`,
+    }
+    Ok(out)
+}

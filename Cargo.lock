@@ -262,6 +262,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "eidolon-coordinator"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "libc",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

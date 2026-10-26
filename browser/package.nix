@@ -17,9 +17,17 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ./service
+      # The workspace has more than one member; cargo loads every member's
+      # manifest, so this package's source has to carry the other one.
+      ../coordinator/service
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;
+
+  # One package, one program: without this the workspace's other member builds
+  # too, and `.#browser` -- which is also the flake default -- would carry it.
+  cargoBuildFlags = [ "-p" "eidolon-browser" ];
+  cargoTestFlags = [ "-p" "eidolon-browser" ];
 
   nativeBuildInputs = [ makeWrapper ];
 

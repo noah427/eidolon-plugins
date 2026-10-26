@@ -1,0 +1,207 @@
+// `coordinator_adopt`: a coordinator adopts one worker, explicitly, by the address
+// the harness publishes for it.
+//
+// The adopting side is never an argument. This session's own durable address is
+// read from the roster — the harness's answer about *this* session — and handed to
+// the service as `caller`, so a model cannot adopt a worker on somebody else's
+// behalf, and no tag, name, shared directory or claim of being a coordinator
+// produces an adoption. The token the service checks is transport auth; the
+// binding to a caller is a property of this door, which is why this file never
+// takes a coordinator as input.
+pub fn manifest() {
+    #{
+        name: "coordinator_adopt",
+        description: "Adopt a worker session, explicitly and by durable address: from then on this session is its coordinator, and the monitor sends this session one notice per observed halt of it. The address is the harness's, echoed verbatim — never a display name, and never a tag. Adoption confers no authority over the worker: it routes notices and nothing else.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "session": #{
+                    "type": "string",
+                    "description": "The worker's durable address, exactly as `eidolon peers` prints it. Echoed verbatim; this plugin never canonicalises, shortens or path-joins it, and never matches a name to find it.",
+                },
+                "name": #{
+                    "type": "string",
+                    "description": "What this coordinator calls the worker. Display and search only: a name routes nothing, grants nothing, and is never how a worker is found.",
+                },
+                "note": #{
+                    "type": "string",
+                    "description": "Free text kept with the record: the assignment. It is not a status and not evidence about the worker — declared text never overrides what the harness observes.",
+                },
+            },
+            "required": ["session"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let session = match text_of(input.get("session")) {
+        Some(s) => s,
+        None => return Err("coordinator_adopt needs `session`: the worker's durable address, exactly as `eidolon peers` prints it — never a display name"),
+    };
+    match refuse_control_chars("session", session) {
+        Some(e) => return Err(e),
+        None => {}
+    }
+    let caller = my_address().await?;
+    if caller == session {
+        return Err(`a session cannot adopt itself (${session}): an adoption is one session's act about another, and this session is that one`);
+    }
+    let name = match text_of(input.get("name")) {
+        Some(s) => s,
+        None => "",
+    };
+    let note = match text_of(input.get("note")) {
+        Some(s) => s,
+        None => "",
+    };
+    call_service("adopt", #{
+        "caller": caller,
+        "session": session,
+        "name": name,
+        "note": note,
+    })
+    .await
+}
+
+// Everything below is the same in every coordinator_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed over
+// whole.
+
+// This session's own durable address, as the harness publishes it. There is no
+// other source for it in this file: not an argument, not an environment
+// variable, not a name somebody typed.
+async fn my_address() {
+    let raw = match eidolon::swarm_call("roster", #{}).await {
+        Ok(v) => v,
+        Err(e) => return Err(no_roster(`${e}`)),
+    };
+    let roster = match json::from_string(raw) {
+        Ok(v) => v,
+        Err(e) => return Err(no_roster(`${e}; \`swarm_call("roster")\` answered: ${raw}`)),
+    };
+    let me = match my_row(roster) {
+        Some(r) => r,
+        None => {
+            return Err(no_roster(
+                "the roster carries no row for this session: `me` is null or absent, and nothing else in it marks which row is the caller — so this plugin cannot tell which address is the one it would adopt from",
+            ))
+        }
+    };
+    match me.get("session") {
+        Some(s) => {
+            let addr = `${s}`;
+            if addr == "" || addr == "null" {
+                return Err(no_roster(
+                    "this session has no durable address: the roster publishes `session` as null, and null means not established — not no-such-session. The harness has not minted an id into a log yet, and an adoption is keyed on that address, so none can be made until it exists",
+                ))
+            }
+            Ok(addr)
+        }
+        None => Err(no_roster("this session's own row carries no `session` field at all")),
+    }
+}
+
+// This session's own row: a `me` object beside the list, or the one row that
+// marks itself. Either shape is the harness's to choose; neither existing is a
+// refusal, never a guess from the first row and never a name.
+fn my_row(roster) {
+    if roster is Object {
+        match roster.get("me") {
+            Some(m) => {
+                // `me` is null when the caller has no registration of its own —
+                // `eidolon peers --json` is such a scan. Null is not a row.
+                if m is Object {
+                    return Some(m);
+                }
+                return None;
+            }
+            None => {}
+        }
+    }
+    if roster is Vec {
+        for row in roster {
+            match row.get("me") {
+                Some(flag) => {
+                    if `${flag}` == "true" {
+                        return Some(row);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    None
+}
+
+// The refusal a harness without the structured roster gets, naming exactly what is
+// missing rather than degrading to something that would look like a working
+// adoption. This plugin reads session state as data: it will not parse `peers`'
+// prose, and it will not read the presence directory itself.
+fn no_roster(why) {
+    `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
+}
+
+fn text_of(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            // A JSON null arrives as the unit value, whose text form is `null`.
+            if s == "null" || s == "" {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        None => None,
+    }
+}
+
+// A newline in an address or a name would forge a roster row or split a notice;
+// a NUL or a tab is not a thing an address has. Refused before anything is sent.
+fn refuse_control_chars(field, s) {
+    if s.contains("\n") {
+        return Some(`${field} contains a newline, which would forge a row rather than name a session`);
+    }
+    if s.contains("\r") {
+        return Some(`${field} contains a carriage return`);
+    }
+    if s.contains("\t") {
+        return Some(`${field} contains a tab`);
+    }
+    None
+}
+
+// The monitor service (../service). Everything that decides anything lives there,
+// so that the record and the notice have one implementation and the tools stay
+// thin doors onto it.
+fn service() {
+    #{
+        name: "coordinator",
+        base_url: "http://127.0.0.1:8095",
+        token_file: "~/.config/eidolon/coordinator.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 30,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok {
+        Ok(out.result)
+    } else {
+        Err(out.error)
+    }
+}

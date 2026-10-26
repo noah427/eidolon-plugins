@@ -1,0 +1,135 @@
+// `coordinator_adoptions`: what this session has adopted, what each adopted worker
+// is doing now, and what the monitor can and cannot see.
+//
+// The rows are the monitor's answer, not a second opinion: it holds the records,
+// it does the watching, and it is the only thing that writes them. Liveness is
+// reported beside the state and never folded into it — a stale registration read
+// as a live worker is the failure this separates out.
+pub fn manifest() {
+    #{
+        name: "coordinator_adoptions",
+        description: "Every adoption this session has made, and for each: the worker's durable address as it was recorded, what this coordinator calls it, the epoch it was adopted in, whether it is still monitored or has been released, whether a live session carries that address right now, the state and last outcome the harness publishes for it, and whether the monitor can see the workers at all. Read-only. Names and tags appear as what they are — display — and are never how a worker is found.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{},
+        },
+    }
+}
+
+pub async fn call(input) {
+    let caller = my_address().await?;
+    call_service("adoptions", #{ "caller": caller }).await
+}
+
+// Everything below is the same in every coordinator_*.rn: upstream eidolon
+// compiles each tool file on its own, and a tool file is meant to be handed over
+// whole.
+
+// This session's own durable address, as the harness publishes it. There is no
+// other source for it in this file: not an argument, not an environment
+// variable, not a name somebody typed.
+async fn my_address() {
+    let raw = match eidolon::swarm_call("roster", #{}).await {
+        Ok(v) => v,
+        Err(e) => return Err(no_roster(`${e}`)),
+    };
+    let roster = match json::from_string(raw) {
+        Ok(v) => v,
+        Err(e) => return Err(no_roster(`${e}; \`swarm_call("roster")\` answered: ${raw}`)),
+    };
+    let me = match my_row(roster) {
+        Some(r) => r,
+        None => {
+            return Err(no_roster(
+                "the roster carries no row for this session: `me` is null or absent, and nothing else in it marks which row is the caller — so this plugin cannot tell which address is the one it would adopt from",
+            ))
+        }
+    };
+    match me.get("session") {
+        Some(s) => {
+            let addr = `${s}`;
+            if addr == "" || addr == "null" {
+                return Err(no_roster(
+                    "this session has no durable address: the roster publishes `session` as null, and null means not established — not no-such-session. The harness has not minted an id into a log yet, and an adoption is keyed on that address, so none can be made until it exists",
+                ))
+            }
+            Ok(addr)
+        }
+        None => Err(no_roster("this session's own row carries no `session` field at all")),
+    }
+}
+
+// This session's own row: a `me` object beside the list, or the one row that
+// marks itself. Either shape is the harness's to choose; neither existing is a
+// refusal, never a guess from the first row and never a name.
+fn my_row(roster) {
+    if roster is Object {
+        match roster.get("me") {
+            Some(m) => {
+                // `me` is null when the caller has no registration of its own —
+                // `eidolon peers --json` is such a scan. Null is not a row.
+                if m is Object {
+                    return Some(m);
+                }
+                return None;
+            }
+            None => {}
+        }
+    }
+    if roster is Vec {
+        for row in roster {
+            match row.get("me") {
+                Some(flag) => {
+                    if `${flag}` == "true" {
+                        return Some(row);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    None
+}
+
+// The refusal a harness without the structured roster gets, naming exactly what is
+// missing rather than answering as if nobody had been adopted. This plugin reads
+// session state as data: it will not parse `peers`' prose, and it will not read
+// the presence directory itself.
+fn no_roster(why) {
+    `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
+}
+
+// The monitor service (../service). Everything that decides anything lives there,
+// so that the record and the notice have one implementation and the tools stay
+// thin doors onto it.
+fn service() {
+    #{
+        name: "coordinator",
+        base_url: "http://127.0.0.1:8095",
+        token_file: "~/.config/eidolon/coordinator.token",
+        auth: #{ header: "Authorization", prefix: "Bearer " },
+        timeout_s: 30,
+    }
+}
+
+// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
+async fn call_service(method, args) {
+    let body = json::to_string(#{ "method": method, "args": args })?;
+    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+        }
+    };
+    let reply = json::from_string(sent)?;
+    if reply.status != 200 {
+        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
+    }
+    let out = json::from_string(reply.body)?;
+    if out.ok {
+        Ok(out.result)
+    } else {
+        Err(out.error)
+    }
+}

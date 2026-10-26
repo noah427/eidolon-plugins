@@ -1,0 +1,33 @@
+// The manifest for `coordinator` — the directory's name is the namespace every
+// verb it ships is registered under (`coordinator_adopt`, ...), so this file says
+// only what the plugin says about itself.
+//
+// No role lives in this file and no authority is claimed by it. A label or a tag
+// is storage and display, and the adoption this plugin records is an explicit act
+// of one session about another — never an effect of a word somebody typed.
+pub fn manifest() {
+    #{
+        name: "coordinator",
+        version: "0.1.0",
+        // The address is the id the harness mints for a session — the log's file
+        // stem — so an adoption can be recorded as soon as the session has a log.
+        // It cannot work for a session with no log, and says so rather than
+        // substituting a locator: the id is what the monitor resolves later.
+        description: "explicit adoption of worker sessions by a coordinator, and one notice per observed halt: who you have adopted, what each of them is doing, and the notifications still owed to them. An adoption is keyed on the session id the harness mints (the log's file stem), echoed verbatim; a session with no log has none, and then the verb refuses with the reason instead of substituting a path or a label",
+        // The monitor, declared: `eidolon plugins service approve coordinator`
+        // records the operator's yes against THIS text by hash, so an edit here
+        // asks again, and `service start` then runs it detached with readiness
+        // taken from the same `readiness` block the tools dial. It is the process
+        // that watches adopted workers and sends the notices; the tools only ask
+        // it questions, so nothing here needs a session to be awake.
+        service: #{
+            command: "eidolon-coordinator",
+            readiness: #{ port: 8095, health: "/health" },
+            ready_timeout_s: 15,
+        },
+        claims: #{
+            tools: ["adopt", "release", "adoptions", "notices", "start", "cancel"],
+            grants: ["file:~/.config/eidolon/coordinator.token"],
+        },
+    }
+}

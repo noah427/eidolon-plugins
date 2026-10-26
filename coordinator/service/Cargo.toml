@@ -1,0 +1,15 @@
+[package]
+name = "eidolon-coordinator"
+version = "0.1.0"
+description = "The coordination monitor: explicit adoption records, one notice per observed halt, and the notices still owed"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.8"
+# for flock: one writer per store, refused rather than shared
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }

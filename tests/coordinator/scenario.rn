@@ -1,0 +1,24 @@
+// The fixture's workflow, run by tests/coordinator/run.sh against the *real*
+// harness with `--provider mock`. It is copied into the temp plugin and is not
+// shipped: what it is for is the shipped tools' refusal, measured rather than
+// described. `coordinator_adoptions` is read-only, so nothing here can change a
+// record — the check is that the tool fails closed, naming the seam it needs,
+// instead of answering as if nobody had been adopted.
+
+pub fn workflow() {
+    #{
+        name: "scenario",
+        description: "Call coordinator_adoptions once and print its answer or its refusal. Nothing else; no record is changed by this run.",
+        approval: "read_only",
+        params: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn run(input) {
+    let out = "";
+    match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(t) => out += `ok: ${t}\n`,
+        Err(e) => out += `ERR: ${e}\n`,
+    }
+    Ok(out)
+}

@@ -2,7 +2,7 @@
 # Cargo.lock and one `cargo test`.
 [workspace]
 resolver = "3"
-members = ["browser/service"]
+members = ["browser/service", "coordinator/service"]
 
 [workspace.package]
 edition = "2024"
