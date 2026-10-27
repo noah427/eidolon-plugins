@@ -7,6 +7,7 @@
 {
   lib,
   rustPlatform,
+  bash,
 }:
 
 rustPlatform.buildRustPackage {
@@ -42,6 +43,8 @@ rustPlatform.buildRustPackage {
   # own — the occurrence dedup, the notice lifecycle, the release rules — and they
   # need no harness, no roster and no send.
   cargoTestFlags = [ "-p" "eidolon-coordinator" ];
+  # The real-child placement fixtures generate Bash scripts during the tests.
+  nativeCheckInputs = [ bash ];
 
   meta = {
     description = "The coordination monitor behind eidolon's coordinator_* tools";
