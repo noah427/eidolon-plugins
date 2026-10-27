@@ -885,15 +885,29 @@ impl crate::ancestry::NoFocus for Recorder {
     }
 }
 
+/// Resolve Bash through PATH: a script generated during a test cannot be fixed by
+/// Nix's earlier patchShebangs phase, and /usr/bin/env is absent in its sandbox.
+fn fixture_bash() -> String {
+    let output = Command::new("bash")
+        .args(["-c", "printf '%s' \"$BASH\""])
+        .output()
+        .expect("process fixtures require bash on PATH");
+    assert!(output.status.success(), "resolving the fixture's Bash interpreter failed");
+    let bash = String::from_utf8(output.stdout).expect("Bash path is UTF-8");
+    assert!(std::path::Path::new(&bash).is_absolute(), "Bash must report an absolute interpreter path: {bash}");
+    assert!(std::path::Path::new(&bash).is_file(), "fixture interpreter must exist: {bash}");
+    bash
+}
+
 /// A stand-in terminal for the visible-launch tests: it records its own argv, answers the
 /// barrier with a held receipt naming itself and its **real** pid, then stays alive on the
 /// stdin the host holds — the shape of a terminal, with nothing of a terminal in it.
-/// `#!/usr/bin/env bash` because this host has no `/bin/bash`.
 fn stand_in_terminal(root: &std::path::Path) -> PathBuf {
+    let bash = fixture_bash();
     let argv = root.join("argv");
     let script = root.join("fake-terminal");
     std::fs::write(&script, format!(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{argv}'\nfd=\"\"; op=\"\"; inst=\"\"\n\
+        "#!{bash}\nprintf '%s\\n' \"$@\" > '{argv}'\nfd=\"\"; op=\"\"; inst=\"\"\n\
          while [ $# -gt 0 ]; do case \"$1\" in \
          --managed-start-fd) fd=\"$2\"; shift 2;; \
          --managed-operation) op=\"$2\"; shift 2;; \
