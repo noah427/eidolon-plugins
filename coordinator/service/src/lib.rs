@@ -35,6 +35,9 @@
 pub mod store;
 pub mod managed_start;
 pub mod process_host;
+pub mod rank;
+
+pub use rank::{RankAssignment, RankRequest};
 
 use crate::store::SaveError;
 use serde::{Deserialize, Serialize};
@@ -97,6 +100,34 @@ pub struct Row {
     /// session published, so it is reported beside the state and never as one.
     #[serde(default)]
     pub reached: bool,
+    /// What the session calls itself — the raw label, exactly as the session
+    /// wrote it. Never an address, and never the string this plugin edits.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Presentation text a controller attached beside that label: who owns it and
+    /// what it says. The harness holds it; this plugin is one of the controllers
+    /// that may, which is why it is read here rather than assumed from the record.
+    #[serde(default)]
+    pub decoration: Option<Decoration>,
+    /// The composed name the harness renders — decoration and label together. A
+    /// fact about the screen, printed in answers so the record is never reported as
+    /// if it were the display.
+    #[serde(default)]
+    pub display: Option<String>,
+}
+
+/// A decoration as the harness publishes it on a roster row.
+///
+/// `controller` is the owner string the harness stores — a claim, not an
+/// authentication — and `text` is the presentation text. Nothing here says what the
+/// text means: this plugin's vocabulary lives in [`rank`], and core has no opinion
+/// about any of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decoration {
+    #[serde(default)]
+    pub controller: String,
+    #[serde(default)]
+    pub text: String,
 }
 
 /// One coordinator's explicit act about one worker.
@@ -221,6 +252,11 @@ pub struct Store {
     pub notices: Vec<Notice>,
     #[serde(default)]
     pub starts: Vec<managed_start::StartRecord>,
+    /// Explicit rank assignments, one per session, durable on purpose: a resume
+    /// keeps its word, a fork does not silently change it, and a session that was
+    /// never assigned one gets none. The harness knows nothing about this list.
+    #[serde(default)]
+    pub ranks: Vec<RankAssignment>,
 }
 
 /// The store and its poison, behind the one order that is safe.
@@ -642,8 +678,26 @@ pub fn cycle(
     transport: &dyn Transport,
     now: u64,
 ) -> Scan {
+    cycle_with_rows(store, save, roster.rows(), transport, now)
+}
+
+/// The same scan with the roster **already read**, for a caller that needs the same
+/// rows for something else.
+///
+/// The monitor reads the roster once per tick and uses it twice — for halts and for
+/// decoration — and two reads would be two moments, so a row could be watched for a
+/// halt under one registration and decorated under the next. Passing the rows in
+/// keeps one observation of the swarm per tick, which is the whole of what this
+/// signature buys.
+pub fn cycle_with_rows(
+    store: &mut Store,
+    save: &mut dyn FnMut(&Store) -> Result<(), SaveError>,
+    rows: Result<Vec<Row>, String>,
+    transport: &dyn Transport,
+    now: u64,
+) -> Scan {
     let mut scan = Scan::default();
-    match roster.rows() {
+    match rows {
         Ok(rows) => scan
             .notes
             .extend(observe(&store.records, &mut store.notices, &rows, now)),
@@ -869,6 +923,9 @@ mod tests {
             outcome_observed: None,
             started_ms: None,
             reached: true,
+            label: None,
+            decoration: None,
+            display: None,
         }
     }
 
@@ -884,6 +941,9 @@ mod tests {
             outcome_observed: Some(count),
             started_ms: Some(1_764_000_000_000),
             reached: true,
+            label: None,
+            decoration: None,
+            display: None,
         }
     }
 

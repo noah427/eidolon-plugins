@@ -32,6 +32,9 @@ fn halted(session: &str, locator: &str, outcome: u64) -> Row {
         outcome_observed: Some(0),
         started_ms: Some(10),
         reached: true,
+        label: None,
+        decoration: None,
+        display: None,
     }
 }
 

@@ -356,7 +356,7 @@ mod tests {
                 2 => host.launch(&request).unwrap().release_acknowledged = true,
                 _ => rows.lock().unwrap().push(Row { id: "locator".into(), session: Some("fixture-child".into()),
                     state: "idle".into(), last: "unknown".into(), outcome_at: None, outcome_observed: None,
-                    started_ms: None, reached: true }),
+                    started_ms: None, reached: true, label: None, decoration: None, display: None }),
             }
             assert!(host.cancel(&request).is_err());
             let launch = host.launch(&request).unwrap();

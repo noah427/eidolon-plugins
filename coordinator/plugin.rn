@@ -26,7 +26,12 @@ pub fn manifest() {
             ready_timeout_s: 15,
         },
         claims: #{
-            tools: ["adopt", "release", "adoptions", "notices", "start", "cancel"],
+            // `rank`/`unrank`/`ranks` assign a display word; they claim no authority
+            // over the harness and none over another session. The word is the
+            // plugin's own vocabulary, persisted here, and the harness only holds
+            // the text a controller attached.
+            tools: ["adopt", "release", "adoptions", "notices", "start", "cancel",
+                    "rank", "unrank", "ranks"],
             grants: ["file:~/.config/eidolon/coordinator.token"],
         },
     }
