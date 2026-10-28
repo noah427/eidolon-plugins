@@ -1,0 +1,392 @@
+// `coordinator_hook_peer` — the `peer_changed` lifecycle handler.
+//
+// The harness calls this with one observation when a watched peer's state moves.
+// The only effect here is the plugin's own durable store: one notice row per
+// occurrence that names a failed, errored or iteration-limit ending while the
+// source is not busy. Nothing is sent, decorated or resumed from this file. A
+// coverage gap is recorded as a gap; `unavailable` is not a completion and writes
+// nothing; anything already carrying the notice id this occurrence derives is one
+// notice, and no second row is written.
+//
+// The notice is written and read back **before** this handler returns, so a
+// handler that comes back at all has either persisted the row or said plainly that
+// the write was uncertain. The store is the plugin's own state, keyed by the
+// running session's attribution: `adoptions`, `notices`, `gaps`.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_hook_peer",
+        description: "Lifecycle handler for `peer_changed`: load the coordinator's own adoption and notice store, derive the service's notice id from the observation's authoritative occurrence token, dedupe on it, and write one notice before returning the watch list. A coverage gap becomes a gap row; `unavailable` writes nothing; a corrupt store is refused rather than repaired.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{},
+        },
+    }
+}
+
+pub async fn call(input) {
+    let notes = [];
+    let uncertain = [];
+
+    let adoptions = load("adoptions").await?;
+    let watch = lifecycle_watch(adoptions.rows);
+    let decision = lifecycle_evaluate(input);
+    let action = lifecycle_text(decision, "action");
+
+    if action == "gap" {
+        let gaps = load("gaps").await?;
+        let rows = gaps.rows;
+        rows.push(lifecycle_gap_row(input));
+        let wrote = save("gaps", rows, gaps.revision).await?;
+        if lifecycle_true(wrote.get("uncertain")) {
+            uncertain.push(`coverage gap: write came back uncertain (${lifecycle_text(wrote, "detail")}); it is not recorded as done`);
+        } else {
+            notes.push("coverage gap recorded; a gap is not a halt");
+        }
+        return Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain });
+    }
+
+    if action != "halt" {
+        notes.push(lifecycle_text(decision, "why"));
+        return Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain });
+    }
+
+    let worker = lifecycle_text(input, "source");
+    if worker == "" {
+        notes.push("the observation names no source; no notice, because there is no worker to key it on");
+        return Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain });
+    }
+    let adoption = match lifecycle_find_adoption(adoptions.rows, worker) {
+        Some(a) => a,
+        None => {
+            notes.push(`${worker}: not adopted by this session; nothing announced`);
+            return Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain });
+        }
+    };
+
+    // The occurrence is authoritative. Without it a notice keyed on the ending
+    // word alone would repeat on every scan, so none is written.
+    let occurrence = lifecycle_text(input, "occurrence");
+    if occurrence == "" {
+        notes.push(`${worker}: halted, but the observation carries no occurrence token; no notice, because a notice keyed on the ending alone would repeat`);
+        return Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain });
+    }
+
+    let notice = lifecycle_notice(adoption, input, occurrence)?;
+    let id = lifecycle_text(notice, "notice_id");
+    let notices = load("notices").await?;
+    if lifecycle_has_notice(notices.rows, id) {
+        notes.push(`${worker}: occurrence \`${occurrence}\` already has notice ${id}; one notice, no second`);
+        return Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain });
+    }
+
+    let rows = notices.rows;
+    rows.push(notice);
+    let wrote = save("notices", rows, notices.revision).await?;
+    if lifecycle_true(wrote.get("uncertain")) {
+        uncertain.push(`notice ${id}: write came back uncertain (${lifecycle_text(wrote, "detail")}); it is not recorded as done`);
+    } else {
+        notes.push(`${worker}: halted with occurrence \`${occurrence}\`; notice ${id} written`);
+    }
+    Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain })
+}
+
+// ---- the store, and the pure policy this handler repeats -------------------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front
+// of workflows, so the policy cannot be imported here. These are the functions of
+// `../lib/lifecycle.rn` this handler uses, byte for byte; that file is the one place
+// they are explained.
+
+async fn load(key) {
+    let raw = eidolon::plugin_state_read(#{ "key": key }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = match reply.get("revision") {
+        Some(v) => v,
+        None => 0,
+    };
+    let rows = match reply.get("value") {
+        Some(v) => {
+            if v is String {
+                let parsed = json::from_string(`${v}`)?;
+                if parsed is Vec {
+                    parsed
+                } else {
+                    return Err(`the \`${key}\` row is not a JSON array; it is refused rather than repaired or overwritten`);
+                }
+            } else {
+                []
+            }
+        }
+        None => [],
+    };
+    Ok(#{ "rows": rows, "revision": revision })
+}
+
+async fn save(key, rows, revision) {
+    let text = json::to_string(rows)?;
+    let raw = eidolon::plugin_state_write(#{ "key": key, "value": text, "revision": revision }).await?;
+    let reply = match json::from_string(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            if raw == "uncertain" {
+                return Ok(#{ "uncertain": true, "detail": "the write answered `uncertain`" });
+            }
+            return Err(`the \`${key}\` write answered something that is not a read-back: ${raw} (${e})`);
+        }
+    };
+    if lifecycle_text(reply, "uncertain") != "" {
+        return Ok(#{ "uncertain": true, "detail": lifecycle_text(reply, "uncertain") });
+    }
+    let check_raw = eidolon::plugin_state_read(#{ "key": key }).await?;
+    let check = json::from_string(check_raw)?;
+    match check.get("value") {
+        Some(v) => {
+            if v is String && `${v}` == text {
+                Ok(#{ "uncertain": false, "revision": check.get("revision") })
+            } else {
+                Ok(#{ "uncertain": true, "detail": "the read-back did not carry the bytes just written" })
+            }
+        }
+        None => Ok(#{ "uncertain": true, "detail": "the read-back carried no value" }),
+    }
+}
+
+fn lifecycle_notice_id(coordinator, epoch, worker, occurrence) {
+    let h = 0xcbf2_9ce4_8422_2325u64;
+    let prime = 0x0000_0100_0000_01b3u64;
+    for part in [coordinator, `${epoch}`, worker, occurrence] {
+        h = lifecycle_eat(h, 0x1fu64, prime);
+        for c in part.chars() {
+            let b = lifecycle_ascii_byte(c)?;
+            h = lifecycle_eat(h, b, prime);
+        }
+    }
+    Ok(lifecycle_hex16(h))
+}
+
+fn lifecycle_eat(h, b, prime) {
+    (h ^ b).wrapping_mul(prime)
+}
+
+fn lifecycle_hex16(v) {
+    let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
+    let out = "";
+    let n = v;
+    let i = 0;
+    while i < 16 {
+        out = digits[(n % 16u64) as i64] + out;
+        n = n / 16u64;
+        i += 1;
+    }
+    out
+}
+
+fn lifecycle_ascii_byte(c) {
+    if c == '\t' { return Ok(9u64); }
+    if c == '\n' { return Ok(10u64); }
+    if c == '\r' { return Ok(13u64); }
+    let printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+    let i = 32u64;
+    for x in printable.chars() {
+        if x == c {
+            return Ok(i);
+        }
+        i += 1u64;
+    }
+    Err(`character ${c} is outside the ASCII byte set this derivation accepts: a notice id over a different byte spelling would not be the service's id, so the occurrence is refused rather than given a second identity`)
+}
+
+fn lifecycle_evaluate(observation) {
+    let payload = lifecycle_payload(observation);
+    let state = lifecycle_text(payload, "state").trim().to_lowercase();
+    if state == "gap" {
+        return #{ "action": "gap", "why": "the harness reported a coverage gap; a gap is recorded as a gap, never as a halt" };
+    }
+    if state == "unavailable" {
+        return #{ "action": "ignore", "why": "unavailable is not a completion; nothing is written" };
+    }
+    if state != "ending" {
+        return #{ "action": "none", "why": `edge \`${state}\` is not an ending` };
+    }
+    let last = lifecycle_text(payload, "last");
+    if lifecycle_true(payload.get("busy")) {
+        return #{ "action": "none", "why": `ending \`${last}\` while busy: this is not a stalled source` };
+    }
+    if !lifecycle_halt_word(last) {
+        return #{ "action": "none", "why": `ending \`${last}\` is not a failed, errored or iteration-limit ending` };
+    }
+    #{ "action": "halt", "why": `ending \`${last}\` with busy false`, "state": "stuck", "last": last }
+}
+
+fn lifecycle_halt_word(last) {
+    let w = last.trim().to_lowercase();
+    w == "failed"
+        || w == "errored"
+        || w == "iteration limit"
+        || w == "iteration-limit"
+        || w == "iteration_limit"
+}
+
+fn lifecycle_gap_row(observation) {
+    let reason = "";
+    let coverage = "";
+    match observation.get("gap") {
+        Some(g) => {
+            if g is Object {
+                reason = lifecycle_text(g, "reason");
+                coverage = lifecycle_text(g, "coverage");
+            } else {
+                reason = `${g}`;
+            }
+        }
+        None => {}
+    }
+    if reason == "" {
+        reason = "the harness reported a coverage gap without a reason";
+    }
+    if coverage == "" {
+        coverage = "not stated by the harness";
+    }
+    #{
+        "kind": "coverage_gap",
+        "reason": reason,
+        "coverage": coverage,
+        "event": lifecycle_text(observation, "event"),
+        "source": lifecycle_text(observation, "source"),
+        "occurrence": lifecycle_text(observation, "occurrence"),
+    }
+}
+
+fn lifecycle_notice(adoption, observation, occurrence) {
+    let coordinator = lifecycle_text(adoption, "coordinator");
+    let worker = lifecycle_text(adoption, "worker");
+    let epoch = lifecycle_number(adoption, "epoch");
+    let id = lifecycle_notice_id(coordinator, epoch, worker, occurrence)?;
+    let key_kind = if occurrence.starts_with("reg:") { "observed" } else { "outcome" };
+    Ok(#{
+        "notice_id": id,
+        "epoch": epoch,
+        "coordinator": coordinator,
+        "worker": worker,
+        "name": lifecycle_text(adoption, "name"),
+        "kind": "stuck",
+        "state": "stuck",
+        "last": lifecycle_text(lifecycle_payload(observation), "last"),
+        "occurrence": occurrence,
+        "key_kind": key_kind,
+        "attempts": 0,
+        "outcome": "pending",
+        "transport": "",
+    })
+}
+
+fn lifecycle_live_adoptions(adoptions) {
+    let out = [];
+    for a in adoptions {
+        if a is Object && !lifecycle_released(a) {
+            out.push(a);
+        }
+    }
+    out
+}
+
+fn lifecycle_watch(adoptions) {
+    let out = [];
+    for a in lifecycle_live_adoptions(adoptions) {
+        let worker = lifecycle_text(a, "worker");
+        if worker == "" {
+            continue;
+        }
+        let seen = false;
+        for w in out {
+            if w == worker {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            out.push(worker);
+        }
+    }
+    out
+}
+
+fn lifecycle_find_adoption(adoptions, worker) {
+    for a in lifecycle_live_adoptions(adoptions) {
+        if lifecycle_text(a, "worker") == worker {
+            return Some(a);
+        }
+    }
+    None
+}
+
+fn lifecycle_has_notice(notices, notice_id) {
+    for n in notices {
+        if n is Object && lifecycle_text(n, "notice_id") == notice_id {
+            return true;
+        }
+    }
+    false
+}
+
+fn lifecycle_payload(observation) {
+    match observation.get("payload") {
+        Some(p) => {
+            if p is Object {
+                p
+            } else {
+                #{}
+            }
+        }
+        None => #{},
+    }
+}
+
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+fn lifecycle_true(v) {
+    match v {
+        Some(b) => {
+            if b is bool {
+                b
+            } else {
+                `${b}` == "true"
+            }
+        }
+        None => false,
+    }
+}
+
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+
+fn lifecycle_released(row) {
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+
+fn lifecycle_null(v) {
+    `${v}` == "null" || `${v}` == ""
+}

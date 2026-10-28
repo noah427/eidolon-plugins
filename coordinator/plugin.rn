@@ -25,13 +25,24 @@ pub fn manifest() {
             readiness: #{ port: 8095, health: "/health" },
             ready_timeout_s: 15,
         },
+        // The two lifecycle handlers, by the stem of the file under `tools/`. The
+        // harness registers them as `coordinator_hook_ready` and
+        // `coordinator_hook_peer` and invokes them with the observation in place of
+        // model input; adoption marks them `script_only`. They are the consumer
+        // side of the monitor: the store is the plugin's own durable state, and the
+        // only world-facing act is `hook_ready` reattaching a rank prefix it already
+        // holds. Neither handler sends, resumes or adopts anything.
+        lifecycle: #{
+            plugin_ready: "hook_ready",
+            peer_changed: "hook_peer",
+        },
         claims: #{
             // `rank`/`unrank`/`ranks` assign a display word; they claim no authority
             // over the harness and none over another session. The word is the
             // plugin's own vocabulary, persisted here, and the harness only holds
             // the text a controller attached.
             tools: ["adopt", "release", "adoptions", "notices", "start", "cancel",
-                    "rank", "unrank", "ranks"],
+                    "rank", "unrank", "ranks", "hook_ready", "hook_peer"],
             grants: ["file:~/.config/eidolon/coordinator.token"],
         },
     }

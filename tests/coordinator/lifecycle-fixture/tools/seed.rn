@@ -1,0 +1,39 @@
+// Test fixture only: seed the plugin's own store so the lifecycle handlers can be
+// driven with a known adoption and a rank on this run's own session. Not shipped.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_seed",
+        description: "Test fixture: write one adoption and one rank row into this run's plugin state.",
+        approval: "mutating",
+        input_schema: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn call(input) {
+    let raw = eidolon::swarm_call("roster", #{}).await?;
+    let roster = json::from_string(raw)?;
+    let me = match roster.get("me") {
+        Some(m) => {
+            if m is Object {
+                m
+            } else {
+                return Err("the test needs a live roster row for this run (`me`), none was published");
+            }
+        }
+        None => return Err("the test needs a live roster row for this run (`me`), none was published"),
+    };
+    let session = match me.get("session") {
+        Some(s) => `${s}`,
+        None => return Err("this run's roster row carries no session id"),
+    };
+    let adoptions = [
+        #{ "epoch": 1, "coordinator": "c1", "worker": "w1", "name": "grinder", "adopted_at_ms": 0 },
+    ];
+    let ranks = [
+        #{ "session": session, "rank": "tribunus", "prefix": "Tribunus", "assigned_ms": 0, "by": "c1" },
+    ];
+    let a = eidolon::plugin_state_write(#{ "key": "adoptions", "value": json::to_string(adoptions)?, "revision": 0 }).await?;
+    let r = eidolon::plugin_state_write(#{ "key": "ranks", "value": json::to_string(ranks)?, "revision": 0 }).await?;
+    Ok(`seeded ${a} ${r}`)
+}

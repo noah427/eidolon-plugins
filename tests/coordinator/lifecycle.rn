@@ -1,0 +1,178 @@
+// The lifecycle consumer's pure policy, checked against fixed vectors.
+//
+// `tests/coordinator/lifecycle-shape.sh` copies this file into a throwaway plugin
+// beside `coordinator/lib/lifecycle.rn`, so `eidolon workflow run` compiles the
+// library in front and this program calls it directly. No harness primitive, no
+// roster, no store, no peer: every check is a function of values written here.
+//
+// The notice-id vectors are computed from the service's `notice_id` algorithm
+// (`coordinator/service/src/lib.rs`): FNV-1a 64 over the four parts, 0x1f before
+// each, lowercase 16-digit hex. The Rust tests do not print an expected id, so
+// these were computed independently from that source, not copied from a run.
+
+fn field(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+fn canon(v) {
+    match json::to_string(v) {
+        Ok(s) => s,
+        Err(_) => `${v}`,
+    }
+}
+
+fn check(out, bad, name, got, want) {
+    if canon(got) == canon(want) {
+        out.push("ok   " + name);
+    } else {
+        out.push("FAIL " + name + ": got " + canon(got) + ", want " + canon(want));
+        bad.push(name);
+    }
+}
+
+fn action(observation) {
+    field(lifecycle_evaluate(observation), "action")
+}
+
+fn ending(last, busy) {
+    #{ "payload": #{ "state": "ending", "last": last, "busy": busy } }
+}
+
+pub fn workflow() {
+    #{
+        name: "lifecycle",
+        description: "Check the lifecycle consumer's pure policy: the service's notice id byte for byte, the halt decision, gap and unavailable handling, the watch list, notice shape and dedupe, the retry bound, and decoration idempotence. No harness primitive and no store.",
+        approval: "read_only",
+        params: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn run(args) {
+    let out = [];
+    let bad = [];
+
+    // ---- the notice id: the service's derivation, byte for byte ----
+    check(out, bad, "notice id: outcome:7",
+          lifecycle_notice_id("/c.eid", 1, "/w.eid", "outcome:7")?, "734a0bd6b39395a7");
+    check(out, bad, "notice id: rc:42",
+          lifecycle_notice_id("/c.eid", 1, "/w.eid", "rc:42")?, "57854ad841a80b39");
+    check(out, bad, "notice id: reg with registration and instance",
+          lifecycle_notice_id("1793169806605", 2, "1793173779989", "reg:abc@1000#3")?, "bd5d3f95a28d82bb");
+    check(out, bad, "notice id: empty coordinator is still part of the key",
+          lifecycle_notice_id("", 1, "w", "rc:0")?, "5dcde737a17598e4");
+
+    let same = lifecycle_notice_id("c1", 1, "w1", "rc:7")?;
+    check(out, bad, "notice id: sixteen lowercase hex digits", `${same.len()}` + ":" + same, "16:356845f06c836344");
+    check(out, bad, "notice id: epoch is part of the key (one halt, two epochs, two ids)",
+          same == lifecycle_notice_id("c1", 2, "w1", "rc:7")?, false);
+    check(out, bad, "notice id: occurrence is part of the key (two halts, two ids)",
+          same == lifecycle_notice_id("c1", 1, "w1", "rc:8")?, false);
+    check(out, bad, "notice id: coordinator is part of the key (two recipients, two ids)",
+          same == lifecycle_notice_id("c2", 1, "w1", "rc:7")?, false);
+    match lifecycle_notice_id("c1", 1, "w1", "é") {
+        Ok(_) => check(out, bad, "notice id: a non-ASCII token is refused, not given a second spelling", "accepted", "refused"),
+        Err(_) => check(out, bad, "notice id: a non-ASCII token is refused, not given a second spelling", "refused", "refused"),
+    }
+
+    // ---- the halt decision ----
+    check(out, bad, "halt: iteration limit with busy false", action(ending("iteration limit", false)), "halt");
+    check(out, bad, "halt: errored with busy false", action(ending("errored", false)), "halt");
+    check(out, bad, "halt: failed with busy false", action(ending("failed", false)), "halt");
+    check(out, bad, "halt: completed is not a halt", action(ending("completed", false)), "none");
+    check(out, bad, "halt: cancelled is not one of the named failures", action(ending("cancelled", false)), "none");
+    check(out, bad, "halt: unknown is not inferred to be a failure", action(ending("unknown", false)), "none");
+    check(out, bad, "halt: a failed ending while busy is not stalled", action(ending("failed", true)), "none");
+    check(out, bad, "halt: a turn edge is not a completion",
+          action(#{ "payload": #{ "state": "turn", "last": "failed", "busy": false } }), "none");
+    check(out, bad, "halt: unavailable writes nothing",
+          action(#{ "payload": #{ "state": "unavailable", "last": "failed", "busy": false } }), "ignore");
+    check(out, bad, "halt: a gap is a gap, never a halt",
+          action(#{ "payload": #{ "state": "gap", "last": "failed", "busy": false } }), "gap");
+    check(out, bad, "halt: an observation with no payload is not a halt", action(#{ "event": "peer_changed" }), "none");
+
+    // A gap row carries the harness's own reason and coverage, or says it was not
+    // stated. It never carries a notice id.
+    let gap = lifecycle_gap_row(#{ "event": "peer_changed", "source": "w1", "occurrence": "rc:10",
+                                   "gap": #{ "reason": "missed two turns", "coverage": "rc:8..rc:10" } });
+    check(out, bad, "gap row: reason is kept", field(gap, "reason"), "missed two turns");
+    check(out, bad, "gap row: coverage is kept", field(gap, "coverage"), "rc:8..rc:10");
+    check(out, bad, "gap row: kind", field(gap, "kind"), "coverage_gap");
+    check(out, bad, "gap row: no notice id", field(gap, "notice_id"), "");
+    let bare = lifecycle_gap_row(#{ "event": "peer_changed", "source": "w1", "payload": #{ "state": "gap" } });
+    check(out, bad, "gap row: a missing reason is stated, not invented", field(bare, "reason") != "", true);
+    check(out, bad, "gap row: missing coverage is stated, not invented", field(bare, "coverage"), "not stated by the harness");
+
+    // ---- the watch list and the notice store ----
+    let adoptions = [
+        #{ "epoch": 1, "coordinator": "c1", "worker": "w1", "name": "one", "adopted_at_ms": 0 },
+        #{ "epoch": 2, "coordinator": "c1", "worker": "w2", "name": "two", "adopted_at_ms": 0 },
+        #{ "epoch": 1, "coordinator": "c1", "worker": "w1", "name": "duplicate row", "adopted_at_ms": 0 },
+        #{ "epoch": 1, "coordinator": "c1", "worker": "w3", "name": "released", "adopted_at_ms": 0, "released_at_ms": 9 },
+    ];
+    check(out, bad, "watch: live workers, once each, in stored order", lifecycle_watch(adoptions), ["w1", "w2"]);
+    check(out, bad, "watch: a released row is history, not watched", lifecycle_watch([adoptions[3]]), []);
+    match lifecycle_find_adoption(adoptions, "w3") {
+        Some(_) => check(out, bad, "adoption lookup: a released row is not live", "found", "none"),
+        None => check(out, bad, "adoption lookup: a released row is not live", "none", "none"),
+    }
+    match lifecycle_find_adoption(adoptions, "w2") {
+        Some(a) => check(out, bad, "adoption lookup: the live row is found", field(a, "name"), "two"),
+        None => check(out, bad, "adoption lookup: the live row is found", "none", "two"),
+    }
+    check(out, bad, "notice dedupe: an id already present is one notice",
+          lifecycle_has_notice([#{ "notice_id": same }], same), true);
+    check(out, bad, "notice dedupe: a different occurrence is not that notice",
+          lifecycle_has_notice([#{ "notice_id": same }], "something-else"), false);
+
+    let notice = lifecycle_notice(adoptions[1], ending("iteration limit", false), "reg:r1@1000#2")?;
+    check(out, bad, "notice: id is derived from the adoption's coordinator, epoch, worker and occurrence",
+          field(notice, "notice_id"), "eef2e471d2fecf19");
+    check(out, bad, "notice: key kind names an unjournaled registration count", field(notice, "key_kind"), "observed");
+    check(out, bad, "notice: state is stuck", field(notice, "state"), "stuck");
+    check(out, bad, "notice: kind is stuck", field(notice, "kind"), "stuck");
+    check(out, bad, "notice: outcome starts pending", field(notice, "outcome"), "pending");
+    check(out, bad, "notice: no attempts yet", field(notice, "attempts"), "0");
+    check(out, bad, "notice: last outcome is the harness's word", field(notice, "last"), "iteration limit");
+
+    // ---- the retry bound ----
+    let notices = [
+        #{ "notice_id": "pending", "outcome": "pending", "attempts": 0 },
+        #{ "notice_id": "failed-2", "outcome": "failed", "attempts": 2 },
+        #{ "notice_id": "failed-3", "outcome": "failed", "attempts": 3 },
+        #{ "notice_id": "delivered", "outcome": "delivered", "attempts": 1 },
+        #{ "notice_id": "queued", "outcome": "queued", "attempts": 1 },
+        #{ "notice_id": "partial", "outcome": "partial", "attempts": 1 },
+        #{ "notice_id": "refused", "outcome": "refused", "attempts": 1 },
+        #{ "notice_id": "cancelled", "outcome": "cancelled", "attempts": 1 },
+    ];
+    check(out, bad, "attempts: pending always, failed only inside the bound, nothing else",
+          lifecycle_to_attempt(notices), ["pending", "failed-2"]);
+
+    // ---- decoration: idempotent, and another owner is a conflict ----
+    check(out, bad, "decoration: absent means attach", lifecycle_decoration_action(None, "Tribunus"), "decorate");
+    check(out, bad, "decoration: our own matching text is not rewritten",
+          lifecycle_decoration_action(Some(#{ "controller": "coordinator", "text": "Tribunus" }), "Tribunus"), "none");
+    check(out, bad, "decoration: our own differing text is corrected, not left wrong",
+          lifecycle_decoration_action(Some(#{ "controller": "coordinator", "text": "Miles" }), "Tribunus"), "decorate");
+    check(out, bad, "decoration: another controller's text is a conflict, never taken over",
+          lifecycle_decoration_action(Some(#{ "controller": "someone-else", "text": "Miles" }), "Tribunus"), "conflict");
+
+    check(out, bad, "rank prefix: a stored prefix is kept as stored",
+          lifecycle_rank_prefix(#{ "rank": "tribunus", "prefix": "Tribunus" }), "Tribunus");
+    check(out, bad, "rank prefix: a row without one derives the vocabulary's word",
+          lifecycle_rank_prefix(#{ "rank": "tribunus" }), "Tribunus");
+    check(out, bad, "rank prefix: a word outside the vocabulary has no prefix",
+          lifecycle_rank_prefix(#{ "rank": "admiral" }), "");
+
+    let text = "";
+    for line in out {
+        text += line + "\n";
+    }
+    if bad.len() > 0 {
+        return Err(text + "lifecycle: " + `${bad.len()}` + " check(s) failed");
+    }
+    Ok(text + "lifecycle: " + `${out.len()}` + " checks hold")
+}

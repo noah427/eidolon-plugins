@@ -1,0 +1,274 @@
+// `coordinator_hook_ready` — the `plugin_ready` lifecycle handler.
+//
+// The harness calls this when a session starts or resumes, and again whenever the
+// plugin is (re)loaded. It rebuilds the watch list from this session's own durable
+// store and reasserts each stored rank's presentation prefix on the live row of
+// exactly the session it was assigned to. It is idempotent: a decoration that
+// already says what the store says is not rewritten, a worker that is gone is
+// reported as gone rather than as a failure, and a decoration another controller
+// holds is a conflict to report, never to take over.
+//
+// The store is the plugin's own state, keyed by the running session's attribution:
+// `adoptions` (the watch list) and `ranks` (session, rank, prefix, assigned_ms, by).
+
+pub fn manifest() {
+    #{
+        name: "coordinator_hook_ready",
+        description: "Lifecycle handler for `plugin_ready`: load the coordinator's own adoption and rank store, reconcile the live roster against it, reapply each stored rank's decoration to the session it was assigned to when that decoration is ours or absent, report a decoration held by another owner and a session that is gone, and return the full watch list rebuilt from the store.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{},
+        },
+    }
+}
+
+pub async fn call(input) {
+    let notes = [];
+    let adoptions = load("adoptions").await?;
+    let ranks = load("ranks").await?;
+    let watch = lifecycle_watch(adoptions.rows);
+
+    let raw = eidolon::swarm_call("roster", #{}).await?;
+    let roster = json::from_string(raw)?;
+    let rows = roster_rows(roster);
+
+    for assignment in ranks.rows {
+        if !(assignment is Object) {
+            notes.push("a rank row is not an object; nothing attached");
+            continue;
+        }
+        let session = lifecycle_text(assignment, "session");
+        let prefix = lifecycle_rank_prefix(assignment);
+        if session == "" {
+            notes.push("a rank row carries no session; nothing to decorate");
+            continue;
+        }
+        if prefix == "" {
+            notes.push(`${session}: rank \`${lifecycle_text(assignment, "rank")}\` has no known prefix; nothing attached`);
+            continue;
+        }
+        let claimants = claimants(rows, session);
+        if claimants.len() == 0 {
+            notes.push(`${session}: assigned ${prefix}, but no live session carries this address; nothing attached, and the assignment is kept`);
+            continue;
+        }
+        if claimants.len() > 1 {
+            notes.push(`${session}: ${claimants.len()} live sessions claim this address; refusing to guess which one carries ${prefix}`);
+            continue;
+        }
+        let row = claimants[0];
+        let action = lifecycle_decoration_action(row.get("decoration"), prefix);
+        if action == "conflict" {
+            let owner = "";
+            match row.get("decoration") {
+                Some(d) => {
+                    if d is Object {
+                        owner = lifecycle_text(d, "controller");
+                    }
+                }
+                None => {}
+            }
+            notes.push(`${session}: another controller (${owner}) already holds the decoration; not taking it over, so ${prefix} is not attached`);
+            continue;
+        }
+        if action == "none" {
+            continue;
+        }
+        match eidolon::swarm_call("decorate", #{ "text": prefix, "controller": "coordinator", "expected": session }).await {
+            Ok(_) => notes.push(`${session}: decoration ${prefix} attached`),
+            Err(e) => notes.push(`${session}: decoration refused: ${e}`),
+        }
+    }
+
+    // A gone worker is reported once per adopted address, and stays watched: the
+    // store, not this scan, says who was adopted. If the roster publishes no
+    // durable address at all, say that once instead of one "gone" per worker.
+    let addresses = false;
+    for row in rows {
+        if lifecycle_text(row, "session") != "" {
+            addresses = true;
+        }
+    }
+    if watch.len() > 0 && !addresses {
+        notes.push("no row in the roster publishes a `session`: null means not established, not no-such-session, so the watch list is kept and every worker is reported in one place rather than as gone");
+    } else {
+        for worker in watch {
+            if claimants(rows, worker).len() == 0 {
+                notes.push(`${worker}: no live session carries this adopted address; it stays watched, which is not a failure`);
+            }
+        }
+    }
+
+    Ok(#{ "watch": watch, "notes": notes })
+}
+
+// ---- the store, and the pure policy this handler repeats -------------------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front
+// of workflows, so the policy cannot be imported here. These are the functions of
+// `../lib/lifecycle.rn` this handler uses, byte for byte; that file is the one place
+// they are explained.
+
+async fn load(key) {
+    let raw = eidolon::plugin_state_read(#{ "key": key }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = match reply.get("revision") {
+        Some(v) => v,
+        None => 0,
+    };
+    let rows = match reply.get("value") {
+        Some(v) => {
+            if v is String {
+                let parsed = json::from_string(`${v}`)?;
+                if parsed is Vec {
+                    parsed
+                } else {
+                    return Err(`the \`${key}\` row is not a JSON array; it is refused rather than repaired or overwritten`);
+                }
+            } else {
+                []
+            }
+        }
+        None => [],
+    };
+    Ok(#{ "rows": rows, "revision": revision })
+}
+
+fn roster_rows(roster) {
+    let out = [];
+    if roster is Vec {
+        return roster;
+    }
+    if roster is Object {
+        match roster.get("sessions") {
+            Some(s) => {
+                if s is Vec {
+                    for row in s {
+                        out.push(row);
+                    }
+                }
+            }
+            None => {}
+        }
+        // `me` is published beside the list, not necessarily in it. A rank on this
+        // session is still a rank this handler owes, so the caller's own row is
+        // added when the list does not already carry it.
+        match roster.get("me") {
+            Some(me) => {
+                if me is Object {
+                    let session = lifecycle_text(me, "session");
+                    let seen = false;
+                    for row in out {
+                        if lifecycle_text(row, "session") == session {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if !seen {
+                        out.push(me);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    return out;
+}
+
+fn claimants(rows, session) {
+    let out = [];
+    for row in rows {
+        if row is Object && lifecycle_text(row, "session") == session {
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn lifecycle_live_adoptions(adoptions) {
+    let out = [];
+    for a in adoptions {
+        if a is Object && !lifecycle_released(a) {
+            out.push(a);
+        }
+    }
+    out
+}
+
+fn lifecycle_watch(adoptions) {
+    let out = [];
+    for a in lifecycle_live_adoptions(adoptions) {
+        let worker = lifecycle_text(a, "worker");
+        if worker == "" {
+            continue;
+        }
+        let seen = false;
+        for w in out {
+            if w == worker {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            out.push(worker);
+        }
+    }
+    out
+}
+
+fn lifecycle_decoration_action(decoration, prefix) {
+    match decoration {
+        Some(d) => {
+            if !(d is Object) {
+                return "decorate";
+            }
+            let owner = lifecycle_text(d, "controller");
+            let text = lifecycle_text(d, "text");
+            if owner != "coordinator" {
+                return "conflict";
+            }
+            if text == prefix {
+                return "none";
+            }
+            "decorate"
+        }
+        None => "decorate",
+    }
+}
+
+fn lifecycle_rank_prefix(row) {
+    let stored = lifecycle_text(row, "prefix");
+    if stored != "" {
+        return stored;
+    }
+    lifecycle_prefix_of(lifecycle_text(row, "rank"))
+}
+
+fn lifecycle_prefix_of(rank) {
+    let w = rank.trim().to_lowercase();
+    if w == "imperator" { return "Imperator"; }
+    if w == "legatus" { return "Legatus"; }
+    if w == "tribunus" { return "Tribunus"; }
+    if w == "centurio" { return "Centurio"; }
+    if w == "miles" { return "Miles"; }
+    ""
+}
+
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+fn lifecycle_released(row) {
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+
+fn lifecycle_null(v) {
+    `${v}` == "null" || `${v}` == ""
+}
