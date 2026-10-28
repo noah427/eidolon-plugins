@@ -2,9 +2,13 @@
 """Rank prefixes, end to end: monitor store -> harness door -> roster row.
 
 Real binaries only — a built `eidolon` (the branch that carries `door decorate`) and
-a built `eidolon-coordinator` — in a private HOME, a private XDG set and a private
-port. No live provider, config, token or fleet is read, and nothing outside the
-temporary directory is written.
+a built `eidolon-coordinator` — in a private HOME and a private XDG set, on the
+monitor's **one fixed port**, which this run must own: 8095 is what `plugin.rn`
+declares and what every tool dials, and the monitor cannot be told to use another, so
+isolation cannot be a number this script picks. If something already answers there the
+run refuses rather than testing a split — inside `unshare -rn` the port is nobody's.
+No live provider, config, token or fleet is read, and nothing outside the temporary
+directory is written.
 
 What this pins, in the order it happens:
 
@@ -44,6 +48,31 @@ def wait_for(predicate, seconds=30, what="condition"):
     raise AssertionError(f"bounded wait expired: {what}")
 
 
+PORT = 8095
+
+
+def own_the_port():
+    """This run must own the monitor's one port before anything else happens.
+
+    The monitor binds 8095 and every tool's `service()` dials it; neither can be told
+    otherwise, so the isolation cannot be a number this script picks. The private HOME
+    isolates the store, not the port. If something already answers there, a run that
+    carried on would not be testing this monitor at all — it would be dialling somebody
+    else's and could report a pass it did not earn. So it refuses, and it refuses here,
+    before a temporary directory exists, so the negative case needs no build and no
+    running coordinator to exercise.
+    """
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", PORT))
+        except OSError:
+            raise SystemExit(
+                f"FAIL 127.0.0.1:{PORT} is already answering, and the monitor cannot use "
+                "another port; run this inside `unshare -rn`")
+
+
+own_the_port()
+
 with tempfile.TemporaryDirectory(prefix="eidolon-rank-prefix-") as directory:
     root = Path(directory)
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(root)}
@@ -58,16 +87,43 @@ with tempfile.TemporaryDirectory(prefix="eidolon-rank-prefix-") as directory:
     work = root / "work"
     work.mkdir()
 
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
     monitor_root = root / "state/coordinator"
-    env.update(EIDOLON_COORDINATOR_PORT=str(port), EIDOLON_COORDINATOR_BIN=EIDOLON,
+    env.update(EIDOLON_COORDINATOR_BIN=EIDOLON,
                EIDOLON_COORDINATOR_ROOT=str(monitor_root), EIDOLON_COORDINATOR_INTERVAL_S="1")
 
     log = (root / "monitor.log").open("wb")
     monitor = subprocess.Popen([MONITOR], env=env, stdout=log, stderr=subprocess.STDOUT)
     session = None
+
+    def ours(what):
+        """Refuse to read an answer off a port that may no longer be this run's monitor.
+
+        What binds the endpoint is the **authentication, not this check**. Every request
+        below carries the token this run's monitor minted, and the monitor compares it
+        constant-time before it will do anything: an answer that comes back `ok: true`
+        can only have been given by a monitor holding that token. The probe below makes
+        that observable once, before any assertion depends on an answer.
+
+        This check is the cheaper precondition in front of it — the child this run
+        started is still alive, and the token file exists, because a monitor that died
+        on a failed bind mints nothing. It is a **fixture binding**, not an absolute
+        guarantee: under same-user trust another process could in principle write that
+        file. What the run claims is therefore no more than this — a private network
+        namespace, a child of this run still alive, and a token the answering endpoint
+        has to authenticate. Anything else is a refusal that names what happened rather
+        than a mystery later.
+        """
+        if monitor.poll() is not None:
+            tail = (root / "monitor.log").read_text()[-2000:]
+            raise SystemExit(
+                f"FAIL the monitor this run started exited ({monitor.returncode}) before "
+                f"{what}. Nothing answering on 127.0.0.1:{PORT} would be this run's — "
+                f"refusing rather than reporting somebody else's answer as a pass.\n{tail}")
+        if not (config / "coordinator.token").exists():
+            raise SystemExit(
+                f"FAIL the monitor is running but has minted no token, so the endpoint at "
+                f"127.0.0.1:{PORT} cannot be shown to be this run's before {what}")
+        return True
 
     def run(*args, check=True):
         return subprocess.run([EIDOLON, *args], env=env, cwd=work, text=True,
@@ -75,6 +131,7 @@ with tempfile.TemporaryDirectory(prefix="eidolon-rank-prefix-") as directory:
                               check=check)
 
     def roster():
+        ours("a roster read")
         # stderr is dropped, not merged: the harness's first run in a fresh world
         # prints its seeding lines, and a reader that mixed them into stdout would be
         # parsing prose as JSON. (The door checks below want the merged stream, so
@@ -91,8 +148,9 @@ with tempfile.TemporaryDirectory(prefix="eidolon-rank-prefix-") as directory:
         return (config / "coordinator.token").read_text().strip()
 
     def call(method, args):
+        ours(f"the `{method}` call")
         body = json.dumps({"method": method, "args": args}).encode()
-        request = urllib.request.Request(f"http://127.0.0.1:{port}/call", data=body,
+        request = urllib.request.Request(f"http://127.0.0.1:{PORT}/call", data=body,
                                          headers={"Authorization": f"Bearer {token()}",
                                                   "Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=30) as answer:
@@ -107,7 +165,22 @@ with tempfile.TemporaryDirectory(prefix="eidolon-rank-prefix-") as directory:
         return child
 
     try:
-        wait_for(lambda: (config / "coordinator.token").exists(), what="the monitor mints a token")
+        wait_for(lambda: (config / "coordinator.token").exists() or monitor.poll() is not None,
+                 what="the monitor mints a token")
+        ours("the first call")
+        # Authentication is what binds the endpoint, so it is asserted rather than
+        # assumed: a token this run never minted must be refused. The monitor answers
+        # `ok: false` with HTTP 200 for a wrong token, so the refusal is in the body and
+        # not in the status code — reading only the status would call it a pass.
+        forged = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/call",
+            data=json.dumps({"method": "adoptions", "args": {}}).encode(),
+            headers={"Authorization": "Bearer not-the-token-this-run-minted",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(forged, timeout=30) as answer:
+            refused = json.loads(answer.read())
+        assert refused.get("ok") is False, f"a token this run never minted was accepted: {refused}"
+        assert "token" in refused.get("error", ""), f"and it must say so: {refused}"
         session = start_session()
         first = wait_for(lambda: (roster() or None), what="a session registers")
         session_id = first[0]["session"]

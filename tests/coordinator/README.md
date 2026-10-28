@@ -81,6 +81,58 @@ monitor's own preflight (`chat --help`) is what refuses a harness that does not 
 the flag, and `cargo test -p eidolon-coordinator` covers that refusal. It is evidence
 of this plugin's half of the contract.
 
+## `rank-prefix.py` — the prefix on the roster row, end to end
+
+```bash
+# when a coordinator is already running on this host, give the fixture the port:
+unshare -rn bash -c 'ip link set lo up; python3 tests/coordinator/rank-prefix.py \
+  target/debug/eidolon target/debug/eidolon-coordinator'
+```
+
+The `ip link set lo up` is not decoration. A fresh network namespace comes up with
+loopback **down**, so 127.0.0.1 is neither dialable nor reachable and every request dies
+with `ENETUNREACH` — which is what the first run of this fixture did. Binding still
+succeeds with the interface down, so the port check passes and only the traffic fails,
+which is a confusing shape to debug. `ip` is iproute2, and inside `unshare -r` you are
+root in the namespace so the call is permitted.
+
+The real monitor, the real harness door and a real session, in a private `HOME` and a
+private XDG set. Five things, in the order they happen: `rank` records the word and
+the harness composes `Imperator · <label>` on the row while `label` stays the
+session's own; restarting the same session re-mints its registration with no
+decoration and the next tick reasserts it, by exact session id, which is what survives
+the restart; a *different* session is never decorated by that record; `release` takes
+the prefix back and leaves the label alone; and another owner's decoration is refused
+by the harness and reported by the monitor rather than taken over.
+
+It runs under `unshare -rn` for the port, not for the store: the monitor binds 8095
+and cannot be told otherwise (`coordinator/README.md`, "The port"), so the fixture
+refuses when 8095 already answers rather than dialling a coordinator it did not start
+and reporting that as a pass.
+
+The endpoint it talks to is identified by **authentication, not by a port being open**.
+Every request carries the token this run's monitor minted and the monitor compares it
+constant-time before it acts, and the script proves once, before any assertion depends
+on an answer, that a token it never minted is refused. With the namespace and the
+liveness of its own child, that is the isolation this fixture claims — and no more:
+under same-user trust, a file is not a guarantee.
+
+The refusal is checkable on its own, with no build and without touching a coordinator
+that happens to be running:
+
+```bash
+# the port taken, inside the namespace: must refuse before it creates anything
+unshare -rn bash -c 'ip link set lo up; python3 -m http.server 8095 --bind 127.0.0.1 >/dev/null 2>&1 & \
+  sleep 1; python3 tests/coordinator/rank-prefix.py /nonexistent /nonexistent; echo "exit=$?"'
+```
+
+That prints the refusal and `exit=1`. With the port free it goes on to fail on the
+throwaway paths instead, which is what shows the check is a gate and not an
+always-refuse.
+
+It is **not** evidence about a live provider or an actual-terminal adoption; the
+session it starts is `--provider mock`.
+
 ## `ack-failure.sh` — the process, when it cannot write what it just did
 
 ```bash
