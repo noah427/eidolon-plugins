@@ -1,0 +1,21 @@
+// Test fixture only: read one plugin-state key back. Not shipped.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_read",
+        description: "Test fixture: read one plugin-state key and return the raw answer.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{ "key": #{ "type": "string" } },
+        },
+    }
+}
+
+pub async fn call(input) {
+    let key = match input.get("key") {
+        Some(k) => `${k}`,
+        None => "adoptions",
+    };
+    eidolon::plugin_state_read(#{ "key": key }).await
+}

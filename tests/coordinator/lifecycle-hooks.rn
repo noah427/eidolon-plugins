@@ -1,0 +1,53 @@
+// The lifecycle handlers, driven with fabricated observations against a real
+// plugin-state store. `tests/coordinator/lifecycle-hooks.sh` assembles the plugin
+// (shipped tools + these fixture tools), vouches for it in a throwaway config, and
+// runs this program. A pass says the handlers read the store, dedupe on the derived
+// id, write before they return, record a gap rather than a halt, leave
+// `unavailable` unwritten, and reapply a rank idempotently against the live roster.
+
+pub fn workflow() {
+    #{
+        name: "lifecycle-hooks",
+        description: "Drive coordinator_hook_peer and coordinator_hook_ready with fabricated observations through the real plugin-state store, and print what they returned and what they wrote. No peer is started; the adoption rows are seeded.",
+        approval: "read_only",
+        params: #{ "type": "object", "properties": #{} },
+    }
+}
+
+fn text(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+pub async fn run(args) {
+    let out = "";
+    out += `seed: ${eidolon::tool_call("coordinator_seed", #{}).await?}\n`;
+
+    let halt = #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:7",
+                 "payload": #{ "state": "ending", "last": "iteration limit", "busy": false } };
+    out += `first: ${eidolon::tool_call("coordinator_hook_peer", halt).await?}\n`;
+    out += `second: ${eidolon::tool_call("coordinator_hook_peer", halt).await?}\n`;
+    out += `completed: ${eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:8",
+                 "payload": #{ "state": "ending", "last": "completed", "busy": false } }).await?}\n`;
+    out += `busy: ${eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:8b",
+                 "payload": #{ "state": "ending", "last": "failed", "busy": true } }).await?}\n`;
+    out += `unavailable: ${eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:9",
+                 "payload": #{ "state": "unavailable", "last": "", "busy": false } }).await?}\n`;
+    out += `gap: ${eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:10",
+                 "gap": #{ "reason": "missed two turns", "coverage": "rc:8..rc:10" },
+                 "payload": #{ "state": "gap", "last": "", "busy": false } }).await?}\n`;
+    out += `observed: ${eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w1",
+                 "occurrence": "reg:eidolon-1@1000#2",
+                 "payload": #{ "state": "ending", "last": "errored", "busy": false } }).await?}\n`;
+
+    out += `notices: ${eidolon::tool_call("coordinator_read", #{ "key": "notices" }).await?}\n`;
+    out += `gaps: ${eidolon::tool_call("coordinator_read", #{ "key": "gaps" }).await?}\n`;
+
+    out += `ready first: ${eidolon::tool_call("coordinator_hook_ready", #{ "event": "plugin_ready" }).await?}\n`;
+    out += `ready second: ${eidolon::tool_call("coordinator_hook_ready", #{ "event": "plugin_ready" }).await?}\n`;
+    out += `me: ${eidolon::tool_call("coordinator_me", #{}).await?}\n`;
+
+    Ok(out)
+}

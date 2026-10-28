@@ -1,0 +1,20 @@
+// Test fixture only: this run's own roster row, so the test can see the decoration
+// `hook_ready` attached. Not shipped.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_me",
+        description: "Test fixture: return this run's own roster row.",
+        approval: "read_only",
+        input_schema: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn call(input) {
+    let raw = eidolon::swarm_call("roster", #{}).await?;
+    let roster = json::from_string(raw)?;
+    match roster.get("me") {
+        Some(me) => Ok(me),
+        None => Err("the roster published no `me` row for this run"),
+    }
+}

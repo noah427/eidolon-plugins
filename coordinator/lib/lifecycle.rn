@@ -1,0 +1,346 @@
+// Pure policy for the coordinator's two lifecycle handlers.
+//
+// Nothing here touches a primitive: no roster, no store, no decoration, no clock.
+// Every function is a function of its arguments, so the derivation (a notice id),
+// the decision (is this observation a halt?) and the store's own shape can be
+// exercised directly by `tests/coordinator/lifecycle.rn`, which is compiled in
+// front of this file by `eidolon workflow run`.
+//
+// The two handlers repeat what they need from this file, because upstream compiles
+// every `tools/*.rn` on its own and `lib/` is compiled in front of **workflows**
+// only. This file is the one place the policy is written down; the copies in the
+// handlers say so where they start.
+
+// The service's FNV-1a 64 over the four parts, with a 0x1f separator before each.
+// The bytes are the UTF-8 bytes of each part, exactly as `str::bytes()` yields them
+// in Rust. Rune's `char` has no integer cast, so the ASCII byte set is mapped by
+// position; a non-ASCII character is refused rather than hashed as some other
+// byte. Session ids, epochs and occurrence tokens are ASCII (`rc:<n>` and
+// `reg:<registration>@<started_ms>#<n>`), so the refusal is a boundary, not a path
+// any real observation takes.
+fn lifecycle_notice_id(coordinator, epoch, worker, occurrence) {
+    let h = 0xcbf2_9ce4_8422_2325u64;
+    let prime = 0x0000_0100_0000_01b3u64;
+    for part in [coordinator, `${epoch}`, worker, occurrence] {
+        h = lifecycle_eat(h, 0x1fu64, prime);
+        for c in part.chars() {
+            let b = lifecycle_ascii_byte(c)?;
+            h = lifecycle_eat(h, b, prime);
+        }
+    }
+    Ok(lifecycle_hex16(h))
+}
+
+fn lifecycle_eat(h, b, prime) {
+    (h ^ b).wrapping_mul(prime)
+}
+
+fn lifecycle_hex16(v) {
+    let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
+    let out = "";
+    let n = v;
+    let i = 0;
+    while i < 16 {
+        out = digits[(n % 16u64) as i64] + out;
+        n = n / 16u64;
+        i += 1;
+    }
+    out
+}
+
+// The printable ASCII run, in order, so its position *is* the byte value. The
+// three whitespace bytes a token could plausibly contain are handled by name.
+fn lifecycle_ascii_byte(c) {
+    if c == '\t' { return Ok(9u64); }
+    if c == '\n' { return Ok(10u64); }
+    if c == '\r' { return Ok(13u64); }
+    let printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+    let i = 32u64;
+    for x in printable.chars() {
+        if x == c {
+            return Ok(i);
+        }
+        i += 1u64;
+    }
+    Err(`character ${c} is outside the ASCII byte set this derivation accepts: a notice id over a different byte spelling would not be the service's id, so the occurrence is refused rather than given a second identity`)
+}
+
+// What one observation asks for. `action` is one of:
+//   halt   an ending that names a failure, while not busy: one notice is owed
+//   gap    the harness lost coverage: record the gap, never a halt
+//   ignore `unavailable` is not a completion; write nothing
+//   none   an edge that is not an ending, a busy source, or a non-failing ending
+fn lifecycle_evaluate(observation) {
+    let payload = lifecycle_payload(observation);
+    let state = lifecycle_text(payload, "state").trim().to_lowercase();
+    if state == "gap" {
+        return #{ "action": "gap", "why": "the harness reported a coverage gap; a gap is recorded as a gap, never as a halt" };
+    }
+    if state == "unavailable" {
+        return #{ "action": "ignore", "why": "unavailable is not a completion; nothing is written" };
+    }
+    if state != "ending" {
+        return #{ "action": "none", "why": `edge \`${state}\` is not an ending` };
+    }
+    let last = lifecycle_text(payload, "last");
+    if lifecycle_true(payload.get("busy")) {
+        return #{ "action": "none", "why": `ending \`${last}\` while busy: this is not a stalled source` };
+    }
+    if !lifecycle_halt_word(last) {
+        return #{ "action": "none", "why": `ending \`${last}\` is not a failed, errored or iteration-limit ending` };
+    }
+    #{
+        "action": "halt",
+        "why": `ending \`${last}\` with busy false`,
+        "state": "stuck",
+        "last": last,
+    }
+}
+
+// The ending words the brief names. The harness spells the iteration wall
+// "iteration limit"; the underscore and hyphen forms are accepted because a
+// store or a later scan may spell the same ending that way, and no other word is
+// treated as a failure.
+fn lifecycle_halt_word(last) {
+    let w = last.trim().to_lowercase();
+    w == "failed"
+        || w == "errored"
+        || w == "iteration limit"
+        || w == "iteration-limit"
+        || w == "iteration_limit"
+}
+
+// One coverage-gap row: what was lost and how much, as the harness said it. A gap
+// is not a halt and carries no notice id.
+fn lifecycle_gap_row(observation) {
+    let reason = "";
+    let coverage = "";
+    match observation.get("gap") {
+        Some(g) => {
+            if g is Object {
+                reason = lifecycle_text(g, "reason");
+                coverage = lifecycle_text(g, "coverage");
+            } else {
+                reason = `${g}`;
+            }
+        }
+        None => {}
+    }
+    if reason == "" {
+        reason = "the harness reported a coverage gap without a reason";
+    }
+    if coverage == "" {
+        coverage = "not stated by the harness";
+    }
+    #{
+        "kind": "coverage_gap",
+        "reason": reason,
+        "coverage": coverage,
+        "event": lifecycle_text(observation, "event"),
+        "source": lifecycle_text(observation, "source"),
+        "occurrence": lifecycle_text(observation, "occurrence"),
+    }
+}
+
+// One notice, in the service's own shape. `at_ms` is deliberately absent: the
+// observation carries no clock, and a timestamp made up here would be a claim the
+// harness never made. The caller writes this row before it returns.
+fn lifecycle_notice(adoption, observation, occurrence) {
+    let coordinator = lifecycle_text(adoption, "coordinator");
+    let worker = lifecycle_text(adoption, "worker");
+    let epoch = lifecycle_number(adoption, "epoch");
+    let id = lifecycle_notice_id(coordinator, epoch, worker, occurrence)?;
+    let key_kind = if occurrence.starts_with("reg:") { "observed" } else { "outcome" };
+    Ok(#{
+        "notice_id": id,
+        "epoch": epoch,
+        "coordinator": coordinator,
+        "worker": worker,
+        "name": lifecycle_text(adoption, "name"),
+        "kind": "stuck",
+        "state": "stuck",
+        "last": lifecycle_text(lifecycle_payload(observation), "last"),
+        "occurrence": occurrence,
+        "key_kind": key_kind,
+        "attempts": 0,
+        "outcome": "pending",
+        "transport": "",
+    })
+}
+
+// The live adoptions, in stored order. A released row is history and is never
+// watched again.
+fn lifecycle_live_adoptions(adoptions) {
+    let out = [];
+    for a in adoptions {
+        if a is Object && !lifecycle_released(a) {
+            out.push(a);
+        }
+    }
+    out
+}
+
+// The full watch list, rebuilt from the store on every call. A worker appears
+// once even if a hand-written store repeats the row.
+fn lifecycle_watch(adoptions) {
+    let out = [];
+    for a in lifecycle_live_adoptions(adoptions) {
+        let worker = lifecycle_text(a, "worker");
+        if worker == "" {
+            continue;
+        }
+        let seen = false;
+        for w in out {
+            if w == worker {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            out.push(worker);
+        }
+    }
+    out
+}
+
+fn lifecycle_find_adoption(adoptions, worker) {
+    for a in lifecycle_live_adoptions(adoptions) {
+        if lifecycle_text(a, "worker") == worker {
+            return Some(a);
+        }
+    }
+    None
+}
+
+fn lifecycle_has_notice(notices, notice_id) {
+    for n in notices {
+        if n is Object && lifecycle_text(n, "notice_id") == notice_id {
+            return true;
+        }
+    }
+    false
+}
+
+// Which notices the transport still has to be given, ported so the retry bound has
+// one written form: a pending notice, or a failed one inside the bound. A notice
+// that arrived, was queued or was partly delivered is never sent again.
+fn lifecycle_to_attempt(notices) {
+    let out = [];
+    for n in notices {
+        if !(n is Object) {
+            continue;
+        }
+        let outcome = lifecycle_text(n, "outcome");
+        let attempts = lifecycle_number(n, "attempts");
+        if outcome == "pending" || (outcome == "failed" && attempts < 3) {
+            out.push(lifecycle_text(n, "notice_id"));
+        }
+    }
+    out
+}
+
+// What to do about a stored rank and the decoration a live row carries.
+//   none      our own text is already exactly the stored prefix: do not rewrite it
+//   decorate  no decoration, or our own text differs: (re)attach the stored prefix
+//   conflict  another controller holds the decoration: report, never take it over
+fn lifecycle_decoration_action(decoration, prefix) {
+    match decoration {
+        Some(d) => {
+            if !(d is Object) {
+                return "decorate";
+            }
+            let owner = lifecycle_text(d, "controller");
+            let text = lifecycle_text(d, "text");
+            if owner != "coordinator" {
+                return "conflict";
+            }
+            if text == prefix {
+                return "none";
+            }
+            "decorate"
+        }
+        None => "decorate",
+    }
+}
+
+// The prefix a stored word means. A row that already carries `prefix` keeps it;
+// this is only the fallback for a row written before the field existed.
+fn lifecycle_rank_prefix(row) {
+    let stored = lifecycle_text(row, "prefix");
+    if stored != "" {
+        return stored;
+    }
+    lifecycle_prefix_of(lifecycle_text(row, "rank"))
+}
+
+fn lifecycle_prefix_of(rank) {
+    let w = rank.trim().to_lowercase();
+    if w == "imperator" { return "Imperator"; }
+    if w == "legatus" { return "Legatus"; }
+    if w == "tribunus" { return "Tribunus"; }
+    if w == "centurio" { return "Centurio"; }
+    if w == "miles" { return "Miles"; }
+    ""
+}
+
+// ---- small readers, kept here so every shape decision is in one file ----
+
+fn lifecycle_payload(observation) {
+    match observation.get("payload") {
+        Some(p) => {
+            if p is Object {
+                p
+            } else {
+                #{}
+            }
+        }
+        None => #{},
+    }
+}
+
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+fn lifecycle_true(v) {
+    match v {
+        Some(b) => {
+            if b is bool {
+                b
+            } else {
+                `${b}` == "true"
+            }
+        }
+        None => false,
+    }
+}
+
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+
+fn lifecycle_released(row) {
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+
+fn lifecycle_null(v) {
+    `${v}` == "null" || `${v}` == ""
+}
