@@ -26,8 +26,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use eidolon_coordinator::{
-    addresses_established, adopt, cycle as scan_cycle, rank, release_adoption, store, AdoptRequest,
-    Delivery, Gate, Notice, Outcome, Roster, Row, Store, Transport,
+    addresses_established, adopt, cycle_with_rows as scan_cycle, rank, release_adoption, store,
+    AdoptRequest, Delivery, Gate, Notice, Outcome, Roster, Row, Store, Transport,
 };
 use subtle::ConstantTimeEq;
 
@@ -80,6 +80,59 @@ impl Roster for CliRoster {
         serde_json::from_value::<Vec<Row>>(rows).map_err(|e| {
             format!("`eidolon peers --json` answered rows this monitor cannot read ({e}): {text}")
         })
+    }
+}
+
+/// Where a decoration goes: the harness's own `door decorate`.
+///
+/// The monitor does not write a registration's `meta.json` itself, for the same
+/// reason it does not write an inbox: one writer per file, and the session's own
+/// process is it. The door is also where the target guard lives — the call names the
+/// durable session it resolved, and a registration re-minted since the scan refuses
+/// rather than decorating whoever answers that address now, which is exactly the
+/// window between this monitor's roster read and its write.
+trait Decorator: Send + Sync {
+    fn decorate(&self, session: &str, owner: &str, prefix: &str) -> Result<String, String>;
+    fn undecorate(&self, session: &str, owner: &str) -> Result<String, String>;
+}
+
+struct CliDecorator {
+    eidolon: String,
+}
+
+impl CliDecorator {
+    fn door(&self, args: &[&str]) -> Result<String, String> {
+        let out = Command::new(&self.eidolon)
+            .args(["door", "decorate"])
+            .args(args)
+            .output()
+            .map_err(|e| format!("running `{} door decorate`: {e}", self.eidolon))?;
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if out.status.success() {
+            Ok(if stdout.is_empty() { "the door answered without words".to_string() } else { stdout })
+        } else {
+            // Refusals exit non-zero and print their reason, which is what a reader
+            // needs: the owner conflict, the stale session, or a session with no
+            // doorbell. The monitor repeats none of them in its own words.
+            Err(if stderr.is_empty() {
+                format!(
+                    "`eidolon door decorate` exited {:?} and said nothing",
+                    out.status.code()
+                )
+            } else {
+                stderr
+            })
+        }
+    }
+}
+
+impl Decorator for CliDecorator {
+    fn decorate(&self, session: &str, owner: &str, prefix: &str) -> Result<String, String> {
+        self.door(&[session, "--owner", owner, "--text", prefix])
+    }
+    fn undecorate(&self, session: &str, owner: &str) -> Result<String, String> {
+        self.door(&[session, "--owner", owner, "--remove"])
     }
 }
 
@@ -240,6 +293,10 @@ struct App {
     /// for an operation the store already carries a destination for; a seam
     /// because the tests need a compositor that answers differently each time.
     resolver: Box<dyn eidolon_coordinator::Resolver>,
+    /// The harness's door for presentation text. A trait so a test can watch what
+    /// the monitor would say without a socket, and so the monitor has exactly one
+    /// place that reaches the harness for this.
+    decorator: Box<dyn Decorator>,
     // Lock order is always Gate, then process host. No caller-provided executable.
     launches: Mutex<eidolon_coordinator::process_host::ProcessHost>,
     /// Why the last scan could not see anything, kept so a tool answer can say it
@@ -320,7 +377,11 @@ fn now_ms() -> u64 {
 /// transport, and reports what the scan could not do.
 fn cycle(app: &App) {
     let now = (app.now)();
-    // The store's lock first, the poison inside it — the same order every door uses.
+    // The roster is a subprocess (`eidolon peers --json`), so it is read **before** the
+    // store's critical section: one observation of the swarm per tick, used twice — for
+    // halts and for decoration — and the lock is not held while a process is spawned.
+    let rows = app.roster.rows();
+    // The store's lock next, the poison inside it — the same order every door uses.
     let mut store = match app.gate.enter() {
         Ok(s) => s,
         Err(p) => {
@@ -333,7 +394,7 @@ fn cycle(app: &App) {
     let scan = scan_cycle(
         &mut store,
         &mut save,
-        app.roster.as_ref(),
+        rows.clone(),
         app.transport.as_ref(),
         now,
     );
@@ -352,6 +413,34 @@ fn cycle(app: &App) {
         );
         app.gate.poison(e);
         std::process::exit(1);
+    }
+
+    // Decoration last, and never fatal. A presentation act is not a delivery: a
+    // refused or unanswered door is one line in the log and one more attempt next
+    // tick, not a reason to stop watching for halts. The decision is pure
+    // (`rank::acts`), so what happens here is only the writing.
+    let Ok(rows) = rows else {
+        return; // the scan already said the roster could not be read
+    };
+    // The decision is taken under the lock and the writing is not: a door call is a
+    // subprocess that can take seconds, and the store's critical section is not the
+    // place to hold it. The acts are owned values, so nothing here borrows the store
+    // after this point.
+    let (acts, conflicts) = rank::acts(&store.ranks, &rows);
+    drop(store);
+    for conflict in conflicts {
+        println!("[coordinator] decoration: {conflict}");
+    }
+    for act in acts {
+        let rank::Act::Decorate { session, prefix } = &act;
+        let said = app.decorator.decorate(session, rank::OWNER, prefix);
+        match said {
+            Ok(words) => println!("[coordinator] {}: {words}", act.words()),
+            // A refusal is reported as what the door said. It is not retried
+            // differently next tick — the act comes from the record, not from the
+            // failure — so a persistent conflict is visible rather than fought over.
+            Err(why) => println!("[coordinator] {}: refused — {why}", act.words()),
+        }
     }
 }
 
@@ -452,6 +541,19 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
         // caller nobody named is not an adoption.
         return Err("this call carries no `caller`: the adopting session's own durable address, as the harness publishes it. The plugin's tools read it from the roster; nothing else may name it".to_string());
     }
+    // A roster read spawns `eidolon peers --json`; the store's critical section is not
+    // the place to hold a subprocess, so the verbs listed below read the rows **first**,
+    // once per call. The read is then slightly earlier than the write it informs, which
+    // is why the decoration verbs carry the session they were aimed at and the
+    // registration refuses a re-mint. `start` is deliberately not in that list: it reads
+    // the rows it needs inside its own arm, after the gate. That ordering came with the
+    // managed-start work and the merge left it exactly as it found it; whether it should
+    // move out here too is its owners' question, not this merge's.
+    let pre_rows = if matches!(method, "rank" | "unrank" | "adopt" | "adoptions" | "ranks") {
+        Some(app.roster.rows())
+    } else {
+        None
+    };
     // The store's critical section, and the poison read inside it: one order, one
     // entry point, so there is no pre-check left for a caller to race past.
     let mut store = app.gate.enter()?;
@@ -608,7 +710,7 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
             // failure refuses the call **before** anything is written, and says
             // which of the two happened, so a reader never has to guess whether
             // the address was missing or the harness was.
-            let seen = match app.roster.rows() {
+            let seen = match pre_rows.clone().expect("the roster was read before the lock") {
                 Ok(rows) => rows
                     .into_iter()
                     .find(|r| r.session.as_deref() == Some(worker.as_str())),
@@ -673,10 +775,139 @@ fn method(app: &App, method: &str, args: &serde_json::Value, now: u64) -> Result
             )
         }
         "adoptions" => {
-            let rows = app.roster.rows();
+            let rows = pre_rows.clone().expect("the roster was read before the lock");
             Ok(render_adoptions(&store, &caller, rows, &app.blind.lock().expect("the blind lock")))
         }
         "notices" => Ok(render_notices(&store, &caller)),
+        // ---- rank assignment: the plugin's own vocabulary, its own store ----
+        "rank" => {
+            let worker = text("session");
+            let word = text("rank");
+            let rows = pre_rows.clone().expect("the roster was read before the lock");
+            let seen = match &rows {
+                Ok(rs) => rs
+                    .iter()
+                    .find(|r| r.session.as_deref() == Some(worker.trim()))
+                    .cloned(),
+                Err(_) => None,
+            };
+            let file = app.file.clone();
+            let mut save = |s: &Store| store::save(&file, s);
+            let mut load = || -> Result<Store, String> {
+                match store::load(&file) {
+                    Ok(s) => Ok(s),
+                    Err(e) => {
+                        app.gate.poison(e.clone());
+                        Err(e)
+                    }
+                }
+            };
+            let said = rank::assign(
+                &mut store,
+                rank::RankRequest {
+                    caller: &caller,
+                    worker: &worker,
+                    rank: &word,
+                    roster: match &rows {
+                        Ok(_) => Ok(seen.as_ref()),
+                        Err(e) => Err(e.clone()),
+                    },
+                    now,
+                },
+                &mut save,
+                &mut load,
+            )?;
+            // The record is on the disk; the store's critical section is done, so
+            // the door is not asked while it is held. Asserting the display now
+            // rather than at the next tick is what makes the tool's answer true of
+            // the screen as well as of the record.
+            drop(store);
+            let mut answer = said;
+            match (seen.as_ref(), rank::prefix_of(&word)) {
+                (Some(_), Some(prefix)) => {
+                    match app.decorator.decorate(worker.trim(), rank::OWNER, prefix) {
+                        Ok(words) => answer.push_str(&format!("\ndecoration: {words}")),
+                        Err(why) => answer.push_str(&format!("\ndecoration: refused — {why}")),
+                    }
+                }
+                (None, _) => answer.push_str(
+                    "\ndecoration: no live registration answers to that address yet, so nothing \
+was decorated — the next scan asserts it on the session that does",
+                ),
+                (Some(_), None) => answer.push_str("\ndecoration: the word has no display form"),
+            }
+            Ok(answer)
+        }
+        "unrank" => {
+            let worker = text("session");
+            let rows = pre_rows.clone().expect("the roster was read before the lock");
+            let live = match &rows {
+                Ok(rs) => rs.iter().any(|r| r.session.as_deref() == Some(worker.trim())),
+                Err(_) => false,
+            };
+            let file = app.file.clone();
+            let mut save = |s: &Store| store::save(&file, s);
+            let mut load = || -> Result<Store, String> {
+                match store::load(&file) {
+                    Ok(s) => Ok(s),
+                    Err(e) => {
+                        app.gate.poison(e.clone());
+                        Err(e)
+                    }
+                }
+            };
+            // What the record named, read **before** the release removes it: the
+            // removal below is only ours if the row still wears exactly this text.
+            let recorded = store
+                .ranks
+                .iter()
+                .find(|r| r.session == worker.trim())
+                .map(|r| r.prefix.clone());
+            let said = rank::release(&mut store, &caller, &worker, &mut save, &mut load)?;
+            drop(store);
+            let mut answer = said;
+            let wearing = match &rows {
+                Ok(rs) => rs
+                    .iter()
+                    .find(|r| r.session.as_deref() == Some(worker.trim()))
+                    .and_then(|r| r.decoration.clone()),
+                Err(_) => None,
+            };
+            match wearing {
+                // The row wears the text this record named, so taking it back is ours
+                // to do. Anything else under the same owner string is *not* ours: the
+                // owner is a claim any same-user client can write, and a plugin that
+                // removed whatever answered to the name would delete somebody's own
+                // prefix.
+                Some(d) if Some(d.text.as_str()) == recorded.as_deref() => {
+                    match app.decorator.undecorate(worker.trim(), rank::OWNER) {
+                        Ok(words) => answer.push_str(&format!("\ndecoration: {words}")),
+                        Err(why) => answer.push_str(&format!(
+                            "\ndecoration: not removed — {why}. Run `eidolon door decorate {} \
+--owner {} --remove` once its door answers",
+                            worker.trim(),
+                            rank::OWNER
+                        )),
+                    }
+                }
+                Some(d) => answer.push_str(&format!(
+                    "\ndecoration: left standing — the row wears `{}`, which is not the word this \
+record named; a decoration is removed only by the client that can show it put it there",
+                    d.text
+                )),
+                None if live => answer.push_str("\ndecoration: the row carries no decoration"),
+                None => answer.push_str("\ndecoration: no live registration to take anything back from"),
+            }
+            Ok(answer)
+        }
+        "ranks" => {
+            let rows = pre_rows.clone().expect("the roster was read before the lock");
+            let rendered = match &rows {
+                Ok(rs) => rank::render(&store.ranks, Ok(rs.as_slice())),
+                Err(e) => rank::render(&store.ranks, Err(e.as_str())),
+            };
+            Ok(rendered)
+        }
         other => Err(format!("unknown coordinator method `{other}`")),
     }
 }
@@ -998,6 +1229,7 @@ async fn main() {
             proc_root: PathBuf::from("/proc"),
             compositor: std::sync::Arc::new(eidolon_coordinator::ancestry::Hyprland),
         }),
+        decorator: Box::new(CliDecorator { eidolon: eidolon.clone() }),
         launches: Mutex::new(launches),
         blind: Mutex::new(Vec::new()),
         now: now_ms,
@@ -1183,6 +1415,20 @@ mod tests {
             }
         }
 
+        /// A refused start decorates nothing, so reaching the harness's door for
+        /// presentation text is the same failure as reaching the resolver. The field
+        /// exists on `App` because the monitor's own tick decorates; this request
+        /// never gets that far.
+        struct PanickingDecorator;
+        impl Decorator for PanickingDecorator {
+            fn decorate(&self, _session: &str, _owner: &str, _prefix: &str) -> Result<String, String> {
+                panic!("a decoration was written: a refused start must not reach the harness door")
+            }
+            fn undecorate(&self, _session: &str, _owner: &str) -> Result<String, String> {
+                panic!("a decoration was removed: a refused start must not reach the harness door")
+            }
+        }
+
         /// The roster is the one double that answers: a terminal request with no
         /// destination is what the resolver is reached for, and the roster's own
         /// emptiness must not be the thing that stops the walk first. It would not
@@ -1209,6 +1455,7 @@ mod tests {
             transport: Box::new(PanickingTransport),
             attestation: None,
             resolver: Box::new(PanickingResolver),
+            decorator: Box::new(PanickingDecorator),
             launches: Mutex::new(eidolon_coordinator::process_host::ProcessHost::new(
                 PathBuf::from("/nonexistent/eidolon"),
                 PathBuf::from("/nonexistent/launches"),
