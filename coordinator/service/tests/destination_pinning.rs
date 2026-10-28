@@ -168,6 +168,9 @@ fn row(session: &str) -> Row {
         outcome_observed: None,
         started_ms: None,
         reached: true,
+        label: None,
+        decoration: None,
+        display: None,
     }
 }
 
