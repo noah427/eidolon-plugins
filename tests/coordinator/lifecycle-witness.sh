@@ -191,6 +191,17 @@ else
     fail=$((fail + 1))
 fi
 
+# ---- W11: release-of-monitoring in the ledger ----
+check_absent "W11: the release needs no core verb" "$report" "W11 release ERR"
+check "W11: it says monitoring ends and names the epoch" "$report" "monitoring ends now"
+check "W11: the epoch's pending notice is cancelled in the same write" "$report" "1 pending notice(s) of that epoch were cancelled"
+w11=$(printf '%s\n' "$report" | sed -n '/^W11 store after release:/,$p')
+check "W11: the row is marked released by a word, not a fabricated time" "$w11" '\"released\":true'
+check "W11: the pending row is cancelled" "$w11" '\"outcome\":\"cancelled\"'
+check "W11: the journaled row keeps its record" "$w11" '\"record\":41'
+check "W11: a second release refuses rather than releasing twice" "$report" "is not adopted by this session (or was already released)"
+check "W11: and a re-adoption is a new epoch" "$report" "adopted 1793000000060 in epoch 2"
+
 if [ "$fail" -ne 0 ]; then
     say "FAIL lifecycle-witness.sh: $fail check(s) failed"
     exit 1
