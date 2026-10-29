@@ -168,7 +168,7 @@ async fn record(worker, name, note, coordinator, epoch) {
         let status = ledger_text(wrote, "status");
         if status == "written" {
             if epoch > 0 {
-                return Ok(`This ledger records it: epoch ${epoch} for ${worker}, which is what the halt handler reads to know whom to watch.`);
+                return Ok(`This ledger records it: epoch ${epoch} for ${worker} — **derived from the door's sentence, not a typed field** — which is what the halt handler reads to know whom to watch.`);
             }
             return Ok(`This ledger records the adoption of ${worker} with **no epoch**: the harness's sentence named none this tool could read. Halts for that worker will not be announced until a row carries an epoch, because a notice keyed on an invented epoch would be a second identity for one occurrence.`);
         }
