@@ -1,14 +1,20 @@
 // `coordinator_adoptions`: what this session has adopted, what each adopted worker
-// is doing now, and what the monitor can and cannot see.
+// is doing now, and what this tool can and cannot check.
 //
-// The rows are the monitor's answer, not a second opinion: it holds the records,
-// it does the watching, and it is the only thing that writes them. Liveness is
-// reported beside the state and never folded into it — a stale registration read
-// as a live worker is the failure this separates out.
+// The rows are this plugin's own ledger — written by `adopt`, released by `release`,
+// watched by `hook_peer` — read beside a live roster. That is **two** sources, not
+// one, and the difference is the point: the harness publishes no way to read an
+// adoption record back, so a row here is what this plugin wrote and never a record
+// verified against the custody log. Every row says so, and so does the header.
+//
+// Liveness is reported beside the state and never folded into it, and the three
+// answers stay apart exactly as the service kept them apart: `unobservable` when the
+// roster could not be read, `no live session carries this address` when it could be
+// read and found none, and `live as …` when it found one.
 pub fn manifest() {
     #{
         name: "coordinator_adoptions",
-        description: "Every adoption this session has made, and for each: the worker's durable address as it was recorded, what this coordinator calls it, the epoch it was adopted in, whether it is still monitored or has been released, whether a live session carries that address right now, the state and last outcome the harness publishes for it, and whether the monitor can see the workers at all. Read-only. Names and tags appear as what they are — display — and are never how a worker is found.",
+        description: "Every adoption this session has made, and for each: the worker's durable address as it was recorded, what this coordinator calls it, the epoch it was adopted in, whether it is still monitored or has been released, whether a live session carries that address right now, the state and last outcome the harness publishes for it, and whether the row could be checked against the custody log at all. Read-only. Names and tags appear as what they are — display — and are never how a worker is found.",
         approval: "read_only",
         input_schema: #{
             "type": "object",
@@ -18,118 +24,401 @@ pub fn manifest() {
 }
 
 pub async fn call(input) {
-    let caller = my_address().await?;
-    call_service("adoptions", #{ "caller": caller }).await
+    let loaded = load_store().await?;
+    let store = loaded.store;
+    let adoptions = lifecycle_store_list(store, "adoptions")?;
+    let starts = load_list("starts").await?;
+
+    // The roster, read once, with the harness's own refusal words kept verbatim: it
+    // either answers rows or says why it cannot, and the second is not an empty list.
+    let rows = [];
+    let unseen = "";
+    match eidolon::swarm_call("roster", #{}).await {
+        Ok(raw) => {
+            match json::from_string(raw) {
+                Ok(roster) => {
+                    rows = roster_rows(roster);
+                }
+                Err(e) => {
+                    unseen = `the roster answered something that is not JSON: ${e}; it answered: ${raw}`;
+                }
+            }
+        }
+        Err(e) => {
+            unseen = `${e}`;
+        }
+    }
+
+    let out = "";
+    let addresses = false;
+    for row in rows {
+        if row is Object && lifecycle_text(row, "session") != "" {
+            addresses = true;
+        }
+    }
+
+    if unseen != "" {
+        out += `the monitor cannot see the workers: ${unseen}\nNothing below is a claim about any worker's state.\n`;
+    } else if rows.len() > 0 && !addresses {
+        out += "the roster publishes no `session` for any live row: a session with no log has no id to name, so no adoption can be resolved to one. Null means not established, not no-such-session.\n";
+    }
+
+    // What a row here can be checked against. Said once, in the answer's own words,
+    // because it is the one thing this tool cannot do and a reader has to know which
+    // kind of fact they are looking at.
+    out += "\nEvery adoption row below is marked `store only`. This harness publishes no way to read an adoption record back — the `custody_inspect` primitive exists on the custody-doors branch and not in the integration tree — so a row is what this plugin wrote down, not a record checked against the custody log. When those doors land, one `custody_inspect` per start makes the marker `verified against the log` or names the disagreement; until then no row can be marked the second way, and this tool will not pretend otherwise.\n\n";
+
+    // The service's own rendering of a managed start, kept because it is the
+    // vocabulary an operator has already read: the durable phase is history, not
+    // current liveness.
+    for start in starts {
+        if !(start is Object) {
+            out += "a managed-start row is not an object; it is shown as it stands\n";
+            continue;
+        }
+        out += `managed start ${lifecycle_text(start, "operation")}: ${start_rank_word(start)}; durable phase ${lifecycle_text(start, "phase")}, session ${lifecycle_text(start, "session")}, adoption epoch ${lifecycle_number(start, "adoption_epoch")} (not current liveness)\n`;
+        out += `  cancellation: ${start_cancellation(start)} (historical exit receipt, not current liveness)\n`;
+        out += "  store only\n";
+    }
+    if starts.len() > 0 {
+        out += "\n";
+    }
+
+    let any = false;
+    for row in adoptions {
+        if !(row is Object) {
+            out += "an adoption row is not an object; it is shown as it stands\n";
+            continue;
+        }
+        any = true;
+        let worker = lifecycle_text(row, "worker");
+        let name = lifecycle_text(row, "name");
+        out += `epoch ${lifecycle_number(row, "epoch")} — ${worker}${if name == "" { "" } else { ` (called \`${name}\`)` }}\n`;
+        out += "  adopted: the time is not stated by this plugin (no clock in the script vocabulary)\n";
+        if lifecycle_released(row) {
+            let at = lifecycle_text(row, "released_at_ms");
+            let said = lifecycle_text(row, "release_reason");
+            if at == "" || lifecycle_null_str(at) {
+                out += "  RELEASED; not monitored\n";
+            } else {
+                out += `  RELEASED at ${at} (as it was recorded when the release was written); not monitored\n`;
+            }
+            if said != "" {
+                out += `  released because: ${said}\n`;
+            }
+        } else {
+            out += "  monitored\n";
+        }
+        out += `  ${live_line(rows, worker, unseen)}\n`;
+        let note = lifecycle_text(row, "note");
+        if note != "" {
+            out += `  note: ${note}\n`;
+        }
+        out += "  store only\n";
+    }
+    if !any {
+        out += "no adoptions recorded by this session.\n";
+    }
+
+    // The last scan's own words, from the ledger: this is the blindness the service
+    // reported per row and per answer, and it is the only place it is kept at all.
+    let blind = lifecycle_blind_notes(store);
+    let notes = blind.notes;
+    let uncertain = blind.uncertain;
+    if notes.len() == 0 && uncertain.len() == 0 {
+        out += "\nthe last scan said: nothing recorded — and a scan that said nothing is not a scan that saw nothing.\n";
+    } else {
+        out += "\nthe last scan said:\n";
+        for line in notes {
+            out += `  - ${line}\n`;
+        }
+        if uncertain.len() > 0 {
+            out += "uncertain (not recorded as done):\n";
+            for line in uncertain {
+                out += `  - ${line}\n`;
+            }
+        }
+    }
+    Ok(out)
 }
 
-// Everything below is the same in every coordinator_*.rn: upstream eidolon
-// compiles each tool file on its own, and a tool file is meant to be handed over
-// whole.
-
-// This session's own durable address, as the harness publishes it. There is no
-// other source for it in this file: not an argument, not an environment
-// variable, not a name somebody typed.
-async fn my_address() {
-    let raw = match eidolon::swarm_call("roster", #{}).await {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}`)),
-    };
-    let roster = match json::from_string(raw) {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}; \`swarm_call("roster")\` answered: ${raw}`)),
-    };
-    let me = match my_row(roster) {
-        Some(r) => r,
-        None => {
-            return Err(no_roster(
-                "the roster carries no row for this session: `me` is null or absent, and nothing else in it marks which row is the caller — so this plugin cannot tell which address is the one it would adopt from",
-            ))
-        }
-    };
-    match me.get("session") {
-        Some(s) => {
-            let addr = `${s}`;
-            if addr == "" || addr == "null" {
-                return Err(no_roster(
-                    "this session has no durable address: the roster publishes `session` as null, and null means not established — not no-such-session. The harness has not minted an id into a log yet, and an adoption is keyed on that address, so none can be made until it exists",
-                ))
+// The service's live line, kept word for word, with its three answers apart.
+fn live_line(rows, worker, unseen) {
+    if unseen != "" {
+        return "unobservable".to_string();
+    }
+    let claimants = claimants(rows, worker);
+    if claimants.len() == 0 {
+        return "no live session carries this address".to_string();
+    }
+    if claimants.len() > 1 {
+        return (`${claimants.len()} live sessions claim this address; refusing to guess`);
+    }
+    let c = claimants[0];
+    let id = lifecycle_text(c, "id");
+    let named = if id == "" { "?" } else { id };
+    let silent = if lifecycle_true(c.get("reached")) { "" } else { " (doorbell silent)" };
+    let ending = "";
+    match c.get("outcome_at") {
+        Some(n) => {
+            if !lifecycle_null(n) {
+                ending = `, ending record \`${n}\``;
             }
-            Ok(addr)
         }
-        None => Err(no_roster("this session's own row carries no `session` field at all")),
+        None => {
+            if lifecycle_text(c, "last") == "errored" {
+                let counted = lifecycle_number(c, "outcome_observed");
+                if counted > 0 {
+                    ending = `, no journal record for that ending; ${counted} unjournaled ending(s) counted on this registration instance`;
+                } else {
+                    ending = ", no journal record for that ending and no count published — an older writer's row, since this build counts every errored ending".to_string();
+                }
+            } else {
+                ending = ", no ending record published".to_string();
+            }
+        }
+    }
+    `live as \`${named}\`${silent}: state \`${lifecycle_text(c, "state")}\`, last \`${lifecycle_text(c, "last")}\`${ending}`
+}
+
+fn start_rank_word(start) {
+    let rank = lifecycle_text(start, "rank");
+    let digest = lifecycle_text(start, "rank_digest");
+    if rank == "" {
+        return "no rank".to_string();
+    }
+    if digest == "" {
+        return (`rank \`${rank}\`, no rank block (nothing appended)`);
+    }
+    return (`rank \`${rank}\`, block sha256 ${digest}`);
+}
+
+fn start_cancellation(start) {
+    match start.get("cancellation") {
+        Some(c) => {
+            if lifecycle_null(c) {
+                "none".to_string()
+            } else {
+                `${c}`
+            }
+        }
+        None => "none".to_string(),
     }
 }
 
-// This session's own row: a `me` object beside the list, or the one row that
-// marks itself. Either shape is the harness's to choose; neither existing is a
-// refusal, never a guess from the first row and never a name.
-fn my_row(roster) {
-    if roster is Object {
-        match roster.get("me") {
-            Some(m) => {
-                // `me` is null when the caller has no registration of its own —
-                // `eidolon peers --json` is such a scan. Null is not a row.
-                if m is Object {
-                    return Some(m);
+fn lifecycle_null_str(v) {
+    v == "null" || v == ""
+}
+
+// ---- the store, the roster, and the pure policy this tool repeats ----------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front
+// of workflows, so the policy cannot be imported here. Everything from
+// `lifecycle_store_empty` down is a byte-for-byte copy of `../lib/lifecycle.rn`;
+// `tests/coordinator/lifecycle-drift.sh` fails if the two ever disagree.
+
+async fn load_store() {
+    let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = lifecycle_number(reply, "revision");
+    let store = lifecycle_store_empty();
+    match reply.get("value") {
+        Some(v) => {
+            if v is String {
+                let got = json::from_string(`${v}`)?;
+                if got is Object {
+                    store = got;
+                } else {
+                    return Err(`the \`store\` row is not the object this ledger writes (${v}); it is refused rather than repaired or overwritten`);
                 }
-                return None;
+            } else {
+                return Err("the `store` row's value is not the JSON text this ledger writes; it is refused rather than repaired or overwritten");
+            }
+        }
+        None => {}
+    }
+    for key in ["adoptions", "notices", "gaps"] {
+        store = lifecycle_store_put(store, key, lifecycle_store_list(store, key)?);
+    }
+    Ok(#{ "store": store, "revision": revision })
+}
+
+// A list-valued key of its own. `starts` stays out of the ledger because nothing in
+// the guarantee depends on it and it changes on a different rhythm; a key that holds
+// what is not a list is refused rather than read as empty.
+async fn load_list(key) {
+    let raw = eidolon::plugin_state_read(#{ "key": key }).await?;
+    let reply = json::from_string(raw)?;
+    match reply.get("value") {
+        Some(v) => {
+            if v is String {
+                let parsed = json::from_string(`${v}`)?;
+                if parsed is Vec {
+                    Ok(parsed)
+                } else {
+                    Err(`the \`${key}\` row is not a JSON array; it is refused rather than repaired or overwritten`)
+                }
+            } else {
+                Ok([])
+            }
+        }
+        None => Ok([]),
+    }
+}
+
+// The roster as one list. `me` is published beside `sessions`, not necessarily in it,
+// and this session's own row still carries a rank and a decoration, so it is added
+// when the list does not already carry it.
+fn roster_rows(roster) {
+    let out = [];
+    if roster is Vec {
+        return roster;
+    }
+    if roster is Object {
+        match roster.get("sessions") {
+            Some(s) => {
+                if s is Vec {
+                    for row in s {
+                        out.push(row);
+                    }
+                }
+            }
+            None => {}
+        }
+        match roster.get("me") {
+            Some(me) => {
+                if me is Object {
+                    let session = lifecycle_text(me, "session");
+                    let seen = false;
+                    for row in out {
+                        if lifecycle_text(row, "session") == session {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if !seen {
+                        out.push(me);
+                    }
+                }
             }
             None => {}
         }
     }
-    if roster is Vec {
-        for row in roster {
-            match row.get("me") {
-                Some(flag) => {
-                    if `${flag}` == "true" {
-                        return Some(row);
-                    }
-                }
-                None => {}
+    return out;
+}
+
+fn claimants(rows, session) {
+    let out = [];
+    if session == "" {
+        return out;
+    }
+    for row in rows {
+        if row is Object && lifecycle_text(row, "session") == session {
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn lifecycle_store_empty() {
+    #{ "adoptions": [], "notices": [], "gaps": [] }
+}
+
+fn lifecycle_store_list(store, key) {
+    match store.get(key) {
+        None => Ok([]),
+        Some(v) => {
+            if v is Vec {
+                Ok(v)
+            } else {
+                Err(`the store's \`${key}\` is not a list (${v}); it is refused rather than repaired or overwritten`)
             }
         }
     }
-    None
 }
 
-// The refusal a harness without the structured roster gets, naming exactly what is
-// missing rather than answering as if nobody had been adopted. This plugin reads
-// session state as data: it will not parse `peers`' prose, and it will not read
-// the presence directory itself.
-fn no_roster(why) {
-    `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
+fn lifecycle_store_put(store, key, list) {
+    store.insert(key, list);
+    store
 }
 
-// The monitor service (../service). Everything that decides anything lives there,
-// so that the record and the notice have one implementation and the tools stay
-// thin doors onto it.
-fn service() {
-    #{
-        name: "coordinator",
-        base_url: "http://127.0.0.1:8095",
-        token_file: "~/.config/eidolon/coordinator.token",
-        auth: #{ header: "Authorization", prefix: "Bearer " },
-        timeout_s: 30,
-    }
-}
-
-// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
-async fn call_service(method, args) {
-    let body = json::to_string(#{ "method": method, "args": args })?;
-    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
+fn lifecycle_blind_notes(store) {
+    match store.get("blind") {
+        Some(b) => {
+            if b is Object {
+                let notes = [];
+                match b.get("notes") {
+                    Some(v) => {
+                        if v is Vec {
+                            notes = v;
+                        }
+                    }
+                    None => {}
+                }
+                let uncertain = [];
+                match b.get("uncertain") {
+                    Some(v) => {
+                        if v is Vec {
+                            uncertain = v;
+                        }
+                    }
+                    None => {}
+                }
+                return #{ "notes": notes, "uncertain": uncertain };
+            }
         }
-    };
-    let reply = json::from_string(sent)?;
-    if reply.status != 200 {
-        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
+        None => {}
     }
-    let out = json::from_string(reply.body)?;
-    if out.ok {
-        Ok(out.result)
-    } else {
-        Err(out.error)
+    #{ "notes": [], "uncertain": [] }
+}
+
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
     }
+}
+
+fn lifecycle_true(v) {
+    match v {
+        Some(b) => {
+            if b is bool {
+                b
+            } else {
+                `${b}` == "true"
+            }
+        }
+        None => false,
+    }
+}
+
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+
+// A row with no `released_at_ms`, or one holding null or the empty string, is open.
+// The release is written by `release`; this reader's whole job is to tell history
+// from a live watch, and it never infers a release from a missing field name it does
+// not recognise.
+fn lifecycle_released(row) {
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+
+fn lifecycle_null(v) {
+    `${v}` == "null" || `${v}` == ""
 }
