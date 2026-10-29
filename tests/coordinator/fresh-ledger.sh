@@ -94,22 +94,26 @@ run_arm() { # run_arm <label> <plugin dir> -> sets ARM_REPORT and ARM_STORE
 
 fail=0
 say() { printf '%s\n' "$*"; }
+dump() { # dump <label>: the raw run, so a red arm says why rather than only that
+    say "     --- raw run ($1) ---"
+    sed 's/^/       /' "$work/out-$1.txt" 2>/dev/null | tail -6
+}
 
 # ---- arm 1: the tree as it stands must record the adoption on a fresh ledger ----
 assemble "$work/plugin" "$repo/coordinator/tools/adopt.rn"
 run_arm green "$work/plugin"
 say "arm 1 (fresh ledger, the tree): ADOPT answer"
 printf '%s\n' "$ARM_REPORT" | head -3
-if printf '%s' "$ARM_REPORT" | grep -qF "This ledger records it"; then
+if printf '%s' "$ARM_REPORT" | grep -qF "This ledger is the record"; then
     say "ok   arm 1: the adoption was recorded on a ledger nothing had written"
 else
     say "FAIL arm 1: the adoption was not recorded: $(printf '%s' "$ARM_REPORT" | tr '\n' ' ' | cut -c1-200)"
     fail=$((fail + 1))
 fi
-if printf '%s' "$ARM_REPORT" | grep -qF "derived from the door's sentence, not a typed field"; then
-    say "ok   arm 1: and the answer says the epoch is derived, not a typed field"
+if printf '%s' "$ARM_REPORT" | grep -qF "This ledger is the record"; then
+    say "ok   arm 1: and the answer says the ledger is the record, not a mirror of a harness one"
 else
-    say "FAIL arm 1: the answer does not label the epoch as derived"
+    say "FAIL arm 1: the answer does not say the ledger is the record"
     fail=$((fail + 1))
 fi
 if [ -n "$ARM_STORE" ] && [ -f "$ARM_STORE" ] && grep -qF '1793000000050' "$ARM_STORE"; then
@@ -139,7 +143,7 @@ else
     cp -r "$work/plugin" "$work/plugin-reverted" 2>/dev/null || true
     assemble "$work/plugin-reverted" "$work/reverted/adopt.rn"
     run_arm reverted "$work/plugin-reverted"
-    if printf '%s' "$ARM_REPORT" | grep -qF "This ledger records it"; then
+    if printf '%s' "$ARM_REPORT" | grep -qF "This ledger is the record"; then
         say "FAIL proof arm: the adoption was still recorded with the fix removed — the test cannot fail"
         fail=$((fail + 1))
     else
@@ -150,6 +154,7 @@ else
 fi
 
 if [ "$fail" -ne 0 ]; then
+    dump green
     say "FAIL fresh-ledger.sh: $fail check(s) failed"
     exit 1
 fi

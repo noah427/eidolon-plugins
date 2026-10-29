@@ -1,40 +1,24 @@
-// `coordinator_adopt`: a coordinator adopts one worker, through the harness's own
-// custody door.
+// `coordinator_adopt`: a coordinator adopts one worker, into **this plugin's own ledger**.
 //
-// **The adopting side is not an argument, and it is no longer this file's to send.**
-// `eidolon::custody_adopt` takes `worker`, `name` and `note` and nothing else: the
-// session acting is the attribution the dispatcher already made (`current_caller()` in
-// `crates/rune/src/host.rs:711-720`), so a model cannot adopt on somebody else's behalf
-// and no tag, name, shared directory or claim of being a coordinator produces an
-// adoption. The `caller` field the service took is gone, and its absence is the guard.
+// Adoption is coordination domain, and it lives here — not in core. The operator's ruling
+// (2026-10-29) puts the ledger, the epochs, supervision, release-of-monitoring, notice
+// obligations and the coordination decisions in the plugin, and keeps only generic resource
+// ownership in the harness. So this file calls **no** core adoption verb: there is none to call,
+// and `custody_adopt` is leaving core. The durable fact of an adoption is a row in `plugin_state`,
+// written by this tool, and the halt handler reads its watch list from the same row.
 //
-// The **guards the door owns**, in its own words (`crates/core/src/custody.rs:1390-1420`),
-// and this file does not repeat them as its own authority:
-//   * a non-empty worker, and a caller from attribution;
-//   * `a session cannot adopt itself ({worker})`;
-//   * `{worker} is already adopted here, in epoch {N} and still monitored; coordinator_release
-//     ends it first (a re-adoption is a new epoch, not a second live one)`;
-//   * the epoch is the door's next number, never a caller's;
-//   * **durable before the answer** — `the adoption was not written down, so it did not
-//     happen`, and an uncertain save reconciles rather than answering;
-//   * the answer distinguishes a live address from a record kept against an address that
-//     is never rebound to whatever looks similar.
-//
-// What stays here is the **second act**: the harness's record is authoritative, and this
-// plugin also keeps a row, because the halt handler reads its watch list from the ledger
-// and there is no primitive that reads an adoption back (`custody_inspect` answers for a
-// managed start's operation, and an adoption has none). Two stores are two facts, and
-// this file says which one it is reporting.
-//
-// **The epoch is derived from the door's answer, and that is a bridge, not a fact.**
-// `custody_adopt` returns `{"adopted": "<sentence>"}` — prose — and this file reads one
-// integer out of it so the halt handler can key a notice. Deriving durable identity from
-// wording is the same class of error as reading a display string as an id, one layer out;
-// it is done here only because the door exposes no typed field yet, it is labelled as
-// derived everywhere it appears (code, this file's answers, and the report), and it is
-// deleted the moment `Doors::adopt` returns a structured result. Nothing else in this
-// plugin treats the sentence as authority: the door's own words are quoted, never parsed
-// for anything but that one integer.
+// The guards, in the service's order (`reports/coordinator-retirement-2026-10-28/verb-contracts.md`
+// § adopt), which is now this file's own contract because there is no door beneath it:
+//   1. `worker` non-empty — a sentence that names what is missing, not a silent no-op.
+//   2. `a session cannot adopt itself` — an adoption is one session's act about another.
+//   3. no **live** adoption of that worker in this ledger. A re-adoption is a **new epoch**,
+//      never a second live row, and the refusal names the epoch and points at release.
+//   4. the epoch is this ledger's own **next number** — `max(epoch) + 1` over that worker's
+//      rows, never supplied by a caller and never read out of prose.
+//   5. **durable before the answer**: the row is written and read back first; an uncertain write
+//      says so and claims nothing.
+//   6. the answer distinguishes a live session carrying the address from a record kept against an
+//      address that is never rebound to whatever looks similar.
 
 pub fn manifest() {
     #{
@@ -80,155 +64,98 @@ pub async fn call(input) {
         None => "",
     };
 
-    // This session's own address is **not** sent anywhere — the door has the attribution.
-    // It is read for two local facts: the courtesy refusal of a self-adoption, and the
-    // `coordinator` field the notice id is derived over. A roster that cannot say leaves
-    // both unstated rather than refusing the adoption, because the adoption is the
-    // harness's act and does not depend on this plugin's view of the roster.
+    // This session's own address is not an argument and is not sent anywhere: the ledger is
+    // already keyed by `(session, plugin)`, so the adopting session is the one running this tool.
+    // It is read for two local facts only — the courtesy self-adoption refusal, and the `coordinator`
+    // field the notice id is derived over. A roster that cannot say leaves both unstated rather than
+    // refusing the adoption, because the adoption is this ledger's act.
     let caller = own_address().await;
     if caller != "" && caller == worker {
         return Err(`a session cannot adopt itself (${worker}): an adoption is one session's act about another, and this session is that one`);
     }
 
-    match eidolon::custody_adopt(#{ "worker": worker, "name": name, "note": note }).await {
-        Ok(raw) => {
-            let reply = json::from_string(raw)?;
-            let sentence = ledger_text(reply, "adopted");
-            if sentence == "" {
-                return Err(`the custody door answered without an \`adopted\` sentence: ${raw}. The adoption may or may not have been written; the door is the record, and this ledger will not invent one`);
-            }
-            // **Derived from prose, deliberately labelled.** The epoch is one integer out of
-            // the door's own sentence, needed because the halt handler's notice id is derived
-            // over it. If it cannot be read the row is written without one and the answer says
-            // halts will not be announced — the rule that no epoch is ever invented applies
-            // here as much as in the readers.
-            let epoch = epoch_of(sentence);
-            let wrote = record(worker, name, note, caller, epoch).await?;
-            Ok(`${sentence}\n${wrote}`)
-        }
-        Err(e) => {
-            // The one refusal that is also a read: this plugin already holds a live
-            // adoption of this worker, and the sentence names its epoch. That is the
-            // repair path for a crash between the door's write and this ledger's — the
-            // row is completed from the refusal instead of the adoption being refused
-            // twice by two stores that disagree.
-            if `${e}`.contains("is already adopted here, in epoch") {
-                let epoch = epoch_of(`${e}`);
-                let wrote = record(worker, name, note, caller, epoch).await?;
-                return Ok(`the harness already held this adoption: ${e}\n${wrote}`);
-            }
-            Err(`${e}`)
-        }
-    }
-}
-
-// Write this ledger's row, and answer what it did. Never a claim the write did not earn.
-async fn record(worker, name, note, coordinator, epoch) {
     let attempt = 0;
     let refusal = "";
     while attempt < 2 {
         attempt += 1;
         let loaded = load_store().await?;
         let store = loaded.store;
-        // `store_list` answers the list (its own `?` is inside the wrapper), so nothing is
-        // tried here — a `?` on a Vec is "not supported as try operand", which is how this
-        // file learned that a Rune `?` must carry a Result and nothing else.
         let adoptions = store_list(store, "adoptions");
 
-        // What this ledger already knows about this worker, which is a different question
-        // from what the door knows: the row may be missing, live, or live at another epoch.
+        // The live row, if this ledger holds one — the guard the door used to keep for us.
         let existing = #{};
-        let seen = false;
+        let live = false;
+        let high = 0;
         for a in adoptions {
-            if a is Object && ledger_text(a, "worker") == worker && !ledger_released(a) {
-                existing = a;
-                seen = true;
-                break;
+            if a is Object && ledger_text(a, "worker") == worker {
+                if !ledger_released(a) {
+                    existing = a;
+                    live = true;
+                }
+                if ledger_stated(a, "epoch") {
+                    let e = ledger_number(a, "epoch");
+                    if e > high {
+                        high = e;
+                    }
+                }
             }
         }
-        if seen {
-            let held = ledger_number(existing, "epoch");
-            if !ledger_stated(existing, "epoch") || held == epoch {
-                return Ok(`This ledger already records epoch ${lifecycle_epoch_word(existing, "epoch")} for that worker, so it wrote nothing: the harness's adoption and this ledger's row agree.`);
-            }
-            return Err(`this ledger holds a live adoption of ${worker} in epoch ${held}, and the door's refusal named epoch ${lifecycle_epoch_word(#{ "epoch": epoch }, "epoch")}. Nothing was written: a second live row would be a second identity for one adoption, and this tool will not invent an epoch to make the two agree`);
+        if live {
+            return Err(`${worker} is already adopted by this session, in epoch ${lifecycle_epoch_word(existing, "epoch")} and still monitored; \`coordinator_release\` ends it first (a re-adoption is a new epoch, not a second live one)`);
         }
 
+        // The next number **this ledger** has not used for that worker. The service's `next_epoch`,
+        // now that the number is the plugin's to keep: one past the highest epoch that worker has
+        // ever had here, so a release and re-adoption is a new epoch rather than a reused one.
+        let epoch = high + 1;
         let row = #{
             "worker": worker,
             "name": name,
             "note": note,
-            "coordinator": coordinator,
+            "coordinator": caller,
+            "epoch": epoch,
         };
-        if epoch > 0 {
-            row.insert("epoch", epoch);
-        }
         adoptions.push(row);
         let wrote = write_store(store_put(store, "adoptions", adoptions), loaded.revision).await?;
         let status = ledger_text(wrote, "status");
         if status == "written" {
-            if epoch > 0 {
-                return Ok(`This ledger records it: epoch ${epoch} for ${worker} — **derived from the door's sentence, not a typed field** — which is what the halt handler reads to know whom to watch.`);
-            }
-            return Ok(`This ledger records the adoption of ${worker} with **no epoch**: the harness's sentence named none this tool could read. Halts for that worker will not be announced until a row carries an epoch, because a notice keyed on an invented epoch would be a second identity for one occurrence.`);
+            return Ok(`adopted ${worker} in epoch ${epoch}. ${live_sentence(caller, worker).await} This ledger is the record: the halt handler reads its watch list from this row, and no harness record mirrors it.`);
         }
         if status == "uncertain" {
-            return Ok(`The harness adopted it, and **this ledger's write came back uncertain** (${ledger_text(wrote, "detail")}): the row may or may not be written down, and halts for that worker are announced only if it is. Adopt again to settle it — the harness will refuse with the epoch, and this tool completes the row from that refusal.`);
+            return Ok(`the adoption of ${worker} in epoch ${epoch} **may or may not be written down**: this ledger's write came back uncertain (${ledger_text(wrote, "detail")}), and an uncertain write is not a fact. Adopt again — an adoption this ledger did write is found by the retry and answered with its epoch rather than duplicated.`);
         }
         refusal = ledger_text(wrote, "detail");
     }
-    Ok(`The harness adopted it, and **this ledger did not record it** (${refusal}): halts for that worker will not be announced. Adopt again to repair — the harness's refusal names the epoch, and this tool completes the row from it.`)
+    Err(`the adoption of ${worker} was **not written down**, so it did not happen (${refusal}). Nothing is claimed: retry, and a write that lands will be the record`);
 }
 
-// The epoch out of the harness's own sentence: `adopted {worker} in epoch {n}…` either way.
-//
-// **A bridge across an API gap.** The door returns prose; this reads one integer out of it
-// because the ledger needs a number and there is no typed field to take. It is derived, not
-// observed, and it disappears when `Doors::adopt` returns a structured result. Nothing here
-// trusts any other word of the sentence.
-//
-// Only `chars()` is used, and no negative literal appears: this Rune's `String` has no
-// `find`, and `return -1` is read as `return` (of unit) followed by unary minus, which is
-// a SUB on a tuple — both found by dispatching the file, which is the only thing that
-// compiles a tool. A tool that is never dispatched is never compiled.
-fn epoch_of(sentence) {
-    let marker = " in epoch ";
-    let want = [];
-    for c in marker.chars() {
-        want.push(`${c}`);
+// The service's two answers to "what did you see at that address", kept because they keep a live
+// session apart from a record that must never be rebound to whatever looks similar.
+async fn live_sentence(coordinator, worker) {
+    let raw = match eidolon::swarm_call("roster", #{}).await {
+        Ok(v) => v,
+        Err(_) => return "The roster could not be read, so this adoption says nothing about whether a live session carries that address: it is a record, and a record is not a liveness claim.",
+    };
+    let roster = match json::from_string(raw) {
+        Ok(v) => v,
+        Err(_) => return "The roster answered something that is not JSON, so this adoption says nothing about liveness.",
+    };
+    let rows = roster_rows(roster);
+    let claimants = claimants(rows, worker);
+    if claimants.len() == 1 {
+        let r = claimants[0];
+        let state = ledger_text(r, "state");
+        let last = ledger_text(r, "last");
+        return format_live(state, last);
     }
-    let at = 0;
-    let n = 0;
-    let any = false;
-    for c in sentence.chars() {
-        if at < want.len() {
-            if `${c}` == want[at] {
-                at += 1;
-            } else {
-                at = 0;
-            }
-            continue;
-        }
-        let d = 0;
-        let is_digit = false;
-        let k = 0;
-        for x in "0123456789".chars() {
-            if x == c {
-                d = k;
-                is_digit = true;
-            }
-            k += 1;
-        }
-        if !is_digit {
-            break;
-        }
-        n = n * 10 + d;
-        any = true;
+    if claimants.len() > 1 {
+        return (`${claimants.len()} live sessions claim that address; refusing to guess which one this adoption is about.`);
     }
-    if !any {
-        return 0;
-    }
-    n
+    "No live session carries that address right now — the record is kept, and the address is never rebound to whatever looks similar: if the harness's spelling has changed, the adoption has to be released and made again."
+}
+
+fn format_live(state, last) {
+    `A live session carries that address now: state \`${state}\`, last \`${last}\`. It is monitored from now on — one notice per observed halt, to this session.`
 }
 
 // This session's own address, best effort: "" when the roster cannot say. An adoption is
@@ -283,6 +210,57 @@ fn my_row(roster) {
         }
     }
     None
+}
+
+fn roster_rows(roster) {
+    let out = [];
+    if roster is Vec {
+        return roster;
+    }
+    if roster is Object {
+        match roster.get("sessions") {
+            Some(s) => {
+                if s is Vec {
+                    for row in s {
+                        out.push(row);
+                    }
+                }
+            }
+            None => {}
+        }
+        match roster.get("me") {
+            Some(me) => {
+                if me is Object {
+                    let session = ledger_text(me, "session");
+                    let seen = false;
+                    for row in out {
+                        if ledger_text(row, "session") == session {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if !seen {
+                        out.push(me);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    return out;
+}
+
+fn claimants(rows, session) {
+    let out = [];
+    if session == "" {
+        return out;
+    }
+    for row in rows {
+        if row is Object && ledger_text(row, "session") == session {
+            out.push(row);
+        }
+    }
+    out
 }
 
 fn text_of(v) {
