@@ -583,10 +583,17 @@ fn lifecycle_text(row, key) {
     }
 }
 
+// A field read as a boolean. **A JSON null is tested before anything interpolates it**:
+// the class of defect here is "a reader throws on a field that is present and empty",
+// and the fix belongs in every such reader, not in the two that were noticed first — a
+// null `busy` in an observation killed `hook_peer` exactly as a null `record` killed
+// `notices`. Absent, null and unparseable all read as false; nothing is guessed.
 fn lifecycle_true(v) {
     match v {
         Some(b) => {
-            if b is bool {
+            if lifecycle_null(b) {
+                false
+            } else if b is bool {
                 b
             } else {
                 `${b}` == "true"
@@ -596,10 +603,16 @@ fn lifecycle_true(v) {
     }
 }
 
+// A field read as a number, null-safe for the same reason `lifecycle_true` is. A null,
+// an absent key and an unparseable value all read as 0 — the ledger's existing word for
+// "not stated" — rather than raising. A row cannot invent a number here, and a reader
+// cannot die on one.
 fn lifecycle_number(row, key) {
     match row.get(key) {
         Some(v) => {
-            if v is i64 || v is u64 {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
                 v
             } else {
                 match `${v}`.parse::<i64>() {

@@ -125,6 +125,14 @@ check "W4: notices prints the delivered row as journaled, not retracted" "$repor
 check "W4: and the cancelled one honestly" "$report" "cancelled — the epoch was released before this row was closed as journaled"
 check_absent "W4: no row claims never sent" "$report" "never sent"
 
+# ---- W5-W7: the null class, one reader per function ----
+check_absent "W5: notices survives a null record — lifecycle_number" "$report" "W5 notices ERR"
+check "W5: and says the record number is not stated rather than inventing record 0" "$report" "the record number is not stated here"
+check_absent "W6: adoptions survives a null epoch — lifecycle_number" "$report" "W6 adoptions ERR"
+check "W6: reading it as 0, the ledger's word for not stated" "$report" "epoch 0 —"
+check_absent "W7: hook_peer survives a null busy — lifecycle_true" "$report" "W7 hook_peer ERR"
+check "W7: and treats it as busy false, which is what the ending says" "$report" "W7 hook_peer: "
+
 if [ "$fail" -ne 0 ]; then
     say "FAIL lifecycle-witness.sh: $fail check(s) failed"
     exit 1

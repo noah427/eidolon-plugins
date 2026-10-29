@@ -64,6 +64,13 @@ fn outcome_word(row, store) {
     let word = lifecycle_text(row, "outcome");
     let record = lifecycle_number(row, "record");
     if word == "written" {
+        let raw = match row.get("record") {
+            Some(v) => v,
+            None => json::from_string("null")?,
+        };
+        if lifecycle_null(raw) {
+            return Ok("journaled — the log named a record this row did not keep, so the record number is not stated here");
+        }
         return Ok(`journaled — record ${record} in this session's own log`);
     }
     if word == "cancelled" {
@@ -130,7 +137,7 @@ async fn load_store() {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:559bbf8150653059c396924ed2e5660676fc72e68ffc99fbfde4a75b012607d2
+// stamp: sha256:234c1bd2d7f0df48c00f4531e9fb112711b02cb6ba80f6c806fb66bb52e124a0
 
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }
@@ -184,7 +191,9 @@ fn lifecycle_text(row, key) {
 fn lifecycle_number(row, key) {
     match row.get(key) {
         Some(v) => {
-            if v is i64 || v is u64 {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
                 v
             } else {
                 match `${v}`.parse::<i64>() {

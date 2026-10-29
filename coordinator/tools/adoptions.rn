@@ -322,7 +322,7 @@ fn claimants(rows, session) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:559bbf8150653059c396924ed2e5660676fc72e68ffc99fbfde4a75b012607d2
+// stamp: sha256:234c1bd2d7f0df48c00f4531e9fb112711b02cb6ba80f6c806fb66bb52e124a0
 
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }
@@ -387,7 +387,9 @@ fn lifecycle_text(row, key) {
 fn lifecycle_true(v) {
     match v {
         Some(b) => {
-            if b is bool {
+            if lifecycle_null(b) {
+                false
+            } else if b is bool {
                 b
             } else {
                 `${b}` == "true"
@@ -399,7 +401,9 @@ fn lifecycle_true(v) {
 fn lifecycle_number(row, key) {
     match row.get(key) {
         Some(v) => {
-            if v is i64 || v is u64 {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
                 v
             } else {
                 match `${v}`.parse::<i64>() {

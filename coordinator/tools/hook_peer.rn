@@ -97,6 +97,11 @@ pub async fn call(input) {
     let attempt = 0;
     let settled = false;
     let said = "";
+    // The store's own words for the last refusal. Never composed here: the store knows
+    // whether it refused a compare-and-set, a body at its size bound, or a key another
+    // writer holds, and a handler that paraphrases it misdiagnoses the case it is
+    // reporting.
+    let refusal = "";
     let decision = #{ "action": "none", "why": "the ledger was not consulted" };
     while attempt < 2 {
         attempt += 1;
@@ -123,6 +128,7 @@ pub async fn call(input) {
             uncertain.push(`the ledger write came back uncertain (${lifecycle_text(wrote, "detail")}): the rows may or may not be written down, and nothing here claims they are`);
             break;
         }
+        refusal = lifecycle_text(wrote, "detail");
         let fresh = load_store().await?;
         store = fresh.store;
         revision = fresh.revision;
@@ -140,9 +146,9 @@ pub async fn call(input) {
     // journals as `failed` and re-offers — and because a lost race leaves the row
     // `pending` rather than absent, the retry finishes what this scan could not.
     if !settled {
-        uncertain.push(`no durable write for this observation: the ledger refused the compare-and-set on ${attempt} attempt(s), so the row it owes is not written down and nothing was journaled`);
+        uncertain.push(`no durable write for this observation: ${refusal}. The row it owes is not written down and nothing was journaled`);
         let wrote = store_blind(notes, uncertain).await?;
-        return Err(`this scan could not write its ledger (${lifecycle_text(wrote, "detail")}): the halt it saw is neither recorded nor delivered, and an \`Ok\` here would have closed it as done. The observation must be offered again`);
+        return Err(`this scan could not write its ledger (${refusal}): the halt it saw is neither recorded nor delivered, and an \`Ok\` here would have closed it as done. The observation must be offered again`);
     }
     notes.push(said);
     if lifecycle_text(decision, "action") != "halt" {
@@ -318,6 +324,7 @@ async fn write_store(store, revision) {
 // delivery the log never got.
 async fn store_mark(id, outcome, record) {
     let attempt = 0;
+    let detail = "";
     while attempt < 2 {
         attempt += 1;
         let loaded = load_store().await?;
@@ -335,13 +342,15 @@ async fn store_mark(id, outcome, record) {
         if status == "uncertain" {
             return Ok(#{ "ok": false, "detail": lifecycle_text(wrote, "detail") });
         }
+        detail = lifecycle_text(wrote, "detail");
     }
-    Ok(#{ "ok": false, "detail": "the store moved twice while the mark was being written" })
+    Ok(#{ "ok": false, "detail": detail })
 }
 
 // This scan's own words, into the store, in at most two attempts.
 async fn store_blind(notes, uncertain) {
     let attempt = 0;
+    let detail = "";
     while attempt < 2 {
         attempt += 1;
         let loaded = load_store().await?;
@@ -354,8 +363,9 @@ async fn store_blind(notes, uncertain) {
         if status == "uncertain" {
             return Ok(#{ "ok": false, "detail": lifecycle_text(wrote, "detail") });
         }
+        detail = lifecycle_text(wrote, "detail");
     }
-    Ok(#{ "ok": false, "detail": "the store moved twice while this scan tried to record what it saw" })
+    Ok(#{ "ok": false, "detail": detail })
 }
 
 // --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
@@ -364,7 +374,7 @@ async fn store_blind(notes, uncertain) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:559bbf8150653059c396924ed2e5660676fc72e68ffc99fbfde4a75b012607d2
+// stamp: sha256:234c1bd2d7f0df48c00f4531e9fb112711b02cb6ba80f6c806fb66bb52e124a0
 
 fn lifecycle_blind(store, notes, uncertain) {
     store.insert("blind", #{ "notes": notes, "uncertain": uncertain });
@@ -739,7 +749,9 @@ fn lifecycle_text(row, key) {
 fn lifecycle_true(v) {
     match v {
         Some(b) => {
-            if b is bool {
+            if lifecycle_null(b) {
+                false
+            } else if b is bool {
                 b
             } else {
                 `${b}` == "true"
@@ -751,7 +763,9 @@ fn lifecycle_true(v) {
 fn lifecycle_number(row, key) {
     match row.get(key) {
         Some(v) => {
-            if v is i64 || v is u64 {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
                 v
             } else {
                 match `${v}`.parse::<i64>() {

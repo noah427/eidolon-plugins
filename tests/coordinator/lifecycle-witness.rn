@@ -145,5 +145,43 @@ pub async fn run(args) {
         Ok(v) => out += `W4 notices:\n${v}\n`,
         Err(e) => out += `W4 notices ERR: ${e}\n`,
     }
+    // ---- W5-W7: the null class, one row per reader ----
+    //
+    // `lifecycle_number` and `lifecycle_true` were the same defect as `lifecycle_null`:
+    // they interpolated their argument. One documented-nullable field each, through the
+    // reader that uses it.
+    out += `W5 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "w8", "name": "", "note": "", "epoch": 1, "released_at_ms": json::from_string("null")?, "release_reason": "" }],
+            "notices": [#{ "notice_id": "nullrec01", "worker": "w8", "epoch": 1, "kind": "stuck", "state": "stuck",
+                           "last": "failed", "occurrence": "rc:41", "key_kind": "outcome", "outcome": "written",
+                           "record": json::from_string("null")?, "text": "journaled, and the record did not survive" }],
+            "gaps": [],
+        },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_notices", #{}).await {
+        Ok(v) => out += `W5 notices:\n${v}\n`,
+        Err(e) => out += `W5 notices ERR: ${e}\n`,
+    }
+    // `lifecycle_number` through `adoptions`: a null epoch must read as 0, not throw.
+    out += `W6 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "w8", "name": "", "note": "", "epoch": json::from_string("null")?,
+                             "released_at_ms": json::from_string("null")?, "release_reason": "" }],
+            "notices": [],
+            "gaps": [],
+        },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(v) => out += `W6 adoptions:\n${v}\n`,
+        Err(e) => out += `W6 adoptions ERR: ${e}\n`,
+    }
+    // `lifecycle_true` through `hook_peer`: a null `busy` must read as false, not throw.
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w8", "occurrence": "rc:42",
+            "payload": #{ "state": "ending", "last": "failed", "busy": json::from_string("null")? } }).await {
+        Ok(v) => out += `W7 hook_peer: ${v}\n`,
+        Err(e) => out += `W7 hook_peer ERR: ${e}\n`,
+    }
+
     Ok(out)
 }
