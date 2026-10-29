@@ -695,7 +695,14 @@ fn lifecycle_number(row, key) {
     }
 }
 
+// Is this adoption row history rather than a live watch? Two spellings, both honest: a
+// timestamp when something had a clock (a migrated row from the service), and the word `released`
+// when it did not — this plugin has **no clock**, so its own releases carry the word and no time
+// rather than a number nobody measured. Absence of both is "not released".
 fn lifecycle_released(row) {
+    if lifecycle_true(row.get("released")) {
+        return true;
+    }
     match row.get("released_at_ms") {
         Some(v) => !lifecycle_null(v),
         None => false,

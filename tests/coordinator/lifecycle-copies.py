@@ -34,7 +34,20 @@ MARKER = "// --- generated: the policy copy, from coordinator/lib/lifecycle.rn -
 # handler is not required to carry all of them; it may not carry one the library does
 # not define. Adding a function here is the deliberate act; `--write` does the rest.
 MANIFEST = {
+    "release.rn": [
+        "lifecycle_stated",
+        "lifecycle_epoch_word",
+        "lifecycle_store_empty",
+        "lifecycle_store_list",
+        "lifecycle_store_put",
+        "lifecycle_text",
+        "lifecycle_number",
+        "lifecycle_true",
+        "lifecycle_released",
+        "lifecycle_null",
+    ],
     "adopt.rn": [
+        "lifecycle_true",
         "lifecycle_stated",
         "lifecycle_epoch_word",
         "lifecycle_store_empty",
@@ -102,6 +115,7 @@ MANIFEST = {
         "lifecycle_null",
     ],
     "notices.rn": [
+        "lifecycle_true",
         "lifecycle_stated",
         "lifecycle_epoch_word",
         "lifecycle_store_empty",

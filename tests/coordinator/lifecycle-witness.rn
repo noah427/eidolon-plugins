@@ -241,8 +241,8 @@ pub async fn run(args) {
 
     // ---- W9: a *real* adoption, and the handler consuming it ----
     //
-    // Not a seeded row: `coordinator_adopt` writes through `eidolon::custody_adopt`, the
-    // harness records the adoption in this session's own log, and this plugin completes its
+    // Not a seeded row: `coordinator_adopt` writes into this plugin's own ledger — no core
+    // adoption verb exists to write it — and this plugin completes its
     // ledger row from the sentence the door answered. Then a halt for that worker is
     // dispatched through `hook_peer`, which reads the row `adopt` wrote — the pair that
     // never had a writer before this increment.
@@ -281,6 +281,43 @@ pub async fn run(args) {
         Err(e) => out += `W10 halt after repair ERR: ${e}\n`,
     }
     out += `W10 ledger last: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+
+    // ---- W11: release-of-monitoring, in the ledger, with no core verb ----
+    //
+    // The release is the plugin's own durable fact. Its three clauses, witnessed: the row is
+    // marked released; the epoch's **pending** notices are cancelled in the same write; a notice
+    // already journaled is untouched. Then a re-adoption is a **new epoch**, which is the proof
+    // that the release closed the old one rather than deleting it.
+    out += `W11 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "1793000000060", "name": "releasling", "note": "", "epoch": 1,
+                             "coordinator": session, "released_at_ms": json::from_string("null")?, "release_reason": "" }],
+            "notices": [
+                #{ "notice_id": "pending060", "worker": "1793000000060", "epoch": 1, "kind": "stuck", "state": "stuck",
+                   "last": "failed", "occurrence": "rc:101", "key_kind": "outcome", "outcome": "pending", "text": "owed at release" },
+                #{ "notice_id": "written060", "worker": "1793000000060", "epoch": 1, "kind": "stuck", "state": "stuck",
+                   "last": "failed", "occurrence": "rc:102", "key_kind": "outcome", "outcome": "written", "record": 41, "text": "already in the log" },
+            ],
+            "gaps": [],
+        },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_release", #{ "session": "1793000000060", "reason": "the work is done" }).await {
+        Ok(v) => out += `W11 release: ${v}\n`,
+        Err(e) => out += `W11 release ERR: ${e}\n`,
+    }
+    out += `W11 store after release: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+    match eidolon::tool_call("coordinator_notices", #{}).await {
+        Ok(v) => out += `W11 notices:\n${v}\n`,
+        Err(e) => out += `W11 notices ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_release", #{ "session": "1793000000060", "reason": "again" }).await {
+        Ok(v) => out += `W11 second release OK (WRONG): ${v}\n`,
+        Err(e) => out += `W11 second release ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000000060", "name": "releasling" }).await {
+        Ok(v) => out += `W11 re-adopt: ${v}\n`,
+        Err(e) => out += `W11 re-adopt ERR: ${e}\n`,
+    }
 
     Ok(out)
 }

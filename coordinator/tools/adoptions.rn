@@ -373,7 +373,7 @@ fn claimants(rows, session) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:0ba27bcf610273c00cde93678b824e59607ec752bf351c33591c375783db3c45
+// stamp: sha256:f3afa6f239fb2e6812b97d0654f3b1f1006e552e1d128fa3d09c9049e6854f24
 
 fn lifecycle_stated(row, key) {
     match row.get(key) {
@@ -479,6 +479,9 @@ fn lifecycle_number(row, key) {
     }
 }
 fn lifecycle_released(row) {
+    if lifecycle_true(row.get("released")) {
+        return true;
+    }
     match row.get("released_at_ms") {
         Some(v) => !lifecycle_null(v),
         None => false,

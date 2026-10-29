@@ -1,27 +1,37 @@
-// `coordinator_release`: end one adoption, by the address it was made with.
+// `coordinator_release`: end monitoring of one adopted worker — in **this plugin's ledger**.
 //
-// Releasing is an explicit act of the adopting coordinator, and it is the only
-// thing that ends monitoring: from then on no notice is created for that worker
-// under that adoption's epoch, and the notices this epoch still owes and has not
-// answered are cancelled rather than sent. What was already answered cannot be
-// retracted — the words are already in the coordinator's transcript — and the
-// history is kept, not deleted. Adopting the same worker again is a new epoch,
-// which is not a reassignment of the old one.
+// Release-of-monitoring is coordination domain (operator ruling 2026-10-29), so there is no core
+// verb to call and none is called: `custody_release` is leaving core, and a release here is a
+// durable fact in `plugin_state`, not a harness act. Nothing is killed and no pipe is touched.
+//
+// Three things, in the order the guarantee needs (`reports/…/verb-contracts.md` § release,
+// `lifecycle.rn` §2.1):
+//   1. the row is marked released **durably first** — "the release was not written down, so it did
+//      not happen" — and an uncertain write claims nothing;
+//   2. the epoch's **pending** notices become `cancelled` in the *same* compare-and-set, because
+//      the ledger is one key and that is what makes clause 1 of the guarantee atomic: once this
+//      release is durable, no notice of that epoch is ever handed to the transport;
+//   3. a notice already **journaled** is not retracted — a release cannot unwrite what a
+//      coordinator has read — and the record stays with its reason.
+//
+// No clock: this plugin has none, so the tombstone is the word `released` and the reason, never a
+// time nobody measured.
+
 pub fn manifest() {
     #{
         name: "coordinator_release",
-        description: "Release a worker this session adopted: monitoring of it stops at once, notices this adoption still owes and has not sent are cancelled, and the record is kept as history. Notices already sent are not retracted — a release cannot unwrite what a coordinator has already read. Re-adopting the same worker later starts a new epoch rather than reviving this one.",
+        description: "End monitoring of one adopted worker. The record stays, with the reason, and re-adopting the same worker later is a new epoch. Pending notices of that epoch are cancelled in the same durable write and will never be sent; a notice already journaled in the conversation is not retracted. Nothing is killed and no pipe is touched.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
             "properties": #{
                 "session": #{
                     "type": "string",
-                    "description": "The worker's durable address, exactly as it was given to `coordinator_adopt`. Echoed verbatim; never a display name.",
+                    "description": "The worker's durable address, exactly as it was adopted.",
                 },
                 "reason": #{
                     "type": "string",
-                    "description": "Free text kept with the release record, for the history.",
+                    "description": "Why monitoring ends. Kept with the record; it is not a status.",
                 },
             },
             "required": ["session"],
@@ -30,165 +40,310 @@ pub fn manifest() {
 }
 
 pub async fn call(input) {
-    let session = match text_of(input.get("session")) {
+    let worker = match text_of(input.get("session")) {
         Some(s) => s,
-        None => return Err("coordinator_release needs `session`: the worker's durable address, exactly as it was given to `coordinator_adopt`"),
+        None => return Err("coordinator_release needs `session`: the worker's durable address, exactly as it was adopted"),
     };
-    match refuse_control_chars("session", session) {
+    match refuse_control_chars("session", worker) {
         Some(e) => return Err(e),
         None => {}
     }
-    let caller = my_address().await?;
     let reason = match text_of(input.get("reason")) {
         Some(s) => s,
         None => "",
     };
-    call_service("release", #{
-        "caller": caller,
-        "session": session,
-        "reason": reason,
-    })
-    .await
-}
 
-// Everything below is the same in every coordinator_*.rn: upstream eidolon
-// compiles each tool file on its own, and a tool file is meant to be handed over
-// whole.
+    let attempt = 0;
+    let refusal = "";
+    while attempt < 2 {
+        attempt += 1;
+        let loaded = load_store().await?;
+        let store = loaded.store;
+        let adoptions = store_list(store, "adoptions");
 
-// This session's own durable address, as the harness publishes it. There is no
-// other source for it in this file: not an argument, not an environment
-// variable, not a name somebody typed.
-async fn my_address() {
-    let raw = match eidolon::swarm_call("roster", #{}).await {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}`)),
-    };
-    let roster = match json::from_string(raw) {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}; \`swarm_call("roster")\` answered: ${raw}`)),
-    };
-    let me = match my_row(roster) {
-        Some(r) => r,
-        None => {
-            return Err(no_roster(
-                "the roster carries no row for this session: `me` is null or absent, and nothing else in it marks which row is the caller — so this plugin cannot tell which address is the one it would adopt from",
-            ))
-        }
-    };
-    match me.get("session") {
-        Some(s) => {
-            let addr = `${s}`;
-            if addr == "" || addr == "null" {
-                return Err(no_roster(
-                    "this session has no durable address: the roster publishes `session` as null, and null means not established — not no-such-session. The harness has not minted an id into a log yet, and an adoption is keyed on that address, so none can be made until it exists",
-                ))
-            }
-            Ok(addr)
-        }
-        None => Err(no_roster("this session's own row carries no `session` field at all")),
-    }
-}
-
-// This session's own row: a `me` object beside the list, or the one row that
-// marks itself. Either shape is the harness's to choose; neither existing is a
-// refusal, never a guess from the first row and never a name.
-fn my_row(roster) {
-    if roster is Object {
-        match roster.get("me") {
-            Some(m) => {
-                // `me` is null when the caller has no registration of its own —
-                // `eidolon peers --json` is such a scan. Null is not a row.
-                if m is Object {
-                    return Some(m);
-                }
-                return None;
-            }
-            None => {}
-        }
-    }
-    if roster is Vec {
-        for row in roster {
-            match row.get("me") {
-                Some(flag) => {
-                    if `${flag}` == "true" {
-                        return Some(row);
-                    }
-                }
-                None => {}
+        let row = #{};
+        let live = false;
+        for a in adoptions {
+            if a is Object && ledger_text(a, "worker") == worker && !ledger_released(a) {
+                row = a;
+                live = true;
+                break;
             }
         }
+        if !live {
+            return Err(`${worker} is not adopted by this session (or was already released); there is nothing to release`);
+        }
+
+        // The epoch this release closes, if the row states one. An unstated epoch is not epoch 0:
+        // the notices it may cancel are the ones whose epoch is *also* unstated, and any other
+        // pending row is left alone and counted.
+        let stated = ledger_stated(row, "epoch");
+        let epoch = ledger_number(row, "epoch");
+        row.insert("released", true);
+        row.insert("release_reason", reason);
+
+        let notices = store_list(store, "notices");
+        let cancelled = 0;
+        let left = 0;
+        for n in notices {
+            if !(n is Object) {
+                continue;
+            }
+            if ledger_text(n, "worker") != worker || ledger_text(n, "outcome") != "pending" {
+                continue;
+            }
+            let same = ledger_stated(n, "epoch") == stated;
+            if same && (!stated || ledger_number(n, "epoch") == epoch) {
+                n.insert("outcome", "cancelled");
+                cancelled += 1;
+            } else {
+                left += 1;
+            }
+        }
+
+        let wrote = write_store(store_put(store, "notices", notices), loaded.revision).await?;
+        let status = ledger_text(wrote, "status");
+        if status == "written" {
+            return Ok(`released ${worker} (epoch ${lifecycle_epoch_word(row, "epoch")}); monitoring ends now. ${cancelled} pending notice(s) of that epoch were cancelled in the same write and will never be sent. A notice already journaled is not retracted, and the record stays with its reason${left_word(left)}.`);
+        }
+        if status == "uncertain" {
+            return Ok(`the release of ${worker} **may or may not be written down**: the write came back uncertain (${ledger_text(wrote, "detail")}). Nothing is claimed — retry, and a release this ledger did write is found by the retry (it will answer that the worker is already released rather than releasing twice).`);
+        }
+        refusal = ledger_text(wrote, "detail");
     }
-    None
+    Err(`the release of ${worker} was **not written down**, so it did not happen (${refusal})`)
 }
 
-// The refusal a harness without the structured roster gets, naming exactly what is
-// missing rather than degrading to something that would look like a working
-// release. This plugin reads session state as data: it will not parse `peers`'
-// prose, and it will not read the presence directory itself.
-fn no_roster(why) {
-    `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
+fn left_word(left) {
+    if left == 0 {
+        return "";
+    }
+    ` ${left} pending notice(s) were left alone because their epoch could not be matched to this adoption, and an unmatched epoch is not a reason to cancel one`;
 }
 
 fn text_of(v) {
     match v {
         Some(x) => {
-            let s = `${x}`;
-            // A JSON null arrives as the unit value, whose text form is `null`.
-            if s == "null" || s == "" {
-                None
+            if x is String {
+                let s = `${x}`;
+                if s == "null" {
+                    None
+                } else {
+                    Some(s)
+                }
             } else {
-                Some(s)
+                None
             }
         }
         None => None,
     }
 }
 
-// A newline in an address would forge a roster row or split a notice; a carriage
-// return or a tab is not a thing an address has. Refused before anything is sent.
 fn refuse_control_chars(field, s) {
-    if s.contains("\n") {
-        return Some(`${field} contains a newline, which would forge a row rather than name a session`);
-    }
-    if s.contains("\r") {
-        return Some(`${field} contains a carriage return`);
-    }
-    if s.contains("\t") {
-        return Some(`${field} contains a tab`);
+    for c in s.chars() {
+        let n = `${c}`;
+        if n == "\\n" || n == "\\r" || n == "\\t" {
+            return Some(`\`${field}\` carries a control character; an address is one word, and a line break in it would be a forged line wherever it is printed`);
+        }
     }
     None
 }
 
-// The monitor service (../service). Everything that decides anything lives there,
-// so that the record and the notice have one implementation and the tools stay
-// thin doors onto it.
-fn service() {
-    #{
-        name: "coordinator",
-        base_url: "http://127.0.0.1:8095",
-        token_file: "~/.config/eidolon/coordinator.token",
-        auth: #{ header: "Authorization", prefix: "Bearer " },
-        timeout_s: 30,
+// ---- the ledger, and the pure policy this tool repeats ---------------------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front of
+// workflows, so the policy cannot be imported here. Everything from `lifecycle_stated` down is the
+// library's text, emitted by `tests/coordinator/lifecycle-copies.py --write`; `lifecycle-drift.sh`
+// fails if it drifts.
+
+async fn load_store() {
+    let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = lifecycle_number(reply, "revision");
+    let store = lifecycle_store_empty();
+    match reply.get("value") {
+        Some(v) => {
+            if lifecycle_null(v) {
+                // Nothing written yet: `revision: 0, value: null` is the fact a first write compares
+                // against, not a corrupt row.
+            } else if v is String {
+                let got = json::from_string(`${v}`)?;
+                if got is Object {
+                    store = got;
+                } else {
+                    return Err(`the \`store\` row is not the object this ledger writes (${v}); it is refused rather than repaired or overwritten`);
+                }
+            } else {
+                return Err("the `store` row's value is not the JSON text this ledger writes; it is refused rather than repaired or overwritten");
+            }
+        }
+        None => {}
+    }
+    for key in ["adoptions", "notices", "gaps"] {
+        store = lifecycle_store_put(store, key, lifecycle_store_list(store, key)?);
+    }
+    Ok(#{ "store": store, "revision": revision })
+}
+
+async fn write_store(store, revision) {
+    let text = json::to_string(store)?;
+    match eidolon::plugin_state_write(#{ "key": "store", "value": text, "revision": revision }).await {
+        Ok(_) => {
+            let check = json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?)?;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        Ok(#{ "status": "written", "revision": lifecycle_number(check, "revision") })
+                    } else {
+                        Ok(#{ "status": "uncertain", "detail": "the read-back did not carry the bytes just written" })
+                    }
+                }
+                None => Ok(#{ "status": "uncertain", "detail": "the read-back carried no value" }),
+            }
+        }
+        Err(e) => {
+            let check = match json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?) {
+                Ok(v) => v,
+                Err(bad) => return Ok(#{ "status": "uncertain", "detail": `the write was refused (${e}) and the read-back would not parse (${bad})` }),
+            };
+            let same = false;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        same = true;
+                    }
+                }
+                None => {}
+            }
+            if same {
+                Ok(#{ "status": "uncertain", "detail": `the write answered an error (${e}) and the bytes are now at the path: it may have landed` })
+            } else {
+                Ok(#{ "status": "refused", "detail": `${e}` })
+            }
+        }
     }
 }
 
-// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
-async fn call_service(method, args) {
-    let body = json::to_string(#{ "method": method, "args": args })?;
-    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
-        }
-    };
-    let reply = json::from_string(sent)?;
-    if reply.status != 200 {
-        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
+fn ledger_text(row, key) {
+    lifecycle_text(row, key)
+}
+
+fn ledger_number(row, key) {
+    lifecycle_number(row, key)
+}
+
+fn ledger_released(row) {
+    lifecycle_released(row)
+}
+
+fn ledger_stated(row, key) {
+    lifecycle_stated(row, key)
+}
+
+fn store_list(store, key) {
+    lifecycle_store_list(store, key)?
+}
+
+fn store_put(store, key, list) {
+    lifecycle_store_put(store, key, list)
+}
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:f3afa6f239fb2e6812b97d0654f3b1f1006e552e1d128fa3d09c9049e6854f24
+
+fn lifecycle_stated(row, key) {
+    match row.get(key) {
+        Some(v) => !lifecycle_null(v),
+        None => false,
     }
-    let out = json::from_string(reply.body)?;
-    if out.ok {
-        Ok(out.result)
-    } else {
-        Err(out.error)
+}
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
+}
+fn lifecycle_store_empty() {
+    #{ "adoptions": [], "notices": [], "gaps": [] }
+}
+fn lifecycle_store_list(store, key) {
+    match store.get(key) {
+        None => Ok([]),
+        Some(v) => {
+            if v is Vec {
+                Ok(v)
+            } else {
+                Err(`the store's \`${key}\` is not a list (${v}); it is refused rather than repaired or overwritten`)
+            }
+        }
+    }
+}
+fn lifecycle_store_put(store, key, list) {
+    store.insert(key, list);
+    store
+}
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
+        None => "",
+    }
+}
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+fn lifecycle_true(v) {
+    match v {
+        Some(b) => {
+            if lifecycle_null(b) {
+                false
+            } else if b is bool {
+                b
+            } else {
+                `${b}` == "true"
+            }
+        }
+        None => false,
+    }
+}
+fn lifecycle_released(row) {
+    if lifecycle_true(row.get("released")) {
+        return true;
+    }
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+fn lifecycle_null(v) {
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
     }
 }
