@@ -150,8 +150,23 @@ check "W7: while a stated busy false still halts (W1, and the hooks suite)" "$re
 check_absent "W8: hook_peer decides the release without a fabricated epoch" "$report" "epoch 0 was released"
 check "W8: and says the epoch is not stated" "$report" "epoch not stated was released"
 w8=$(printf '%s\n' "$report" | sed -n '/^W8 adoptions:/,$p')
+check "W8: a start row asks the custody log" "$report" "managed start op-without-epoch"
+# Scoped to W8's own answer: the header explains both markers by name, which a whole-report
+# grep cannot tell apart from a row claiming one.
+check_absent "W8: and does not claim the log verified a start it does not know" "$w8" "  verified against the log"
+check "W8: so the marker is narrowed to the log's own refusal" "$w8" "store only — the custody log does not answer for this operation:"
 check_absent "W8: adoptions never prints a managed start's epoch as 0" "$w8" "adoption epoch 0"
 check "W8: but as not stated" "$w8" "adoption epoch not stated"
+
+# ---- W9: a real adoption, and the handler consuming it ----
+check_absent "W9: the adoption goes through the door, not the monitor" "$report" "W9 adopt ERR"
+check "W9: the door answered its own sentence, naming the epoch" "$report" "in epoch 1"
+check "W9: and this ledger completed its row from it" "$report" "This ledger records it: epoch 1"
+w9=$(printf '%s\n' "$report" | sed -n '/^W9 halt:/,$p')
+check_absent "W9: the halt handler reads the row the writer wrote" "$w9" "not adopted by this session"
+check "W9: and journals the notice it owes" "$w9" "journaled in this session's log as record"
+check "W9: which the ledger holds as written" "$w9" '\"outcome\":\"written\"'
+check "W9: keyed on the epoch the door named, not a fabricated one" "$w9" '\"epoch\":1'
 
 if [ "$fail" -ne 0 ]; then
     say "FAIL lifecycle-witness.sh: $fail check(s) failed"

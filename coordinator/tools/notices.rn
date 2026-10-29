@@ -115,7 +115,13 @@ async fn load_store() {
     let store = lifecycle_store_empty();
     match reply.get("value") {
         Some(v) => {
-            if v is String {
+            if lifecycle_null(v) {
+                // Nothing written yet. `revision: 0, value: null` is the fact a first write
+                // compares against, not a corrupt row — and a *fresh* ledger is the ordinary
+                // case for a session whose first act is an adoption. Reading it as corruption
+                // refused every handler on a session that had not seeded a store first, which
+                // is what every test did and why this was invisible.
+            } else if v is String {
                 let got = json::from_string(`${v}`)?;
                 if got is Object {
                     store = got;

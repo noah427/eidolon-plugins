@@ -34,6 +34,17 @@ MARKER = "// --- generated: the policy copy, from coordinator/lib/lifecycle.rn -
 # handler is not required to carry all of them; it may not carry one the library does
 # not define. Adding a function here is the deliberate act; `--write` does the rest.
 MANIFEST = {
+    "adopt.rn": [
+        "lifecycle_stated",
+        "lifecycle_epoch_word",
+        "lifecycle_store_empty",
+        "lifecycle_store_list",
+        "lifecycle_store_put",
+        "lifecycle_text",
+        "lifecycle_number",
+        "lifecycle_released",
+        "lifecycle_null",
+    ],
     "hook_peer.rn": [
         "lifecycle_blind",
         "lifecycle_notice_id",
@@ -181,7 +192,7 @@ def split(text):
     m = re.search(r'^fn lifecycle_', text, re.M)
     if m:
         return text[:m.start()], text[m.start():]
-    return "", ""
+    return text, ""
 
 
 def main(argv):

@@ -14,6 +14,15 @@ pub fn manifest() {
     }
 }
 
+async fn revision_of(key) {
+    let raw = eidolon::plugin_state_read(#{ "key": key }).await?;
+    let reply = json::from_string(raw)?;
+    match reply.get("revision") {
+        Some(v) => Ok(v),
+        None => Ok(0),
+    }
+}
+
 pub async fn call(input) {
     let raw = eidolon::swarm_call("roster", #{}).await?;
     let roster = json::from_string(raw)?;
@@ -41,7 +50,10 @@ pub async fn call(input) {
     let ranks = [
         #{ "session": session, "rank": "tribunus", "prefix": "Tribunus", "by": "c1" },
     ];
-    let a = eidolon::plugin_state_write(#{ "key": "store", "value": json::to_string(store)?, "revision": 0 }).await?;
-    let r = eidolon::plugin_state_write(#{ "key": "ranks", "value": json::to_string(ranks)?, "revision": 0 }).await?;
+    // Seeded at whatever revision each key stands at, not at 0: the plugin's own handlers run
+    // at session start and one of them writes the scan's words into `store` before this
+    // fixture is dispatched. A fixture that assumed it was the only writer masked exactly that.
+    let a = eidolon::plugin_state_write(#{ "key": "store", "value": json::to_string(store)?, "revision": revision_of("store").await? }).await?;
+    let r = eidolon::plugin_state_write(#{ "key": "ranks", "value": json::to_string(ranks)?, "revision": revision_of("ranks").await? }).await?;
     Ok(`seeded ${a} ${r}`)
 }

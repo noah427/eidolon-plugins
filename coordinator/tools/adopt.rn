@@ -1,17 +1,35 @@
-// `coordinator_adopt`: a coordinator adopts one worker, explicitly, by the address
-// the harness publishes for it.
+// `coordinator_adopt`: a coordinator adopts one worker, through the harness's own
+// custody door.
 //
-// The adopting side is never an argument. This session's own durable address is
-// read from the roster — the harness's answer about *this* session — and handed to
-// the service as `caller`, so a model cannot adopt a worker on somebody else's
-// behalf, and no tag, name, shared directory or claim of being a coordinator
-// produces an adoption. The token the service checks is transport auth; the
-// binding to a caller is a property of this door, which is why this file never
-// takes a coordinator as input.
+// **The adopting side is not an argument, and it is no longer this file's to send.**
+// `eidolon::custody_adopt` takes `worker`, `name` and `note` and nothing else: the
+// session acting is the attribution the dispatcher already made (`current_caller()` in
+// `crates/rune/src/host.rs:711-720`), so a model cannot adopt on somebody else's behalf
+// and no tag, name, shared directory or claim of being a coordinator produces an
+// adoption. The `caller` field the service took is gone, and its absence is the guard.
+//
+// The **guards the door owns**, in its own words (`crates/core/src/custody.rs:1390-1420`),
+// and this file does not repeat them as its own authority:
+//   * a non-empty worker, and a caller from attribution;
+//   * `a session cannot adopt itself ({worker})`;
+//   * `{worker} is already adopted here, in epoch {N} and still monitored; coordinator_release
+//     ends it first (a re-adoption is a new epoch, not a second live one)`;
+//   * the epoch is the door's next number, never a caller's;
+//   * **durable before the answer** — `the adoption was not written down, so it did not
+//     happen`, and an uncertain save reconciles rather than answering;
+//   * the answer distinguishes a live address from a record kept against an address that
+//     is never rebound to whatever looks similar.
+//
+// What stays here is the **second act**: the harness's record is authoritative, and this
+// plugin also keeps a row, because the halt handler reads its watch list from the ledger
+// and there is no primitive that reads an adoption back (`custody_inspect` answers for a
+// managed start's operation, and an adoption has none). Two stores are two facts, and
+// this file says which one it is reporting.
+
 pub fn manifest() {
     #{
         name: "coordinator_adopt",
-        description: "Adopt a worker session, explicitly and by durable address: from then on this session is its coordinator, and the monitor sends this session one notice per observed halt of it. The address is the harness's, echoed verbatim — never a display name, and never a tag. Adoption confers no authority over the worker: it routes notices and nothing else.",
+        description: "Adopt a worker session, explicitly and by durable address, through the harness's custody door: from then on this session is its coordinator, and the halt handler announces one notice per observed halt of it. The address is the harness's, echoed verbatim — never a display name and never a tag. Adoption confers no authority over the worker: it routes notices and nothing else. A second record is kept in this plugin's own ledger, because that is where the halt handler reads its watch list from; the answer says what the harness adopted and what this ledger recorded.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
@@ -35,17 +53,13 @@ pub fn manifest() {
 }
 
 pub async fn call(input) {
-    let session = match text_of(input.get("session")) {
+    let worker = match text_of(input.get("session")) {
         Some(s) => s,
         None => return Err("coordinator_adopt needs `session`: the worker's durable address, exactly as `eidolon peers` prints it — never a display name"),
     };
-    match refuse_control_chars("session", session) {
+    match refuse_control_chars("session", worker) {
         Some(e) => return Err(e),
         None => {}
-    }
-    let caller = my_address().await?;
-    if caller == session {
-        return Err(`a session cannot adopt itself (${session}): an adoption is one session's act about another, and this session is that one`);
     }
     let name = match text_of(input.get("name")) {
         Some(s) => s,
@@ -55,62 +69,183 @@ pub async fn call(input) {
         Some(s) => s,
         None => "",
     };
-    call_service("adopt", #{
-        "caller": caller,
-        "session": session,
-        "name": name,
-        "note": note,
-    })
-    .await
+
+    // This session's own address is **not** sent anywhere — the door has the attribution.
+    // It is read for two local facts: the courtesy refusal of a self-adoption, and the
+    // `coordinator` field the notice id is derived over. A roster that cannot say leaves
+    // both unstated rather than refusing the adoption, because the adoption is the
+    // harness's act and does not depend on this plugin's view of the roster.
+    let caller = own_address().await;
+    if caller != "" && caller == worker {
+        return Err(`a session cannot adopt itself (${worker}): an adoption is one session's act about another, and this session is that one`);
+    }
+
+    match eidolon::custody_adopt(#{ "worker": worker, "name": name, "note": note }).await {
+        Ok(raw) => {
+            let reply = json::from_string(raw)?;
+            let sentence = ledger_text(reply, "adopted");
+            if sentence == "" {
+                return Err(`the custody door answered without an \`adopted\` sentence: ${raw}. The adoption may or may not have been written; the door is the record, and this ledger will not invent one`);
+            }
+            // The epoch is one integer out of the harness's own sentence, and this is the
+            // one place this file reads prose. It is needed because the halt handler's
+            // notice id is derived over it; if it cannot be read, the row is written
+            // without an epoch and the handler says so rather than keying a notice on 0.
+            let epoch = epoch_of(sentence);
+            let wrote = record(worker, name, note, caller, epoch).await?;
+            Ok(`${sentence}\n${wrote}`)
+        }
+        Err(e) => {
+            // The one refusal that is also a read: this plugin already holds a live
+            // adoption of this worker, and the sentence names its epoch. That is the
+            // repair path for a crash between the door's write and this ledger's — the
+            // row is completed from the refusal instead of the adoption being refused
+            // twice by two stores that disagree.
+            if `${e}`.contains("is already adopted here, in epoch") {
+                let epoch = epoch_of(`${e}`);
+                let wrote = record(worker, name, note, caller, epoch).await?;
+                return Ok(`the harness already held this adoption: ${e}\n${wrote}`);
+            }
+            Err(`${e}`)
+        }
+    }
 }
 
-// Everything below is the same in every coordinator_*.rn: upstream eidolon
-// compiles each tool file on its own, and a tool file is meant to be handed over
-// whole.
+// Write this ledger's row, and answer what it did. Never a claim the write did not earn.
+async fn record(worker, name, note, coordinator, epoch) {
+    let attempt = 0;
+    let refusal = "";
+    while attempt < 2 {
+        attempt += 1;
+        let loaded = load_store().await?;
+        let store = loaded.store;
+        // `store_list` answers the list (its own `?` is inside the wrapper), so nothing is
+        // tried here — a `?` on a Vec is "not supported as try operand", which is how this
+        // file learned that a Rune `?` must carry a Result and nothing else.
+        let adoptions = store_list(store, "adoptions");
 
-// This session's own durable address, as the harness publishes it. There is no
-// other source for it in this file: not an argument, not an environment
-// variable, not a name somebody typed.
-async fn my_address() {
+        // What this ledger already knows about this worker, which is a different question
+        // from what the door knows: the row may be missing, live, or live at another epoch.
+        let existing = #{};
+        let seen = false;
+        for a in adoptions {
+            if a is Object && ledger_text(a, "worker") == worker && !ledger_released(a) {
+                existing = a;
+                seen = true;
+                break;
+            }
+        }
+        if seen {
+            let held = ledger_number(existing, "epoch");
+            if !ledger_stated(existing, "epoch") || held == epoch {
+                return Ok(`This ledger already records epoch ${lifecycle_epoch_word(existing, "epoch")} for that worker, so it wrote nothing: the harness's adoption and this ledger's row agree.`);
+            }
+            return Err(`state disagreement: the harness says epoch ${epoch}, and this ledger holds a live adoption of ${worker} in epoch ${held}. Nothing was written. Reconcile the two by hand — a second live row would be a second identity for one adoption`);
+        }
+
+        let row = #{
+            "worker": worker,
+            "name": name,
+            "note": note,
+            "coordinator": coordinator,
+        };
+        if epoch > 0 {
+            row.insert("epoch", epoch);
+        }
+        adoptions.push(row);
+        let wrote = write_store(store_put(store, "adoptions", adoptions), loaded.revision).await?;
+        let status = ledger_text(wrote, "status");
+        if status == "written" {
+            if epoch > 0 {
+                return Ok(`This ledger records it: epoch ${epoch} for ${worker}, which is what the halt handler reads to know whom to watch.`);
+            }
+            return Ok(`This ledger records the adoption of ${worker} with **no epoch**: the harness's sentence named none this tool could read. Halts for that worker will not be announced until a row carries an epoch, because a notice keyed on an invented epoch would be a second identity for one occurrence.`);
+        }
+        if status == "uncertain" {
+            return Ok(`The harness adopted it, and **this ledger's write came back uncertain** (${ledger_text(wrote, "detail")}): the row may or may not be written down, and halts for that worker are announced only if it is. Adopt again to settle it — the harness will refuse with the epoch, and this tool completes the row from that refusal.`);
+        }
+        refusal = ledger_text(wrote, "detail");
+    }
+    Ok(`The harness adopted it, and **this ledger did not record it** (${refusal}): halts for that worker will not be announced. Adopt again to repair — the harness's refusal names the epoch, and this tool completes the row from it.`)
+}
+
+// The epoch out of the harness's own sentence: `adopted {worker} in epoch {n}…` either way.
+//
+// Only `chars()` is used, and no negative literal appears: this Rune's `String` has no
+// `find`, and `return -1` is read as `return` (of unit) followed by unary minus, which is
+// a SUB on a tuple — both found by dispatching the file, which is the only thing that
+// compiles a tool. A tool that is never dispatched is never compiled.
+fn epoch_of(sentence) {
+    let marker = " in epoch ";
+    let want = [];
+    for c in marker.chars() {
+        want.push(`${c}`);
+    }
+    let at = 0;
+    let n = 0;
+    let any = false;
+    for c in sentence.chars() {
+        if at < want.len() {
+            if `${c}` == want[at] {
+                at += 1;
+            } else {
+                at = 0;
+            }
+            continue;
+        }
+        let d = 0;
+        let is_digit = false;
+        let k = 0;
+        for x in "0123456789".chars() {
+            if x == c {
+                d = k;
+                is_digit = true;
+            }
+            k += 1;
+        }
+        if !is_digit {
+            break;
+        }
+        n = n * 10 + d;
+        any = true;
+    }
+    if !any {
+        return 0;
+    }
+    n
+}
+
+// This session's own address, best effort: "" when the roster cannot say. An adoption is
+// the harness's act and must not be refused because this plugin cannot see its own row.
+async fn own_address() {
     let raw = match eidolon::swarm_call("roster", #{}).await {
         Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}`)),
+        Err(_) => return "",
     };
     let roster = match json::from_string(raw) {
         Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}; \`swarm_call("roster")\` answered: ${raw}`)),
+        Err(_) => return "",
     };
     let me = match my_row(roster) {
         Some(r) => r,
-        None => {
-            return Err(no_roster(
-                "the roster carries no row for this session: `me` is null or absent, and nothing else in it marks which row is the caller — so this plugin cannot tell which address is the one it would adopt from",
-            ))
-        }
+        None => return "",
     };
     match me.get("session") {
         Some(s) => {
             let addr = `${s}`;
-            if addr == "" || addr == "null" {
-                return Err(no_roster(
-                    "this session has no durable address: the roster publishes `session` as null, and null means not established — not no-such-session. The harness has not minted an id into a log yet, and an adoption is keyed on that address, so none can be made until it exists",
-                ))
+            if addr == "null" {
+                return "";
             }
-            Ok(addr)
+            addr
         }
-        None => Err(no_roster("this session's own row carries no `session` field at all")),
+        None => "",
     }
 }
 
-// This session's own row: a `me` object beside the list, or the one row that
-// marks itself. Either shape is the harness's to choose; neither existing is a
-// refusal, never a guess from the first row and never a name.
 fn my_row(roster) {
     if roster is Object {
         match roster.get("me") {
             Some(m) => {
-                // `me` is null when the caller has no registration of its own —
-                // `eidolon peers --json` is such a scan. Null is not a row.
                 if m is Object {
                     return Some(m);
                 }
@@ -134,74 +269,219 @@ fn my_row(roster) {
     None
 }
 
-// The refusal a harness without the structured roster gets, naming exactly what is
-// missing rather than degrading to something that would look like a working
-// adoption. This plugin reads session state as data: it will not parse `peers`'
-// prose, and it will not read the presence directory itself.
-fn no_roster(why) {
-    `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
-}
-
 fn text_of(v) {
     match v {
         Some(x) => {
-            let s = `${x}`;
-            // A JSON null arrives as the unit value, whose text form is `null`.
-            if s == "null" || s == "" {
-                None
+            if x is String {
+                let s = `${x}`;
+                if s == "null" {
+                    None
+                } else {
+                    Some(s)
+                }
             } else {
-                Some(s)
+                None
             }
         }
         None => None,
     }
 }
 
-// A newline in an address or a name would forge a roster row or split a notice;
-// a NUL or a tab is not a thing an address has. Refused before anything is sent.
+// A durable address is one path-component-shaped word: a control character in it would
+// be a forged line in whatever prints it next.
 fn refuse_control_chars(field, s) {
-    if s.contains("\n") {
-        return Some(`${field} contains a newline, which would forge a row rather than name a session`);
-    }
-    if s.contains("\r") {
-        return Some(`${field} contains a carriage return`);
-    }
-    if s.contains("\t") {
-        return Some(`${field} contains a tab`);
+    for c in s.chars() {
+        let n = `${c}`;
+        if n == "\\n" || n == "\\r" || n == "\\t" {
+            return Some(`\`${field}\` carries a control character; an address is one word, and a line break in it would be a forged line wherever it is printed`);
+        }
     }
     None
 }
 
-// The monitor service (../service). Everything that decides anything lives there,
-// so that the record and the notice have one implementation and the tools stay
-// thin doors onto it.
-fn service() {
-    #{
-        name: "coordinator",
-        base_url: "http://127.0.0.1:8095",
-        token_file: "~/.config/eidolon/coordinator.token",
-        auth: #{ header: "Authorization", prefix: "Bearer " },
-        timeout_s: 30,
+// ---- the ledger, and the pure policy this tool repeats ---------------------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front of
+// workflows, so the policy cannot be imported here. Everything from `lifecycle_stated`
+// down is the library's text, emitted by `tests/coordinator/lifecycle-copies.py --write`;
+// `lifecycle-drift.sh` fails if it drifts.
+
+async fn load_store() {
+    let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = lifecycle_number(reply, "revision");
+    let store = lifecycle_store_empty();
+    match reply.get("value") {
+        Some(v) => {
+            if lifecycle_null(v) {
+                // Nothing written yet. `revision: 0, value: null` is the fact a first write
+                // compares against, not a corrupt row — and a *fresh* ledger is the ordinary
+                // case for a session whose first act is an adoption. Reading it as corruption
+                // refused every handler on a session that had not seeded a store first, which
+                // is what every test did and why this was invisible.
+            } else if v is String {
+                let got = json::from_string(`${v}`)?;
+                if got is Object {
+                    store = got;
+                } else {
+                    return Err(`the \`store\` row is not the object this ledger writes (${v}); it is refused rather than repaired or overwritten`);
+                }
+            } else {
+                return Err("the `store` row's value is not the JSON text this ledger writes; it is refused rather than repaired or overwritten");
+            }
+        }
+        None => {}
+    }
+    for key in ["adoptions", "notices", "gaps"] {
+        store = lifecycle_store_put(store, key, lifecycle_store_list(store, key)?);
+    }
+    Ok(#{ "store": store, "revision": revision })
+}
+
+async fn write_store(store, revision) {
+    let text = json::to_string(store)?;
+    match eidolon::plugin_state_write(#{ "key": "store", "value": text, "revision": revision }).await {
+        Ok(_) => {
+            let check = json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?)?;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        Ok(#{ "status": "written", "revision": lifecycle_number(check, "revision") })
+                    } else {
+                        Ok(#{ "status": "uncertain", "detail": "the read-back did not carry the bytes just written" })
+                    }
+                }
+                None => Ok(#{ "status": "uncertain", "detail": "the read-back carried no value" }),
+            }
+        }
+        Err(e) => {
+            let check = match json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?) {
+                Ok(v) => v,
+                Err(bad) => return Ok(#{ "status": "uncertain", "detail": `the write was refused (${e}) and the read-back would not parse (${bad})` }),
+            };
+            let same = false;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        same = true;
+                    }
+                }
+                None => {}
+            }
+            if same {
+                Ok(#{ "status": "uncertain", "detail": `the write answered an error (${e}) and the bytes are now at the path: it may have landed` })
+            } else {
+                Ok(#{ "status": "refused", "detail": `${e}` })
+            }
+        }
     }
 }
 
-// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
-async fn call_service(method, args) {
-    let body = json::to_string(#{ "method": method, "args": args })?;
-    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
-        }
-    };
-    let reply = json::from_string(sent)?;
-    if reply.status != 200 {
-        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
+// The three readers this file needs under names of its own, so a caller reads a sentence
+// rather than a library idiom. Each is one line over the generated policy below.
+fn ledger_text(row, key) {
+    lifecycle_text(row, key)
+}
+
+fn ledger_number(row, key) {
+    lifecycle_number(row, key)
+}
+
+fn ledger_released(row) {
+    lifecycle_released(row)
+}
+
+fn ledger_stated(row, key) {
+    lifecycle_stated(row, key)
+}
+
+fn store_list(store, key) {
+    lifecycle_store_list(store, key)?
+}
+
+fn store_put(store, key, list) {
+    lifecycle_store_put(store, key, list)
+}
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:0ba27bcf610273c00cde93678b824e59607ec752bf351c33591c375783db3c45
+
+fn lifecycle_stated(row, key) {
+    match row.get(key) {
+        Some(v) => !lifecycle_null(v),
+        None => false,
     }
-    let out = json::from_string(reply.body)?;
-    if out.ok {
-        Ok(out.result)
-    } else {
-        Err(out.error)
+}
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
+}
+fn lifecycle_store_empty() {
+    #{ "adoptions": [], "notices": [], "gaps": [] }
+}
+fn lifecycle_store_list(store, key) {
+    match store.get(key) {
+        None => Ok([]),
+        Some(v) => {
+            if v is Vec {
+                Ok(v)
+            } else {
+                Err(`the store's \`${key}\` is not a list (${v}); it is refused rather than repaired or overwritten`)
+            }
+        }
+    }
+}
+fn lifecycle_store_put(store, key, list) {
+    store.insert(key, list);
+    store
+}
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
+        None => "",
+    }
+}
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+fn lifecycle_released(row) {
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+fn lifecycle_null(v) {
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
     }
 }

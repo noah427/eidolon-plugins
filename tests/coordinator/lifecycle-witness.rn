@@ -239,5 +239,21 @@ pub async fn run(args) {
         Err(e) => out += `W8 adoptions ERR: ${e}\n`,
     }
 
+    // ---- W9: a *real* adoption, and the handler consuming it ----
+    //
+    // Not a seeded row: `coordinator_adopt` writes through `eidolon::custody_adopt`, the
+    // harness records the adoption in this session's own log, and this plugin completes its
+    // ledger row from the sentence the door answered. Then a halt for that worker is
+    // dispatched through `hook_peer`, which reads the row `adopt` wrote — the pair that
+    // never had a writer before this increment.
+    out += `W9 adopt: ${eidolon::tool_call("coordinator_adopt", #{ "session": "1793000000042", "name": "grinder", "note": "first increment" }).await?}\n`;
+    out += `W9 store after adopt: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "1793000000042", "occurrence": "rc:81",
+            "payload": #{ "state": "ending", "last": "failed", "busy": false } }).await {
+        Ok(v) => out += `W9 halt: ${v}\n`,
+        Err(e) => out += `W9 halt ERR: ${e}\n`,
+    }
+    out += `W9 store after halt: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+
     Ok(out)
 }

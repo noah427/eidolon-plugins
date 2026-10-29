@@ -63,10 +63,14 @@ pub async fn call(input) {
         out += "the roster publishes no `session` for any live row: a session with no log has no id to name, so no adoption can be resolved to one. Null means not established, not no-such-session.\n";
     }
 
-    // What a row here can be checked against. Said once, in the answer's own words,
-    // because it is the one thing this tool cannot do and a reader has to know which
-    // kind of fact they are looking at.
-    out += "\nEvery adoption row below is marked `store only`. This harness publishes no way to read an adoption record back — the `custody_inspect` primitive exists on the custody-doors branch and not in the integration tree — so a row is what this plugin wrote down, not a record checked against the custody log. When those doors land, one `custody_inspect` per start makes the marker `verified against the log` or names the disagreement; until then no row can be marked the second way, and this tool will not pretend otherwise.\n\n";
+    // Which facts here are checked, and which are not. The custody doors are attached in
+    // this harness now, and `eidolon::custody_inspect` answers for one thing: a **managed
+    // start's operation**. A start row is therefore checked against the log and marked
+    // `verified against the log`, or marked with the refusal when the log does not know it.
+    // An **adoption** has no operation, and no primitive reads an adoption back by worker —
+    // the one oracle is `custody_adopt`'s own refusal at write time — so an adoption row
+    // stays `store only`, and that is a narrower claim than it used to be.
+    out += "\nA **managed start** row is checked against the custody log with one `custody_inspect` per operation, and says which it is: `verified against the log`, or `store only` with the log's refusal. An **adoption** row is `store only`: no primitive reads an adoption back by worker — `custody_inspect` answers for an operation, and an adoption has none — so an adoption row is what this plugin wrote down, and the only oracle for it is `custody_adopt`'s refusal at the moment of writing.\n\n";
 
     // The service's own rendering of a managed start, kept because it is the
     // vocabulary an operator has already read: the durable phase is history, not
@@ -76,9 +80,29 @@ pub async fn call(input) {
             out += "a managed-start row is not an object; it is shown as it stands\n";
             continue;
         }
-        out += `managed start ${lifecycle_text(start, "operation")}: ${start_rank_word(start)}; durable phase ${lifecycle_text(start, "phase")}, session ${lifecycle_text(start, "session")}, adoption epoch ${lifecycle_epoch_word(start, "adoption_epoch")} (not current liveness)\n`;
-        out += `  cancellation: ${start_cancellation(start)} (historical exit receipt, not current liveness)\n`;
-        out += "  store only\n";
+        let operation = lifecycle_text(start, "operation");
+        // One `custody_inspect` per operation: cheap at this scale (the operator's whole
+        // store is 94 starts), and it is the only way a start row can be a *checked* fact
+        // rather than a memory.
+        match eidolon::custody_inspect(#{ "operation": operation }).await {
+            Ok(raw) => {
+                let view = match json::from_string(raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        out += `managed start ${operation}: the custody log answered something that is not JSON (${e})\n  store only\n`;
+                        continue;
+                    }
+                };
+                out += `managed start ${operation}: ${start_rank_word(start)}; phase ${lifecycle_text(view, "phase")}, session ${lifecycle_text(view, "session")}, adoption epoch ${lifecycle_epoch_word(view, "adoption_epoch")} (the log's answer, not current liveness)\n`;
+                out += `  cancellation: ${start_cancellation(view)} (historical exit receipt, not current liveness)\n`;
+                out += "  verified against the log\n";
+            }
+            Err(e) => {
+                out += `managed start ${operation}: ${start_rank_word(start)}; this ledger records phase ${lifecycle_text(start, "phase")}, session ${lifecycle_text(start, "session")}, adoption epoch ${lifecycle_epoch_word(start, "adoption_epoch")} (not current liveness)\n`;
+                out += `  cancellation: ${start_cancellation(start)} (historical exit receipt, not current liveness)\n`;
+                out += `  store only — the custody log does not answer for this operation: ${e}\n`;
+            }
+        }
     }
     if starts.len() > 0 {
         out += "\n";
@@ -241,7 +265,13 @@ async fn load_store() {
     let store = lifecycle_store_empty();
     match reply.get("value") {
         Some(v) => {
-            if v is String {
+            if lifecycle_null(v) {
+                // Nothing written yet. `revision: 0, value: null` is the fact a first write
+                // compares against, not a corrupt row — and a *fresh* ledger is the ordinary
+                // case for a session whose first act is an adoption. Reading it as corruption
+                // refused every handler on a session that had not seeded a store first, which
+                // is what every test did and why this was invisible.
+            } else if v is String {
                 let got = json::from_string(`${v}`)?;
                 if got is Object {
                     store = got;
