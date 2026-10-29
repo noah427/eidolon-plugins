@@ -68,6 +68,13 @@ pub async fn call(input) {
     for row in lifecycle_pending_rows(store)? {
         let id = lifecycle_text(row, "notice_id");
         let worker = lifecycle_text(row, "worker");
+        // An epoch the row does not state is not epoch 0, and it is certainly not a release.
+        // Cancelling here on a fabricated 0 once closed a live epoch's obligation as if the
+        // service had cancelled it: fabrication on one side, phantom release on the other.
+        if !lifecycle_stated(row, "epoch") {
+            notes.push(`notice ${id}: the row states no epoch, so it cannot be matched to an adoption and is not cancelled; it stays \`pending\``);
+            continue;
+        }
         let epoch = lifecycle_number(row, "epoch");
         let live = lifecycle_epoch_live(store, worker, epoch)?;
         if !live {
@@ -79,7 +86,7 @@ pub async fn call(input) {
             Ok(raw) => {
                 let reply = json::from_string(raw)?;
                 let record = lifecycle_number(reply, "record");
-                marks.push(#{ "notice_id": id, "outcome": "written", "record": record });
+                marks.push(#{ "notice_id": id, "outcome": "written", "record": record, "stated": lifecycle_stated(reply, "record") });
                 notes.push(`notice ${id}: open on this scan and journaled now; the log answered \`${lifecycle_text(reply, "outcome")}\` as record ${record}`);
             }
             Err(e) => {
@@ -176,7 +183,7 @@ pub async fn call(input) {
     let fresh = load_store().await?;
     let still_live = lifecycle_epoch_live(fresh.store, worker, lifecycle_number(row, "epoch"))?;
     if !still_live {
-        let marked = store_mark(id, "cancelled", 0).await?;
+        let marked = store_mark(id, "cancelled", 0, false).await?;
         if !lifecycle_true(marked.get("ok")) {
             uncertain.push(`notice ${id}: the epoch was released before it was journaled, but cancelling the row did not land (${lifecycle_text(marked, "detail")}); it stays \`pending\` and the next scan cancels it`);
         } else {
@@ -189,7 +196,7 @@ pub async fn call(input) {
         Ok(raw) => {
             let reply = json::from_string(raw)?;
             let record = lifecycle_number(reply, "record");
-            let marked = store_mark(id, "written", record).await?;
+            let marked = store_mark(id, "written", record, lifecycle_stated(reply, "record")).await?;
             if lifecycle_true(marked.get("ok")) {
                 notes.push(`${worker}: halted with occurrence \`${occurrence}\`; notice ${id} is journaled in this session's log as record ${record}`);
             } else {
@@ -322,7 +329,7 @@ async fn write_store(store, revision) {
 // Set one mark on the store as it stands, in at most two attempts. Used only after
 // the journal, never before it: a mark that landed first would be a ledger claiming a
 // delivery the log never got.
-async fn store_mark(id, outcome, record) {
+async fn store_mark(id, outcome, record, stated) {
     let attempt = 0;
     let detail = "";
     while attempt < 2 {
@@ -330,7 +337,7 @@ async fn store_mark(id, outcome, record) {
         let loaded = load_store().await?;
         let store = loaded.store;
         if outcome == "written" {
-            store = lifecycle_mark_written(store, id, record);
+            store = lifecycle_mark_written(store, id, record, stated);
         } else {
             store = lifecycle_mark_cancelled(store, id);
         }
@@ -374,7 +381,7 @@ async fn store_blind(notes, uncertain) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:ff26797396852481b827ffb9aeed6b34ead90ac1b720c6d4f4ca7cfd741d6612
+// stamp: sha256:1eeee2a3b5ef2fee9d5617a7b013eb9cb05dd26a3ca12f7c061b0a61df6c3b0b
 
 fn lifecycle_blind(store, notes, uncertain) {
     store.insert("blind", #{ "notes": notes, "uncertain": uncertain });
@@ -454,12 +461,16 @@ fn lifecycle_evaluate(observation) {
     let last = lifecycle_text(payload, "last");
     let busy = lifecycle_tristate(payload, "busy");
     if busy == "unknown" {
-        // A halt is a claim that the peer stopped. `busy` not stated is not a claim that
-        // it stopped, and deciding one from it would put a notice in the conversation for
-        // a peer that is merely not reporting — noise that makes the true notices cheaper
-        // to ignore. So an unknown defers: no notice, and the next observation decides.
-        // (The deferred observation is re-offered by the harness, and `hook_peer` writes
-        // nothing, so nothing is lost by waiting.)
+        // A halt is a claim that the peer stopped, and `busy` is what the harness publishes
+        // about a turn in flight: `PeerSnapshot.busy` is a plain `bool`
+        // (`crates/core/src/lifecycle.rs:359-373,612-620`), so the producer cannot write a
+        // null here. A null is therefore an **absence**, not a defined unknown — an
+        // observation from a writer that did not say — and the only safe reading of an
+        // absence in a field that authorises a claim is "do not make the claim". Deciding a
+        // halt from it would put a notice in the conversation for a peer that may simply not
+        // be reporting, and nothing retracts a notice that was never true. So an unknown
+        // **defers**: no notice, and the next observation decides. Waiting costs nothing —
+        // the harness re-offers the observation and `hook_peer` writes nothing for it.
         return #{ "action": "none", "why": `ending \`${last}\` with \`busy\` not stated: an unknown is not a false, and a halt decided from it would be invented rather than observed` };
     }
     if busy == "true" {
@@ -553,6 +564,12 @@ fn lifecycle_notice_args(row) {
         "occurrence": lifecycle_text(row, "occurrence"),
     }
 }
+fn lifecycle_stated(row, key) {
+    match row.get(key) {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }
 }
@@ -600,6 +617,11 @@ fn lifecycle_find_adoption(adoptions, worker) {
 fn lifecycle_epoch_live(store, worker, epoch) {
     let adoptions = lifecycle_store_list(store, "adoptions")?;
     for a in lifecycle_live_adoptions(adoptions) {
+        // An adoption that states no epoch cannot be the adoption this epoch belongs to:
+        // matching it would be matching a fabricated 0 against a fabricated 0.
+        if !lifecycle_stated(a, "epoch") {
+            continue;
+        }
         if lifecycle_text(a, "worker") == worker && lifecycle_number(a, "epoch") == epoch {
             return Ok(true);
         }
@@ -657,6 +679,9 @@ fn lifecycle_decide(store, observation) {
         }
         return Ok(#{ "action": "none", "why": `${worker}: not adopted by this session; nothing announced` });
     }
+    if !lifecycle_stated(adoption, "epoch") {
+        return Ok(#{ "action": "none", "why": `${worker}: the adoption row states no epoch, so no notice can be keyed on this halt — an id derived from an invented epoch would be a second identity for the same occurrence, and a row nobody can match to an adoption` });
+    }
     let occurrence = lifecycle_text(observation, "occurrence");
     if occurrence == "" {
         return Ok(#{ "action": "none", "why": `${worker}: halted, but the observation carries no occurrence token; no notice, because a notice keyed on the ending alone would repeat` });
@@ -696,12 +721,14 @@ fn lifecycle_record(store, decision) {
     }
     Ok(#{ "dirty": false, "store": store, "note": lifecycle_text(decision, "why") })
 }
-fn lifecycle_mark_written(store, notice_id, record) {
+fn lifecycle_mark_written(store, notice_id, record, stated) {
     let notices = lifecycle_store_list(store, "notices")?;
     for n in notices {
         if n is Object && lifecycle_text(n, "notice_id") == notice_id {
             n.insert("outcome", "written");
-            n.insert("record", record);
+            if stated {
+                n.insert("record", record);
+            }
         }
     }
     lifecycle_store_put(store, "notices", notices)
@@ -723,7 +750,7 @@ fn lifecycle_apply_marks(store, marks) {
         }
         let id = lifecycle_text(m, "notice_id");
         if lifecycle_text(m, "outcome") == "written" {
-            out = lifecycle_mark_written(out, id, lifecycle_number(m, "record"));
+            out = lifecycle_mark_written(out, id, lifecycle_number(m, "record"), lifecycle_true(m.get("stated")));
         } else {
             out = lifecycle_mark_cancelled(out, id);
         }

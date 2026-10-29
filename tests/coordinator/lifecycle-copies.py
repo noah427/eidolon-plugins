@@ -47,6 +47,7 @@ MANIFEST = {
         "lifecycle_notice",
         "lifecycle_notice_text",
         "lifecycle_notice_args",
+        "lifecycle_stated",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",
@@ -70,6 +71,7 @@ MANIFEST = {
         "lifecycle_null",
     ],
     "hook_ready.rn": [
+        "lifecycle_stated",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",
@@ -87,6 +89,7 @@ MANIFEST = {
         "lifecycle_null",
     ],
     "notices.rn": [
+        "lifecycle_stated",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",
@@ -98,6 +101,7 @@ MANIFEST = {
         "lifecycle_null",
     ],
     "adoptions.rn": [
+        "lifecycle_stated",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",

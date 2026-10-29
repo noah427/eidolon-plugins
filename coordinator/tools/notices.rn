@@ -86,6 +86,9 @@ fn outcome_word(row, store) {
         return Ok("cancelled — the epoch was released before this row was closed as journaled. This ledger never journaled it on purpose; a journal call that landed without its mark would not be visible here, and the log is the only record of that");
     }
     if word == "pending" {
+        if !lifecycle_stated(row, "epoch") {
+            return Ok("owed, and the row states no epoch — it cannot be matched to an adoption, so it stays pending rather than being cancelled");
+        }
         let live = lifecycle_epoch_live(store, lifecycle_text(row, "worker"), lifecycle_number(row, "epoch"))?;
         if live {
             return Ok("owed, not yet journaled");
@@ -146,8 +149,14 @@ async fn load_store() {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:ff26797396852481b827ffb9aeed6b34ead90ac1b720c6d4f4ca7cfd741d6612
+// stamp: sha256:1eeee2a3b5ef2fee9d5617a7b013eb9cb05dd26a3ca12f7c061b0a61df6c3b0b
 
+fn lifecycle_stated(row, key) {
+    match row.get(key) {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }
 }
@@ -179,6 +188,11 @@ fn lifecycle_live_adoptions(adoptions) {
 fn lifecycle_epoch_live(store, worker, epoch) {
     let adoptions = lifecycle_store_list(store, "adoptions")?;
     for a in lifecycle_live_adoptions(adoptions) {
+        // An adoption that states no epoch cannot be the adoption this epoch belongs to:
+        // matching it would be matching a fabricated 0 against a fabricated 0.
+        if !lifecycle_stated(a, "epoch") {
+            continue;
+        }
         if lifecycle_text(a, "worker") == worker && lifecycle_number(a, "epoch") == epoch {
             return Ok(true);
         }

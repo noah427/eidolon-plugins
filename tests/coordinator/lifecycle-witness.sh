@@ -131,6 +131,16 @@ check "W5: and says the record number is not stated rather than inventing record
 check_absent "W6: adoptions survives a null epoch — lifecycle_number" "$report" "W6 adoptions ERR"
 check "W6: and renders it as not stated" "$report" "epoch not stated —"
 check_absent "W6: never as a number-shaped zero" "$report" "epoch 0 —"
+check_absent "W6: the reconcile does not throw on an unstated epoch" "$report" "W6 reconcile ERR"
+check "W6: it says the row stays pending because it cannot be matched" "$report" "states no epoch, so it cannot be matched to an adoption and is not cancelled"
+check "W6: and the row is still pending in the store — no phantom release" "$report" '\"notice_id\":\"nullep01\"'
+# Scoped to W6's own answer: the report also carries W4's *genuine* cancellation, whose
+# sentence this must not appear for an unstated epoch.
+w6=$(printf '%s\n' "$report" | sed -n '/^W6 notices:/,/^W7 /p')
+check "W6: notices says it is owed and unmatched instead" "$w6" "the row states no epoch"
+check "W6: and that it stays pending" "$w6" "stays pending rather than being cancelled"
+check_absent "W6: never calling an unstated epoch a release" "$w6" "cancelled — the epoch was released"
+check_absent "W6: nor printing a number-shaped epoch" "$w6" "(epoch 0)"
 check_absent "W7: hook_peer survives a null busy — lifecycle_tristate" "$report" "W7 hook_peer ERR"
 check "W7: and refuses to decide a halt from an unknown" "$report" "not stated: an unknown is not a false"
 check_absent "W7: so no notice is invented for a peer that is merely not reporting" "$report" "W7 hook_peer: {\"notes\":[\"w8: halted"

@@ -145,11 +145,11 @@ pub async fn run(args) {
         Ok(v) => out += `W4 notices:\n${v}\n`,
         Err(e) => out += `W4 notices ERR: ${e}\n`,
     }
-    // ---- W5-W7: the null class, one row per reader ----
+    // ---- W5: a null in the ledger must not kill the reader, nor become a value ----
     //
-    // `lifecycle_number` and `lifecycle_true` were the same defect as `lifecycle_null`:
-    // they interpolated their argument. One documented-nullable field each, through the
-    // reader that uses it.
+    // `lifecycle_number` interpolated its argument, so a notice row with `"record": null`
+    // killed `notices`. It survives now, and it says the record number is not stated rather
+    // than printing `record 0`.
     out += `W5 seed: ${eidolon::tool_call("coordinator_seed_json", #{
         "store": #{
             "adoptions": [#{ "worker": "w8", "name": "", "note": "", "epoch": 1, "released_at_ms": json::from_string("null")?, "release_reason": "" }],
@@ -163,25 +163,56 @@ pub async fn run(args) {
         Ok(v) => out += `W5 notices:\n${v}\n`,
         Err(e) => out += `W5 notices ERR: ${e}\n`,
     }
-    // `lifecycle_number` through `adoptions`: a null epoch must read as 0, not throw.
+
+    // ---- W6: an unknown epoch decides nothing ----
+    //
+    // The decision-path version of the same principle, and the worse one: a pending row with
+    // `epoch: null` read as 0, the reconcile asked whether epoch 0 was live, got no, and
+    // **cancelled** an obligation belonging to a live epoch 1 — a fabricated epoch, a phantom
+    // release, and an owed notice closed as if the service had cancelled it. So this witnesses
+    // both halves: the row stays `pending`, and the rendering never calls it a release.
     out += `W6 seed: ${eidolon::tool_call("coordinator_seed_json", #{
         "store": #{
-            "adoptions": [#{ "worker": "w8", "name": "", "note": "", "epoch": json::from_string("null")?,
-                             "released_at_ms": json::from_string("null")?, "release_reason": "" }],
-            "notices": [],
+            "adoptions": [
+                #{ "worker": "w8", "name": "", "note": "", "epoch": json::from_string("null")?,
+                   "released_at_ms": json::from_string("null")?, "release_reason": "" },
+                #{ "worker": "w9", "name": "", "note": "", "epoch": 1,
+                   "released_at_ms": json::from_string("null")?, "release_reason": "" },
+            ],
+            "notices": [
+                #{ "notice_id": "nullep01", "worker": "w9", "epoch": json::from_string("null")?,
+                   "kind": "stuck", "state": "stuck", "last": "failed", "occurrence": "rc:51",
+                   "key_kind": "outcome", "outcome": "pending", "text": "owed, and the row states no epoch" },
+            ],
             "gaps": [],
         },
     }).await?}\n`;
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w9", "occurrence": "rc:52",
+            "payload": #{ "state": "turn", "last": "", "busy": false } }).await {
+        Ok(v) => out += `W6 reconcile: ${v}\n`,
+        Err(e) => out += `W6 reconcile ERR: ${e}\n`,
+    }
+    out += `W6 store after: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
     match eidolon::tool_call("coordinator_adoptions", #{}).await {
         Ok(v) => out += `W6 adoptions:\n${v}\n`,
         Err(e) => out += `W6 adoptions ERR: ${e}\n`,
     }
-    // `lifecycle_true` through `hook_peer`: a null `busy` must read as false, not throw.
-    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w8", "occurrence": "rc:42",
+    match eidolon::tool_call("coordinator_notices", #{}).await {
+        Ok(v) => out += `W6 notices:\n${v}\n`,
+        Err(e) => out += `W6 notices ERR: ${e}\n`,
+    }
+
+    // ---- W7: an unknown `busy` defers, and invents nothing ----
+    //
+    // `PeerSnapshot.busy` is a plain bool (`core/src/lifecycle.rs:359-373,612-620`), so a
+    // null here is an *absence*, not a defined unknown. Deciding a halt from an absence puts
+    // a notice in the conversation for a peer that may simply not be reporting.
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w9", "occurrence": "rc:53",
             "payload": #{ "state": "ending", "last": "failed", "busy": json::from_string("null")? } }).await {
         Ok(v) => out += `W7 hook_peer: ${v}\n`,
         Err(e) => out += `W7 hook_peer ERR: ${e}\n`,
     }
+    out += `W7 store after: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
 
     Ok(out)
 }

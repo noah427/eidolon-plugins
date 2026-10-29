@@ -202,17 +202,34 @@ pub async fn run(args) {
     let pending = lifecycle_pending_rows(owed_store)?;
     check(out, bad, "reconcile: the open row is the one pending row", pending.len(), 1);
     let open_id = field(pending[0], "notice_id");
-    let written = lifecycle_mark_written(owed_store, open_id, 7);
+    let written = lifecycle_mark_written(owed_store, open_id, 7, true);
     let written_rows = lifecycle_store_list(written, "notices")?;
     check(out, bad, "reconcile: a journaled row says written and keeps the record number",
           [field(written_rows[0], "outcome"), field(written_rows[0], "record")], ["written", "7"]);
     check(out, bad, "reconcile: a written row is nothing left to reconcile", lifecycle_pending_rows(written)?.len(), 0);
+    // A mark with no record number the log ever named: the row is `written` and does *not*
+    // carry a record, rather than carrying 0 — which is a real record id and would be a
+    // fabricated one. (The rendering then says the number is not stated.) Built on a store of
+    // its own, because these functions rewrite the rows they are handed.
+    let pending_only = lifecycle_store_put(lifecycle_store_empty(), "notices", [#{ "notice_id": "n1", "outcome": "pending" }]);
+    let unnumbered = lifecycle_store_list(lifecycle_mark_written(pending_only, "n1", 0, false), "notices")?;
+    check(out, bad, "reconcile: a mark with no record never stores a fabricated 0",
+          [field(unnumbered[0], "outcome"), field(unnumbered[0], "record")], ["written", ""]);
+    // An epoch nobody stated decides nothing: no live match, and no notice keyed on it.
+    let quiet = lifecycle_store_put(lifecycle_store_empty(), "adoptions",
+        [#{ "epoch": json::from_string("null")?, "worker": "w1" }]);
+    check(out, bad, "decide: an adoption that states no epoch is never matched",
+          lifecycle_epoch_live(quiet, "w1", 0)?, false);
+    check(out, bad, "decide: and no notice is keyed on an invented epoch",
+          field(lifecycle_decide(quiet, #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:61",
+                 "payload": #{ "state": "ending", "last": "failed", "busy": false } })?, "action"), "none");
     let cancelled = lifecycle_mark_cancelled(owed_store, open_id);
     check(out, bad, "reconcile: a released epoch's open row is cancelled, never journaled",
           field(lifecycle_store_list(cancelled, "notices")?[0], "outcome"), "cancelled");
-    let marks = [#{ "notice_id": open_id, "outcome": "written", "record": 3 }];
+    let marked_store = lifecycle_store_put(lifecycle_store_empty(), "notices", [#{ "notice_id": "n2", "outcome": "pending" }]);
+    let marks = [#{ "notice_id": "n2", "outcome": "written", "record": 3, "stated": true }];
     check(out, bad, "reconcile: marks applied by id land on the row they name",
-          field(lifecycle_store_list(lifecycle_apply_marks(owed_store, marks), "notices")?[0], "record"), "3");
+          field(lifecycle_store_list(lifecycle_apply_marks(marked_store, marks), "notices")?[0], "record"), "3");
 
     // ---- blindness has one home: the ledger, because core stores a handler's notes
     // nowhere. A scan that said nothing and a scan that saw nothing are different
