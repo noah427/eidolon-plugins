@@ -308,6 +308,14 @@ fn claimants(rows, session) {
     out
 }
 
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:559bbf8150653059c396924ed2e5660676fc72e68ffc99fbfde4a75b012607d2
+
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }
 }
@@ -409,7 +417,13 @@ fn lifecycle_payload(observation) {
 }
 fn lifecycle_text(row, key) {
     match row.get(key) {
-        Some(v) => `${v}`,
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
         None => "",
     }
 }
@@ -447,5 +461,11 @@ fn lifecycle_released(row) {
     }
 }
 fn lifecycle_null(v) {
-    `${v}` == "null" || `${v}` == ""
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
+    }
 }

@@ -98,7 +98,7 @@ pub async fn call(input) {
         if lifecycle_released(row) {
             let at = lifecycle_text(row, "released_at_ms");
             let said = lifecycle_text(row, "release_reason");
-            if at == "" || null_text(at) {
+            if at == "" {
                 out += "  RELEASED; not monitored\n";
             } else {
                 out += `  RELEASED at ${at} (as it was recorded when the release was written); not monitored\n`;
@@ -204,10 +204,6 @@ fn start_cancellation(start) {
         }
         None => "none",
     }
-}
-
-fn null_text(v) {
-    v == "null" || v == ""
 }
 
 // ---- the store, the roster, and the pure policy this tool repeats ----------
@@ -320,10 +316,17 @@ fn claimants(rows, session) {
     out
 }
 
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:559bbf8150653059c396924ed2e5660676fc72e68ffc99fbfde4a75b012607d2
+
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }
 }
-
 fn lifecycle_store_list(store, key) {
     match store.get(key) {
         None => Ok([]),
@@ -336,12 +339,10 @@ fn lifecycle_store_list(store, key) {
         }
     }
 }
-
 fn lifecycle_store_put(store, key, list) {
     store.insert(key, list);
     store
 }
-
 fn lifecycle_blind_notes(store) {
     match store.get("blind") {
         Some(b) => {
@@ -371,14 +372,18 @@ fn lifecycle_blind_notes(store) {
     }
     #{ "notes": [], "uncertain": [] }
 }
-
 fn lifecycle_text(row, key) {
     match row.get(key) {
-        Some(v) => `${v}`,
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
         None => "",
     }
 }
-
 fn lifecycle_true(v) {
     match v {
         Some(b) => {
@@ -391,7 +396,6 @@ fn lifecycle_true(v) {
         None => false,
     }
 }
-
 fn lifecycle_number(row, key) {
     match row.get(key) {
         Some(v) => {
@@ -407,18 +411,18 @@ fn lifecycle_number(row, key) {
         None => 0,
     }
 }
-
-// A row with no `released_at_ms`, or one holding null or the empty string, is open.
-// The release is written by `release`; this reader's whole job is to tell history
-// from a live watch, and it never infers a release from a missing field name it does
-// not recognise.
 fn lifecycle_released(row) {
     match row.get("released_at_ms") {
         Some(v) => !lifecycle_null(v),
         None => false,
     }
 }
-
 fn lifecycle_null(v) {
-    `${v}` == "null" || `${v}` == ""
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
+    }
 }

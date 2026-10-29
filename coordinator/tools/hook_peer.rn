@@ -17,6 +17,16 @@
 // A coverage gap is recorded as a gap; `unavailable` is not a completion and writes
 // nothing; an occurrence a row already carries is one notice and no second.
 //
+// What `Ok` means from this handler, and what it does not: an `Ok` is a claim that
+// **every row this observation owed is durably written down and journaled**. The
+// runner reads a reply with no `verdict` as `Effect::Fired`, which closes the
+// observation, so an `Ok` it should not have had is a halt closed and never delivered.
+// Anything less than that claim is an `Err`: the runner journals the failure and
+// offers the observation again, and the ledger keeps what it has. Contention cannot
+// suppress a notice that is owed — a refused compare-and-set is re-read and
+// re-decided, a lost race leaves the row `pending`, and a `pending` row is journaled
+// by the next scan under the same id.
+//
 // The store is the plugin's own state, keyed by the running session's attribution,
 // and the ledger is **one key** — `store` — because `plugin_state` is
 // compare-and-set per key: with `adoptions` and `notices` apart, a release and this
@@ -62,7 +72,7 @@ pub async fn call(input) {
         let live = lifecycle_epoch_live(store, worker, epoch)?;
         if !live {
             marks.push(#{ "notice_id": id, "outcome": "cancelled" });
-            notes.push(`notice ${id}: cancelled — never sent: the epoch ${epoch} of ${worker} was released`);
+            notes.push(`notice ${id}: cancelled — the epoch ${epoch} of ${worker} was released before this row was closed as journaled`);
             continue;
         }
         match eidolon::notice(lifecycle_notice_args(row)).await {
@@ -117,15 +127,24 @@ pub async fn call(input) {
         store = fresh.store;
         revision = fresh.revision;
     }
-    notes.push(said);
     let watch = lifecycle_watch(lifecycle_store_list(store, "adoptions")?);
 
     // Nothing is journaled unless the row that owes it is durably written down:
     // journal-then-mark loses a halt silently if the process dies in between, and
     // that is the failure the whole notice exists to prevent.
+    //
+    // And nothing is *claimed* unless it is written down. `Ok` from this handler means
+    // the runner records the observation as `Fired` and closes it, so a scan that could
+    // not write its ledger must not answer `Ok`: the halt would be closed, never
+    // journaled, and never offered again. It answers `Err` instead, which the runner
+    // journals as `failed` and re-offers — and because a lost race leaves the row
+    // `pending` rather than absent, the retry finishes what this scan could not.
     if !settled {
-        return finish(watch, notes, uncertain).await;
+        uncertain.push(`no durable write for this observation: the ledger refused the compare-and-set on ${attempt} attempt(s), so the row it owes is not written down and nothing was journaled`);
+        let wrote = store_blind(notes, uncertain).await?;
+        return Err(`this scan could not write its ledger (${lifecycle_text(wrote, "detail")}): the halt it saw is neither recorded nor delivered, and an \`Ok\` here would have closed it as done. The observation must be offered again`);
     }
+    notes.push(said);
     if lifecycle_text(decision, "action") != "halt" {
         return finish(watch, notes, uncertain).await;
     }
@@ -136,13 +155,18 @@ pub async fn call(input) {
     let occurrence = lifecycle_text(row, "occurrence");
 
     // One last look before the notice reaches the conversation. A release that landed
-    // between the durable row and this call must stop it, because a release is
-    // durable before it is acted on and clause 1 of the guarantee says no notice of a
-    // released epoch is ever handed to the transport. This narrows the window to one
-    // call; it cannot close it — `plugin_state` gives one key at a time, and the
-    // service closed it with a single lock around the whole verb. What is left is a
-    // row journaled in that window and cancelled by the next scan, never a row
-    // silently lost.
+    // between the durable row and this call must stop it, because a release is durable
+    // before it is acted on and clause 1 of the guarantee says no notice of a released
+    // epoch is ever handed to the transport.
+    //
+    // This narrows the window to one call and **cannot close it**: `plugin_state` gives
+    // one key at a time, and the service closed it with a single lock around the whole
+    // verb. A notice journaled in that window is **in the log**, so it is marked
+    // `written` and the next scan leaves it alone — clause 2 says a release cannot
+    // retract what a coordinator has read, and it cannot unjournal this either. The
+    // sweep does not and will not claim to cancel it. What the sweep does cover is the
+    // row that never got journaled at all: it stays `pending`, and a released epoch's
+    // pending row is cancelled.
     let fresh = load_store().await?;
     let still_live = lifecycle_epoch_live(fresh.store, worker, lifecycle_number(row, "epoch"))?;
     if !still_live {
@@ -150,7 +174,7 @@ pub async fn call(input) {
         if !lifecycle_true(marked.get("ok")) {
             uncertain.push(`notice ${id}: the epoch was released before it was journaled, but cancelling the row did not land (${lifecycle_text(marked, "detail")}); it stays \`pending\` and the next scan cancels it`);
         } else {
-            notes.push(`notice ${id}: cancelled — never sent: the epoch ${lifecycle_number(row, "epoch")} of ${worker} was released before this scan could journal it`);
+            notes.push(`notice ${id}: cancelled — the epoch ${lifecycle_number(row, "epoch")} of ${worker} was released before this scan journaled it`);
         }
         return finish(watch, notes, uncertain).await;
     }
@@ -334,11 +358,18 @@ async fn store_blind(notes, uncertain) {
     Ok(#{ "ok": false, "detail": "the store moved twice while this scan tried to record what it saw" })
 }
 
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:559bbf8150653059c396924ed2e5660676fc72e68ffc99fbfde4a75b012607d2
+
 fn lifecycle_blind(store, notes, uncertain) {
     store.insert("blind", #{ "notes": notes, "uncertain": uncertain });
     store
 }
-
 fn lifecycle_notice_id(coordinator, epoch, worker, occurrence) {
     let h = 0xcbf2_9ce4_8422_2325u64;
     let prime = 0x0000_0100_0000_01b3u64;
@@ -695,7 +726,13 @@ fn lifecycle_payload(observation) {
 }
 fn lifecycle_text(row, key) {
     match row.get(key) {
-        Some(v) => `${v}`,
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
         None => "",
     }
 }
@@ -733,5 +770,11 @@ fn lifecycle_released(row) {
     }
 }
 fn lifecycle_null(v) {
-    `${v}` == "null" || `${v}` == ""
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
+    }
 }

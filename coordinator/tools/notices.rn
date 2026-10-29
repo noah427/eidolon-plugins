@@ -67,17 +67,17 @@ fn outcome_word(row, store) {
         return Ok(`journaled — record ${record} in this session's own log`);
     }
     if word == "cancelled" {
-        return Ok("cancelled — never sent: the epoch was released");
+        return Ok("cancelled — the epoch was released before this row was closed as journaled. This ledger never journaled it on purpose; a journal call that landed without its mark would not be visible here, and the log is the only record of that");
     }
     if word == "pending" {
         let live = lifecycle_epoch_live(store, lifecycle_text(row, "worker"), lifecycle_number(row, "epoch"))?;
         if live {
             return Ok("owed, not yet journaled");
         }
-        return Ok("never sent: the epoch was released while this row was still open — the next scan cancels it");
+        return Ok("still open, and its epoch was released — the next scan marks it cancelled. Whether it reached the log already is not something this row can say: a journal call that landed without its mark reads exactly like this");
     }
     if imported_outcome(row) {
-        let at = answered_at(row);
+        let at = lifecycle_text(row, "answered_at_ms");
         if at == "" {
             return Ok(`${word} as the service recorded it`);
         }
@@ -89,19 +89,6 @@ fn outcome_word(row, store) {
 fn imported_outcome(row) {
     let word = lifecycle_text(row, "outcome");
     word == "delivered" || word == "queued" || word == "partial" || word == "failed" || word == "refused"
-}
-
-fn answered_at(row) {
-    match row.get("answered_at_ms") {
-        Some(v) => {
-            if lifecycle_null(v) {
-                ""
-            } else {
-                `${v}`
-            }
-        }
-        None => "",
-    }
 }
 
 // ---- the store, and the pure policy this tool repeats ----------------------
@@ -136,6 +123,14 @@ async fn load_store() {
     }
     Ok(#{ "store": store, "revision": revision })
 }
+
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:559bbf8150653059c396924ed2e5660676fc72e68ffc99fbfde4a75b012607d2
 
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }
@@ -176,7 +171,13 @@ fn lifecycle_epoch_live(store, worker, epoch) {
 }
 fn lifecycle_text(row, key) {
     match row.get(key) {
-        Some(v) => `${v}`,
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
         None => "",
     }
 }
@@ -202,5 +203,11 @@ fn lifecycle_released(row) {
     }
 }
 fn lifecycle_null(v) {
-    `${v}` == "null" || `${v}` == ""
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
+    }
 }

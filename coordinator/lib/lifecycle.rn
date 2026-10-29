@@ -564,9 +564,21 @@ fn lifecycle_payload(observation) {
     }
 }
 
+// One field as text. A missing key, a JSON null and the empty string all read as "" —
+// and the null must be caught **before** the interpolation, because interpolating a JSON
+// null is a runtime error in this vocabulary. Every reader goes through here, which is
+// what makes a row written the way the plan documents it (`released_at_ms: null`)
+// readable at all: without this, `adoptions`, `hook_peer` and `hook_ready` all threw on
+// the documented shape.
 fn lifecycle_text(row, key) {
     match row.get(key) {
-        Some(v) => `${v}`,
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
         None => "",
     }
 }
@@ -607,6 +619,17 @@ fn lifecycle_released(row) {
     }
 }
 
+// A value that is JSON null, or the empty string a hand-written store may also use for
+// "not stated". A JSON null arrives as Rune's **empty tuple**, and interpolating it is a
+// runtime error (`Missing protocol function DISPLAY_FMT for ::std::tuple::Tuple`), not
+// the string `null` — so a null test cannot be built out of the value's own display.
+// `json::to_string` is the oracle: it serialises a null as `null` and cannot throw on it.
 fn lifecycle_null(v) {
-    `${v}` == "null" || `${v}` == ""
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
+    }
 }
