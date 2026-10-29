@@ -42,9 +42,8 @@ pub async fn run(args) {
                  "occurrence": "reg:eidolon-1@1000#2",
                  "payload": #{ "state": "ending", "last": "errored", "busy": false } }).await?}\n`;
 
-    out += `notices: ${eidolon::tool_call("coordinator_read", #{ "key": "notices" }).await?}\n`;
-    out += `gaps: ${eidolon::tool_call("coordinator_read", #{ "key": "gaps" }).await?}\n`;
-
+    out += `store: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+    
     out += `ready first: ${eidolon::tool_call("coordinator_hook_ready", #{ "event": "plugin_ready" }).await?}\n`;
     out += `ready second: ${eidolon::tool_call("coordinator_hook_ready", #{ "event": "plugin_ready" }).await?}\n`;
     out += `me: ${eidolon::tool_call("coordinator_me", #{}).await?}\n`;

@@ -142,16 +142,23 @@ fn lifecycle_gap_row(observation) {
     }
 }
 
-// One notice, in the service's own shape. `at_ms` is deliberately absent: the
-// observation carries no clock, and a timestamp made up here would be a claim the
-// harness never made. The caller writes this row before it returns.
+// One notice, in the service's own shape minus the transport's half. `attempts`
+// and `transport` are gone on purpose: the harness journals a notice into this
+// session's own log and the ring that may follow is not evidence of anything, so
+// there is no attempt to count and no transport's words to keep. `record` is the
+// journal record the primitive named, and it is absent until the harness has
+// answered `written` or `already` — a row with no `record` has not been journaled.
+//
+// `text` is composed here and stored with the row. That is deliberate: a resume
+// that has to journal an open row again sends exactly the words that were written
+// down, not whatever today's composer would say under the same id.
 fn lifecycle_notice(adoption, observation, occurrence) {
     let coordinator = lifecycle_text(adoption, "coordinator");
     let worker = lifecycle_text(adoption, "worker");
     let epoch = lifecycle_number(adoption, "epoch");
     let id = lifecycle_notice_id(coordinator, epoch, worker, occurrence)?;
     let key_kind = if occurrence.starts_with("reg:") { "observed" } else { "outcome" };
-    Ok(#{
+    let row = #{
         "notice_id": id,
         "epoch": epoch,
         "coordinator": coordinator,
@@ -162,10 +169,83 @@ fn lifecycle_notice(adoption, observation, occurrence) {
         "last": lifecycle_text(lifecycle_payload(observation), "last"),
         "occurrence": occurrence,
         "key_kind": key_kind,
-        "attempts": 0,
         "outcome": "pending",
-        "transport": "",
-    })
+    };
+    row.insert("text", lifecycle_notice_text(row));
+    Ok(row)
+}
+
+// The notice in a human's words. The harness frames a `PluginNotice` and does not
+// edit its `text`, so this sentence is the whole of what a coordinator reads, and
+// it has to stand on its own: which worker, which epoch, what the ending was, and
+// what the notice does *not* mean.
+fn lifecycle_notice_text(row) {
+    let worker = lifecycle_text(row, "worker");
+    let name = lifecycle_text(row, "name");
+    let who = if name == "" {
+        `\`${worker}\``
+    } else {
+        `\`${name}\` (\`${worker}\`)`
+    };
+    `${who} halted in epoch ${lifecycle_number(row, "epoch")}: the last ending was \`${lifecycle_text(row, "last")}\` with nothing in flight, occurrence \`${lifecycle_text(row, "occurrence")}\`. The adoption is retained — supervision ends only by an explicit release, so this notice is not a claim that the worker is gone.`
+}
+
+// The `eidolon::notice` input for one stored row. `event` names the observation
+// the row answers, and every row this plugin writes answers a `peer_changed`.
+fn lifecycle_notice_args(row) {
+    #{
+        "id": lifecycle_text(row, "notice_id"),
+        "text": lifecycle_text(row, "text"),
+        "event": "peer_changed",
+        "source": lifecycle_text(row, "worker"),
+        "occurrence": lifecycle_text(row, "occurrence"),
+    }
+}
+
+// ---- the ledger -------------------------------------------------------------
+//
+// One `plugin_state` key holds the three lists the guarantee is about, because
+// `plugin_state` is compare-and-set **per key** and takes an exclusive lock it does
+// not wait on. With `adoptions` and `notices` as separate keys, a release and this
+// halt handler CAS *different* keys, and this interleaving is reachable: the handler
+// reads the adoption live; the release writes `released_at_ms`; the release cancels
+// the pendings; the handler appends a fresh `pending` for the epoch that was just
+// released. Both writes succeed, because they are different keys, and the released
+// epoch owes a notice again. With one key the handler's CAS is refused, it re-reads,
+// sees the tombstone, and writes nothing. The atomic unit has to be the thing the
+// guarantee is about.
+
+// A store with no rows. A missing field is an empty list: the store grows a field
+// when the first row of its kind is written.
+fn lifecycle_store_empty() {
+    #{ "adoptions": [], "notices": [], "gaps": [] }
+}
+
+// One list out of the store, or a refusal. A field holding what is not a list is
+// refused rather than repaired or replaced: a store that shrugs at its own shape
+// erases what it could not read.
+fn lifecycle_store_list(store, key) {
+    match store.get(key) {
+        None => Ok([]),
+        Some(v) => {
+            if v is Vec {
+                Ok(v)
+            } else {
+                Err(`the store's \`${key}\` is not a list (${v}); it is refused rather than repaired or overwritten`)
+            }
+        }
+    }
+}
+
+// One list replaced, every other field of the store left alone, and the store
+// answered. This interpreter shares the object it is passed, so the change is visible
+// to the caller either way — the answer is returned so that a call site reads the same
+// whether or not it does. Rows are shared for the same reason: a function that rewrites
+// a row's field is rewriting that row inside the store it was handed, and the handlers
+// rely on it, so nothing here pretends otherwise.
+fn lifecycle_store_put(store, key, list) {
+    store.insert(key, list);
+    store
 }
 
 // The live adoptions, in stored order. A released row is history and is never
@@ -178,6 +258,219 @@ fn lifecycle_live_adoptions(adoptions) {
         }
     }
     out
+}
+
+fn lifecycle_find_any(adoptions, worker) {
+    for a in adoptions {
+        if a is Object && lifecycle_text(a, "worker") == worker {
+            return Some(a);
+        }
+    }
+    None
+}
+
+// Is the epoch this notice was keyed on still open? The one question clause 1 of
+// the guarantee collapses into: a released epoch is never handed a notice, and a
+// pending row whose epoch has closed is cancelled rather than journaled.
+fn lifecycle_epoch_live(store, worker, epoch) {
+    let adoptions = lifecycle_store_list(store, "adoptions")?;
+    for a in lifecycle_live_adoptions(adoptions) {
+        if lifecycle_text(a, "worker") == worker && lifecycle_number(a, "epoch") == epoch {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+// The rows still owed to the conversation: written down, not yet journaled.
+fn lifecycle_pending_rows(store) {
+    let out = [];
+    let notices = lifecycle_store_list(store, "notices")?;
+    for n in notices {
+        if n is Object && lifecycle_text(n, "outcome") == "pending" {
+            out.push(n);
+        }
+    }
+    Ok(out)
+}
+
+// What one observation asks of the ledger, decided against the store **as read**.
+//
+//   halt      one notice is owed: `notice` is the row to append, outcome pending
+//   dup       this occurrence already has a notice: `existing` is that row
+//   released  the epoch was released: nothing is written, now or later
+//   gap       one coverage-gap row is owed
+//   ignore    `unavailable` is not a completion; nothing is written
+//   none      an edge that is not an ending, a busy source, a non-failing ending
+fn lifecycle_decide(store, observation) {
+    let verdict = lifecycle_evaluate(observation);
+    let action = lifecycle_text(verdict, "action");
+    if action == "gap" {
+        return Ok(#{ "action": "gap", "row": lifecycle_gap_row(observation), "why": "a coverage gap is recorded as a gap, never as a halt" });
+    }
+    if action != "halt" {
+        return Ok(#{ "action": action, "why": lifecycle_text(verdict, "why") });
+    }
+    let worker = lifecycle_text(observation, "source");
+    if worker == "" {
+        return Ok(#{ "action": "none", "why": "the observation names no source; no notice, because there is no worker to key it on" });
+    }
+    let adoptions = lifecycle_store_list(store, "adoptions")?;
+    let adoption = #{};
+    let live = false;
+    match lifecycle_find_adoption(adoptions, worker) {
+        Some(a) => {
+            adoption = a;
+            live = true;
+        }
+        None => {}
+    }
+    if !live {
+        let closed = #{};
+        let seen = false;
+        match lifecycle_find_any(adoptions, worker) {
+            Some(a) => {
+                closed = a;
+                seen = true;
+            }
+            None => {}
+        }
+        if seen {
+            return Ok(#{
+                "action": "released",
+                "why": `${worker}: epoch ${lifecycle_number(closed, "epoch")} was released${lifecycle_release_said(closed)}; nothing is written, because a durable release stops what its epoch still owed`,
+            });
+        }
+        return Ok(#{ "action": "none", "why": `${worker}: not adopted by this session; nothing announced` });
+    }
+    let occurrence = lifecycle_text(observation, "occurrence");
+    if occurrence == "" {
+        return Ok(#{ "action": "none", "why": `${worker}: halted, but the observation carries no occurrence token; no notice, because a notice keyed on the ending alone would repeat` });
+    }
+    let notice = lifecycle_notice(adoption, observation, occurrence)?;
+    let id = lifecycle_text(notice, "notice_id");
+    let notices = lifecycle_store_list(store, "notices")?;
+    for n in notices {
+        if n is Object && lifecycle_text(n, "notice_id") == id {
+            return Ok(#{ "action": "dup", "existing": n, "why": `${worker}: occurrence \`${occurrence}\` already has notice ${id}; one notice, no second` });
+        }
+    }
+    Ok(#{ "action": "halt", "notice": notice, "why": `${worker}: halted with occurrence \`${occurrence}\`` })
+}
+
+fn lifecycle_release_said(row) {
+    let reason = lifecycle_text(row, "release_reason");
+    if reason == "" {
+        return "";
+    }
+    ` — the release said: ${reason}`
+}
+
+// Apply one decision to the store: append the row it owes, if any. Answers the
+// store, whether a durable write is needed, and the sentence the handler says.
+// Called again after a refused compare-and-set, against the store as re-read, which
+// is what makes a second decision — rather than a blind retry — the rule.
+fn lifecycle_record(store, decision) {
+    let action = lifecycle_text(decision, "action");
+    if action == "gap" {
+        let gaps = lifecycle_store_list(store, "gaps")?;
+        gaps.push(decision.row);
+        return Ok(#{ "dirty": true, "store": lifecycle_store_put(store, "gaps", gaps), "note": "coverage gap recorded; a gap is not a halt" });
+    }
+    if action == "halt" {
+        let notices = lifecycle_store_list(store, "notices")?;
+        notices.push(decision.notice);
+        return Ok(#{
+            "dirty": true,
+            "store": lifecycle_store_put(store, "notices", notices),
+            "note": `${lifecycle_text(decision, "why")}; notice ${lifecycle_text(decision.notice, "notice_id")} is owed, written down and not yet journaled`,
+        });
+    }
+    Ok(#{ "dirty": false, "store": store, "note": lifecycle_text(decision, "why") })
+}
+
+// One notice row marked as journaled, with the record number the log named.
+fn lifecycle_mark_written(store, notice_id, record) {
+    let notices = lifecycle_store_list(store, "notices")?;
+    for n in notices {
+        if n is Object && lifecycle_text(n, "notice_id") == notice_id {
+            n.insert("outcome", "written");
+            n.insert("record", record);
+        }
+    }
+    lifecycle_store_put(store, "notices", notices)
+}
+
+// One notice row cancelled: the epoch it was owed in was released before it
+// reached the conversation. The row stays, because the epoch is closed rather than
+// deleted and a cancelled notice is a fact about what was owed.
+fn lifecycle_mark_cancelled(store, notice_id) {
+    let notices = lifecycle_store_list(store, "notices")?;
+    for n in notices {
+        if n is Object && lifecycle_text(n, "notice_id") == notice_id {
+            n.insert("outcome", "cancelled");
+        }
+    }
+    lifecycle_store_put(store, "notices", notices)
+}
+
+// The marks the resume reconcile collected, applied in one place. Field updates on
+// rows named by id, so re-applying them to a store that has moved on sets the same
+// facts and cannot undo a release that landed in between.
+fn lifecycle_apply_marks(store, marks) {
+    let out = store;
+    for m in marks {
+        if !(m is Object) {
+            continue;
+        }
+        let id = lifecycle_text(m, "notice_id");
+        if lifecycle_text(m, "outcome") == "written" {
+            out = lifecycle_mark_written(out, id, lifecycle_number(m, "record"));
+        } else {
+            out = lifecycle_mark_cancelled(out, id);
+        }
+    }
+    out
+}
+
+// The last scan's own words, kept in the store because they are stored nowhere
+// else: core reads a handler's reply for `watch` and `verdict` only, and the
+// `LifecycleObserved` row carries event, source, occurrence, handler and outcome —
+// so a tool cannot render a `notes` entry that nothing stored. There is no clock in
+// this vocabulary, so this records no time rather than inventing one.
+fn lifecycle_blind(store, notes, uncertain) {
+    store.insert("blind", #{ "notes": notes, "uncertain": uncertain });
+    store
+}
+
+fn lifecycle_blind_notes(store) {
+    match store.get("blind") {
+        Some(b) => {
+            if b is Object {
+                let notes = [];
+                match b.get("notes") {
+                    Some(v) => {
+                        if v is Vec {
+                            notes = v;
+                        }
+                    }
+                    None => {}
+                }
+                let uncertain = [];
+                match b.get("uncertain") {
+                    Some(v) => {
+                        if v is Vec {
+                            uncertain = v;
+                        }
+                    }
+                    None => {}
+                }
+                return #{ "notes": notes, "uncertain": uncertain };
+            }
+        }
+        None => {}
+    }
+    #{ "notes": [], "uncertain": [] }
 }
 
 // The full watch list, rebuilt from the store on every call. A worker appears
@@ -210,33 +503,6 @@ fn lifecycle_find_adoption(adoptions, worker) {
         }
     }
     None
-}
-
-fn lifecycle_has_notice(notices, notice_id) {
-    for n in notices {
-        if n is Object && lifecycle_text(n, "notice_id") == notice_id {
-            return true;
-        }
-    }
-    false
-}
-
-// Which notices the transport still has to be given, ported so the retry bound has
-// one written form: a pending notice, or a failed one inside the bound. A notice
-// that arrived, was queued or was partly delivered is never sent again.
-fn lifecycle_to_attempt(notices) {
-    let out = [];
-    for n in notices {
-        if !(n is Object) {
-            continue;
-        }
-        let outcome = lifecycle_text(n, "outcome");
-        let attempts = lifecycle_number(n, "attempts");
-        if outcome == "pending" || (outcome == "failed" && attempts < 3) {
-            out.push(lifecycle_text(n, "notice_id"));
-        }
-    }
-    out
 }
 
 // What to do about a stored rank and the decoration a live row carries.

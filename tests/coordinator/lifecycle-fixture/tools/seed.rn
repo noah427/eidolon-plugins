@@ -1,10 +1,14 @@
 // Test fixture only: seed the plugin's own store so the lifecycle handlers can be
 // driven with a known adoption and a rank on this run's own session. Not shipped.
+//
+// The ledger is one key — `store` — holding `adoptions`, `notices` and `gaps`; `ranks`
+// is a key of its own. This seeds the first two and leaves the rest empty, which is
+// the shape an `adopt` followed by a `rank` leaves behind.
 
 pub fn manifest() {
     #{
         name: "coordinator_seed",
-        description: "Test fixture: write one adoption and one rank row into this run's plugin state.",
+        description: "Test fixture: write one adoption into the ledger and one rank row into this run's plugin state.",
         approval: "mutating",
         input_schema: #{ "type": "object", "properties": #{} },
     }
@@ -27,13 +31,17 @@ pub async fn call(input) {
         Some(s) => `${s}`,
         None => return Err("this run's roster row carries no session id"),
     };
-    let adoptions = [
-        #{ "epoch": 1, "coordinator": "c1", "worker": "w1", "name": "grinder", "adopted_at_ms": 0 },
-    ];
+    let store = #{
+        "adoptions": [
+            #{ "epoch": 1, "coordinator": "c1", "worker": "w1", "name": "grinder", "note": "" },
+        ],
+        "notices": [],
+        "gaps": [],
+    };
     let ranks = [
-        #{ "session": session, "rank": "tribunus", "prefix": "Tribunus", "assigned_ms": 0, "by": "c1" },
+        #{ "session": session, "rank": "tribunus", "prefix": "Tribunus", "by": "c1" },
     ];
-    let a = eidolon::plugin_state_write(#{ "key": "adoptions", "value": json::to_string(adoptions)?, "revision": 0 }).await?;
+    let a = eidolon::plugin_state_write(#{ "key": "store", "value": json::to_string(store)?, "revision": 0 }).await?;
     let r = eidolon::plugin_state_write(#{ "key": "ranks", "value": json::to_string(ranks)?, "revision": 0 }).await?;
     Ok(`seeded ${a} ${r}`)
 }
