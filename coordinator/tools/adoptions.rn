@@ -70,7 +70,7 @@ pub async fn call(input) {
     // An **adoption** has no operation, and no primitive reads an adoption back by worker —
     // the one oracle is `custody_adopt`'s own refusal at write time — so an adoption row
     // stays `store only`, and that is a narrower claim than it used to be.
-    out += "\nA **managed start** row is checked against the custody log with one `custody_inspect` per operation, and says which it is: `verified against the log`, or `store only` with the log's refusal. An **adoption** row is `store only`: no primitive reads an adoption back by worker — `custody_inspect` answers for an operation, and an adoption has none — so an adoption row is what this plugin wrote down, and the only oracle for it is `custody_adopt`'s refusal at the moment of writing.\n\n";
+    out += "\nA **managed start** row is checked against the custody log with one `custody_inspect` per operation, and says which it is: `verified against the log`, or `store only` with the log's refusal. The adoption epoch on that line says where it came from: the log's own field, or — because epochs are the plugin's under the 2026-10-29 ruling — this ledger's record of the same start. A verified row is verified for what the log answered; it is not a claim that every field came from the log. An **adoption** row is `store only`: no primitive reads an adoption back by worker — `custody_inspect` answers for an operation, and an adoption has none — so an adoption row is what this plugin wrote down, and the only oracle for it is `custody_adopt`'s refusal at the moment of writing.\n\n";
 
     // The service's own rendering of a managed start, kept because it is the
     // vocabulary an operator has already read: the durable phase is history, not
@@ -93,12 +93,14 @@ pub async fn call(input) {
                         continue;
                     }
                 };
-                out += `managed start ${operation}: ${start_rank_word(start)}; phase ${lifecycle_text(view, "phase")}, session ${lifecycle_text(view, "session")}, adoption epoch ${lifecycle_epoch_word(view, "adoption_epoch")} (the log's answer, not current liveness)\n`;
+                let epoch = start_epoch_and_source(start, view, true, adoptions);
+                out += `managed start ${operation}: ${start_rank_word(start)}; phase ${lifecycle_text(view, "phase")}, session ${lifecycle_text(view, "session")}, adoption epoch ${epoch.word} (${epoch.source})\n`;
                 out += `  cancellation: ${start_cancellation(view)} (historical exit receipt, not current liveness)\n`;
                 out += "  verified against the log\n";
             }
             Err(e) => {
-                out += `managed start ${operation}: ${start_rank_word(start)}; this ledger records phase ${lifecycle_text(start, "phase")}, session ${lifecycle_text(start, "session")}, adoption epoch ${lifecycle_epoch_word(start, "adoption_epoch")} (not current liveness)\n`;
+                let epoch = start_epoch_and_source(start, #{}, false, adoptions);
+                out += `managed start ${operation}: ${start_rank_word(start)}; this ledger records phase ${lifecycle_text(start, "phase")}, session ${lifecycle_text(start, "session")}, adoption epoch ${epoch.word} (${epoch.source})\n`;
                 out += `  cancellation: ${start_cancellation(start)} (historical exit receipt, not current liveness)\n`;
                 out += `  store only — the custody log does not answer for this operation: ${e}\n`;
             }
@@ -132,6 +134,23 @@ pub async fn call(input) {
             }
         } else {
             out += "  monitored\n";
+            // A cancellation whose exit this plugin never saw is the one thing that stops a
+            // release, so it is said here rather than left to the refusal to explain later. The
+            // word is core's, recorded by `coordinator_cancel` from the log's typed field.
+            let cancel = lifecycle_text(row, "cancellation");
+            if cancel != "" {
+                let op = lifecycle_text(row, "cancel_operation");
+                let said = lifecycle_text(row, "cancel_reason");
+                let which = "";
+                if op != "" {
+                    which = ` of ${op}`;
+                }
+                let why = "";
+                if said != "" {
+                    why = ` (the reason it was asked for: ${said})`;
+                }
+                out += `  cancellation \`${cancel}\`${which} — core's own outcome word; this plugin observed none of it, and a release is refused while that word is \`attempted\`${why}\n`;
+            }
         }
         out += `  ${live_line(rows, worker, unseen)}\n`;
         let note = lifecycle_text(row, "note");
@@ -249,6 +268,40 @@ fn start_cancellation(start) {
         }
         None => "none",
     }
+}
+
+// The adoption epoch a start row is rendered with, and — in the same answer — where it came from.
+//
+// The ruling gives epochs to the plugin, so `custody_inspect`'s `adoption_epoch` is a field on
+// its way out of core. Once it is gone, the log's silence is **not** "no epoch": the epoch is
+// this ledger's, from the row that recorded it, and saying otherwise would present a ledger fact
+// as a log fact. Four answers, in the order they are trusted:
+//   the log's own field, when the log states one
+//   this start row's own `adoption_epoch` — this ledger's record of the start
+//   this ledger's live adoption row for the session the log (or the start row) named
+//   neither: "not stated", which is not epoch 0
+fn start_epoch_and_source(start, view, readable, adoptions) {
+    if lifecycle_stated(view, "adoption_epoch") {
+        return #{ "word": lifecycle_epoch_word(view, "adoption_epoch"), "source": "the log's answer, not current liveness" };
+    }
+    if lifecycle_stated(start, "adoption_epoch") {
+        return #{ "word": lifecycle_epoch_word(start, "adoption_epoch"), "source": "this ledger's own start row, not the log; not current liveness" };
+    }
+    // Which worker this row is about: the log's typed `session` when it answered, else the row's.
+    let session = lifecycle_text(view, "session");
+    if session == "" {
+        session = lifecycle_text(start, "session");
+    }
+    match lifecycle_find_adoption(adoptions, session) {
+        Some(r) => {
+            if lifecycle_stated(r, "epoch") {
+                let why = if readable { "the log states no adoption epoch" } else { "the log does not answer for this operation" };
+                return #{ "word": lifecycle_epoch_word(r, "epoch"), "source": `derived from this ledger's adoption row for \`${session}\`, because ${why}; not current liveness` };
+            }
+        }
+        None => {}
+    }
+    #{ "word": "not stated", "source": "neither the log nor this ledger states an adoption epoch" }
 }
 
 // ---- the store, the roster, and the pure policy this tool repeats ----------
@@ -373,7 +426,7 @@ fn claimants(rows, session) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:f3afa6f239fb2e6812b97d0654f3b1f1006e552e1d128fa3d09c9049e6854f24
+// stamp: sha256:39b70aec3d33bb24cc7b2420420da4a0b090cef27d71c3e72cba3cc8cefe0ba4
 
 fn lifecycle_stated(row, key) {
     match row.get(key) {
@@ -434,6 +487,23 @@ fn lifecycle_blind_notes(store) {
         None => {}
     }
     #{ "notes": [], "uncertain": [] }
+}
+fn lifecycle_live_adoptions(adoptions) {
+    let out = [];
+    for a in adoptions {
+        if a is Object && !lifecycle_released(a) {
+            out.push(a);
+        }
+    }
+    out
+}
+fn lifecycle_find_adoption(adoptions, worker) {
+    for a in lifecycle_live_adoptions(adoptions) {
+        if lifecycle_text(a, "worker") == worker {
+            return Some(a);
+        }
+    }
+    None
 }
 fn lifecycle_text(row, key) {
     match row.get(key) {

@@ -14,6 +14,11 @@
 //   3. a notice already **journaled** is not retracted — a release cannot unwrite what a
 //      coordinator has read — and the record stays with its reason.
 //
+// One refusal in front of all three: a worker whose cancellation has not been observed exiting
+// is not released. That word is on this ledger's row (`cancellation: attempted`, written by
+// `coordinator_cancel` from the log's typed outcome), and the guard is the retired service's own
+// (`service/src/lib.rs:1067`) kept at the owner the ruling gives it.
+//
 // No clock: this plugin has none, so the tombstone is the word `released` and the reason, never a
 // time nobody measured.
 
@@ -72,6 +77,17 @@ pub async fn call(input) {
         }
         if !live {
             return Err(`${worker} is not adopted by this session (or was already released); there is nothing to release`);
+        }
+
+        // A cancellation whose exit was never observed keeps supervision here, so a release of it
+        // is refused until an exit is observed. **This is the retired service's own guard**
+        // (`service/src/lib.rs:1067`), preserved at the owner the ruling gives it — not a new
+        // policy: the service refused while its start record still held
+        // `CancelOutcome::Attempted` for this worker and epoch. The word is core's, recorded on
+        // this row by `coordinator_cancel` from the log's typed `cancellation` field; releasing
+        // over it would announce the end of supervision for a child nobody saw exit.
+        if ledger_text(row, "cancellation") == "attempted" {
+            return Err(`the exit of ${worker} was never observed: \`coordinator_cancel\` recorded a durable cancellation intent (operation \`${ledger_text(row, "cancel_operation")}\`, and the log's outcome word was \`attempted\`), so supervision is retained and a release would end it over an unobserved exit. Retry \`coordinator_cancel\` with the same reason to re-ask the OS half and re-read the log; when it answers \`exited\` this row is marked and the release goes through`);
         }
 
         // The epoch this release closes, if the row states one. An unstated epoch is not epoch 0:
@@ -253,7 +269,7 @@ fn store_put(store, key, list) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:f3afa6f239fb2e6812b97d0654f3b1f1006e552e1d128fa3d09c9049e6854f24
+// stamp: sha256:39b70aec3d33bb24cc7b2420420da4a0b090cef27d71c3e72cba3cc8cefe0ba4
 
 fn lifecycle_stated(row, key) {
     match row.get(key) {

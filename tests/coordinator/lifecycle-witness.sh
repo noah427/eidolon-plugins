@@ -202,6 +202,34 @@ check "W11: the journaled row keeps its record" "$w11" '\"record\":41'
 check "W11: a second release refuses rather than releasing twice" "$report" "is not adopted by this session (or was already released)"
 check "W11: and a re-adoption is a new epoch" "$report" "adopted 1793000000060 in epoch 2"
 
+# ---- W12: cancellation is core's act, and the claim is the log's word ----
+check_absent "W12: the plugin never dials the monitor for a cancellation" "$report" "the coordinator monitor is not answering on 127.0.0.1:8095"
+w12=$(printf '%s\n' "$report" | sed -n '/^W12 seed:/,$p')
+check "W12: the generic door is the one asked — core's own refusal comes back" "$w12" 'this session has no managed start named `op-never-started`'
+check "W12: a refusal is not turned into a cancellation or a stop" "$report" 'W12 cancel ERR: cancellation of `op-never-started`: **nothing is claimed and nothing is written down**'
+check "W12: and the two cases it cannot tell apart are named, not guessed" "$w12" "either the verb was refused or its record cannot be read here"
+w12cancel=$(printf '%s\n' "$report" | sed -n '/^W12 cancel ERR:/,/^W12 seed guard:/p')
+check_absent "W12: while the cancellation's own answer reports no stop" "$w12cancel" "exit observed"
+w12before=$(printf '%s\n' "$report" | sed -n 's/^W12 store before: //p')
+w12after=$(printf '%s\n' "$report" | sed -n 's/^W12 store after cancel: //p')
+if [ -n "$w12before" ] && [ "$w12before" = "$w12after" ]; then
+    say "ok   W12: a refused cancellation leaves this ledger byte-for-byte as it was"
+else
+    say "FAIL W12: the ledger moved on a refusal: before [$w12before] after [$w12after]"
+    fail=$((fail + 1))
+fi
+
+# ---- W12b: the release guard, and the epoch that the ledger has to supply ----
+check "W12b: release refuses while the exit is unobserved" "$report" "the exit of 1793000000070 was never observed"
+w12refused=$(printf '%s\n' "$report" | sed -n '/^W12 store after refused release:/,/^W12 seed exit:/p')
+check_absent "W12b: and does not mark the row released behind the refusal" "$w12refused" '\"released\":true'
+check "W12b: the row says which word stopped it, and that the word is core's" "$w12" 'cancellation `attempted` of op-never-started — core'
+check "W12b: once the word is exited the release is the ordinary act again" "$report" "W12 release after the exit was observed: released 1793000000070"
+w12adoptions=$(printf '%s\n' "$report" | sed -n '/^W12 adoptions:/,/^W12 seed exit:/p')
+check "B: a start row takes its epoch from this ledger when the log states none" "$w12adoptions" 'adoption epoch 3 (derived from this ledger'
+check_absent "B: and never presents that epoch as the log's answer" "$w12adoptions" 'adoption epoch 3 (the log'
+check "B: while a row neither source can state says so" "$w8" "(neither the log nor this ledger states an adoption epoch)"
+
 if [ "$fail" -ne 0 ]; then
     say "FAIL lifecycle-witness.sh: $fail check(s) failed"
     exit 1

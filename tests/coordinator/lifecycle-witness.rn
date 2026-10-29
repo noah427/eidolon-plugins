@@ -319,5 +319,65 @@ pub async fn run(args) {
         Err(e) => out += `W11 re-adopt ERR: ${e}\n`,
     }
 
+    // ---- W12: cancellation is core's act, and the claim is the log's word ----
+    //
+    // Two things this witness cannot do, said here rather than dressed up. The fixture cannot
+    // write a custody record into this session's log, so a real `attempted`/`exited` answer is not
+    // producible — the decision has its witness in `lifecycle-shape.sh` over the outcome words —
+    // and nothing here spawns a child, so no exit is observed by anyone. What it *does* witness is
+    // the shape of the port: the generic door is the thing asked (its own refusal comes back, word
+    // for word), a refusal is never turned into a claim, and the ledger is left exactly as it was.
+    out += `W12 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{ "adoptions": [#{ "worker": "1793000000070", "name": "cancelme", "note": "", "epoch": 3,
+                                    "coordinator": session, "released_at_ms": json::from_string("null")?, "release_reason": "" }],
+                   "notices": [], "gaps": [] },
+        "starts": [#{ "operation": "op-never-started", "phase": "Intent", "session": "1793000000070",
+                      "adoption_epoch": json::from_string("null")? }],
+    }).await?}\n`;
+    out += `W12 store before: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+    match eidolon::tool_call("coordinator_cancel", #{ "operation": "op-never-started", "reason": "w12: a start the log never admitted" }).await {
+        Ok(v) => out += `W12 cancel OK (WRONG): ${v}\n`,
+        Err(e) => out += `W12 cancel ERR: ${e}\n`,
+    }
+    out += `W12 store after cancel: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+
+    // The release guard, seeded with the word core writes when the exit is not observed. The fact
+    // is seeded because a real one needs a child; the guard's *behaviour* is not. The `starts` row
+    // is carried here too: `seed_json` writes the keys it is given, and the `adoptions` render
+    // below needs both halves of this ledger in front of it.
+    out += `W12 seed guard: ${eidolon::tool_call("coordinator_seed_json", #{
+        "starts": [#{ "operation": "op-never-started", "phase": "Intent", "session": "1793000000070",
+                      "adoption_epoch": json::from_string("null")? }],
+        "store": #{ "adoptions": [#{ "worker": "1793000000070", "name": "cancelme", "note": "", "epoch": 3,
+                                    "coordinator": session, "released_at_ms": json::from_string("null")?, "release_reason": "",
+                                    "cancellation": "attempted", "cancel_operation": "op-never-started",
+                                    "cancel_reason": "w12: a start the log never admitted" }],
+                   "notices": [], "gaps": [] },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_release", #{ "session": "1793000000070", "reason": "the work is done" }).await {
+        Ok(v) => out += `W12 release over an unobserved exit (WRONG): ${v}\n`,
+        Err(e) => out += `W12 release over an unobserved exit ERR: ${e}\n`,
+    }
+    out += `W12 store after refused release: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+    match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(v) => out += `W12 adoptions:\n${v}\n`,
+        Err(e) => out += `W12 adoptions ERR: ${e}\n`,
+    }
+
+    // And once the log's word is `exited`, the release is the ordinary act again: the guard is a
+    // fact about an unobserved exit, not a permanent mark.
+    out += `W12 seed exit: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{ "adoptions": [#{ "worker": "1793000000070", "name": "cancelme", "note": "", "epoch": 3,
+                                    "coordinator": session, "released_at_ms": json::from_string("null")?, "release_reason": "",
+                                    "cancellation": "exited", "cancel_operation": "op-never-started",
+                                    "cancel_reason": "w12: a start the log never admitted" }],
+                   "notices": [], "gaps": [] },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_release", #{ "session": "1793000000070", "reason": "the work is done" }).await {
+        Ok(v) => out += `W12 release after the exit was observed: ${v}\n`,
+        Err(e) => out += `W12 release after the exit was observed ERR: ${e}\n`,
+    }
+    out += `W12 store after release: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+
     Ok(out)
 }

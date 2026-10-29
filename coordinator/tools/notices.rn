@@ -146,7 +146,7 @@ async fn load_store() {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:f3afa6f239fb2e6812b97d0654f3b1f1006e552e1d128fa3d09c9049e6854f24
+// stamp: sha256:39b70aec3d33bb24cc7b2420420da4a0b090cef27d71c3e72cba3cc8cefe0ba4
 
 fn lifecycle_true(v) {
     match v {

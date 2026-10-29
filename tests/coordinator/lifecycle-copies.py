@@ -46,6 +46,23 @@ MANIFEST = {
         "lifecycle_released",
         "lifecycle_null",
     ],
+    # The one handler whose act is core's and whose *claim* is its own: it reads the log's
+    # typed cancellation word, so it carries the decision and the row readers it needs.
+    "cancel.rn": [
+        "lifecycle_cancel_claim",
+        "lifecycle_stated",
+        "lifecycle_true",
+        "lifecycle_epoch_word",
+        "lifecycle_store_empty",
+        "lifecycle_store_list",
+        "lifecycle_store_put",
+        "lifecycle_live_adoptions",
+        "lifecycle_find_adoption",
+        "lifecycle_text",
+        "lifecycle_number",
+        "lifecycle_released",
+        "lifecycle_null",
+    ],
     "adopt.rn": [
         "lifecycle_true",
         "lifecycle_stated",
@@ -135,6 +152,8 @@ MANIFEST = {
         "lifecycle_store_list",
         "lifecycle_store_put",
         "lifecycle_blind_notes",
+        "lifecycle_live_adoptions",
+        "lifecycle_find_adoption",
         "lifecycle_text",
         "lifecycle_true",
         "lifecycle_number",

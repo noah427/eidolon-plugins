@@ -388,6 +388,35 @@ fn lifecycle_release_said(row) {
     ` — the release said: ${reason}`
 }
 
+// What one cancellation lets this plugin claim about a child's exit.
+//
+// `word` is the log's **typed** outcome — `custody_inspect`'s `cancellation` field, whose
+// documented set is `exited` and `attempted` — and never a sentence. The door's own answer
+// is a completion signal: it says the verb finished and its record is durable, and it is
+// not promoted into a claim about a process. (The door answers `Ok` with "exit observed"
+// *and* with "exit unconfirmed; supervision retained" on trees where the act's refusal is
+// formatted rather than propagated, so `Ok` cannot decide this and is not asked to.)
+//
+//   observed    the log states the exit was observed: a stop may be reported
+//   unobserved  the log holds a cancellation whose exit is not observed: supervision stays
+//   unrecorded  the log holds no cancellation for this operation: nothing was written
+//   unknown     the log could not be read: nothing is claimed and nothing is marked
+//
+// Fail closed: a word that is neither `exited` nor absent counts as unobserved, so a future
+// outcome word, or a sentence that reached this slot by mistake, can never authorize a stop.
+fn lifecycle_cancel_claim(readable, word) {
+    if !readable {
+        return "unknown";
+    }
+    if word == "" {
+        return "unrecorded";
+    }
+    if word == "exited" {
+        return "observed";
+    }
+    "unobserved"
+}
+
 // Apply one decision to the store: append the row it owes, if any. Answers the
 // store, whether a durable write is needed, and the sentence the handler says.
 // Called again after a refused compare-and-set, against the store as re-read, which

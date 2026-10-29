@@ -262,6 +262,26 @@ pub async fn run(args) {
     check(out, bad, "rank prefix: a word outside the vocabulary has no prefix",
           lifecycle_rank_prefix(#{ "rank": "admiral" }), "");
 
+    // ---- cancellation: the claim comes from the log's typed word, never from a sentence ----
+    //
+    // `custody_cancel` answers a *completion* signal: on a door that formats the act's refusal
+    // instead of propagating it, `Ok` carries "exit unconfirmed; supervision retained" as well as
+    // "exit observed". So the claim is a function of the log's `cancellation` word alone, and the
+    // last check here is the one that would have caught the rule being written the other way: the
+    // door's sentence, handed to the decision by mistake, cannot authorize a stop.
+    check(out, bad, "cancel claim: only the log's `exited` lets a stop be reported",
+          lifecycle_cancel_claim(true, "exited"), "observed");
+    check(out, bad, "cancel claim: `attempted` is an unobserved exit, so supervision remains",
+          lifecycle_cancel_claim(true, "attempted"), "unobserved");
+    check(out, bad, "cancel claim: an absent outcome is unrecorded, not an unobserved exit",
+          lifecycle_cancel_claim(true, ""), "unrecorded");
+    check(out, bad, "cancel claim: a log that could not be read claims nothing, whatever it might have said",
+          lifecycle_cancel_claim(false, "exited"), "unknown");
+    check(out, bad, "cancel claim: a word that is not one of the log's two is not a stop",
+          lifecycle_cancel_claim(true, "cancelling"), "unobserved");
+    check(out, bad, "cancel claim: the door's sentence in the word slot never authorizes a stop",
+          lifecycle_cancel_claim(true, "cancellation of `op-1`: exit observed; adoption_closed false"), "unobserved");
+
     let text = "";
     for line in out {
         text += line + "\n";
