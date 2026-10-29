@@ -40,9 +40,9 @@ pub async fn call(input) {
         if lifecycle_text(row, "key_kind") == "observed" {
             out += "  (an ending the journal never saw: keyed on that registration instance's own count)\n";
         }
-        out += `  outcome: ${lifecycle_outcome_word(row, store)?}\n`;
+        out += `  outcome: ${outcome_word(row, store)?}\n`;
         out += `  ${lifecycle_text(row, "text")}\n`;
-        if !lifecycle_imported(row) {
+        if !imported_outcome(row) {
             // nothing to add
         } else {
             imported = true;
@@ -60,24 +60,24 @@ pub async fn call(input) {
 // The distinction the service drew between "not sent" and "sent but unconfirmed"
 // survives; the second half of it does not, because there is no longer a transport
 // that can half-succeed.
-fn lifecycle_outcome_word(row, store) {
+fn outcome_word(row, store) {
     let word = lifecycle_text(row, "outcome");
     let record = lifecycle_number(row, "record");
     if word == "written" {
         return Ok(`journaled — record ${record} in this session's own log`);
     }
     if word == "cancelled" {
-        return Ok("cancelled — never sent: the epoch was released".to_string());
+        return Ok("cancelled — never sent: the epoch was released");
     }
     if word == "pending" {
         let live = lifecycle_epoch_live(store, lifecycle_text(row, "worker"), lifecycle_number(row, "epoch"))?;
         if live {
-            return Ok("owed, not yet journaled".to_string());
+            return Ok("owed, not yet journaled");
         }
-        return Ok("never sent: the epoch was released while this row was still open — the next scan cancels it".to_string());
+        return Ok("never sent: the epoch was released while this row was still open — the next scan cancels it");
     }
-    if lifecycle_imported(row) {
-        let at = lifecycle_answered_at(row);
+    if imported_outcome(row) {
+        let at = answered_at(row);
         if at == "" {
             return Ok(`${word} as the service recorded it`);
         }
@@ -86,12 +86,12 @@ fn lifecycle_outcome_word(row, store) {
     Ok(`\`${word}\`: not a word this ledger writes, shown as it stands`);
 }
 
-fn lifecycle_imported(row) {
+fn imported_outcome(row) {
     let word = lifecycle_text(row, "outcome");
     word == "delivered" || word == "queued" || word == "partial" || word == "failed" || word == "refused"
 }
 
-fn lifecycle_answered_at(row) {
+fn answered_at(row) {
     match row.get("answered_at_ms") {
         Some(v) => {
             if lifecycle_null(v) {

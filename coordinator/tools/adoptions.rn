@@ -98,7 +98,7 @@ pub async fn call(input) {
         if lifecycle_released(row) {
             let at = lifecycle_text(row, "released_at_ms");
             let said = lifecycle_text(row, "release_reason");
-            if at == "" || lifecycle_null_str(at) {
+            if at == "" || null_text(at) {
                 out += "  RELEASED; not monitored\n";
             } else {
                 out += `  RELEASED at ${at} (as it was recorded when the release was written); not monitored\n`;
@@ -145,11 +145,11 @@ pub async fn call(input) {
 // The service's live line, kept word for word, with its three answers apart.
 fn live_line(rows, worker, unseen) {
     if unseen != "" {
-        return "unobservable".to_string();
+        return "unobservable";
     }
     let claimants = claimants(rows, worker);
     if claimants.len() == 0 {
-        return "no live session carries this address".to_string();
+        return "no live session carries this address";
     }
     if claimants.len() > 1 {
         return (`${claimants.len()} live sessions claim this address; refusing to guess`);
@@ -171,10 +171,10 @@ fn live_line(rows, worker, unseen) {
                 if counted > 0 {
                     ending = `, no journal record for that ending; ${counted} unjournaled ending(s) counted on this registration instance`;
                 } else {
-                    ending = ", no journal record for that ending and no count published — an older writer's row, since this build counts every errored ending".to_string();
+                    ending = ", no journal record for that ending and no count published — an older writer's row, since this build counts every errored ending";
                 }
             } else {
-                ending = ", no ending record published".to_string();
+                ending = ", no ending record published";
             }
         }
     }
@@ -185,7 +185,7 @@ fn start_rank_word(start) {
     let rank = lifecycle_text(start, "rank");
     let digest = lifecycle_text(start, "rank_digest");
     if rank == "" {
-        return "no rank".to_string();
+        return "no rank";
     }
     if digest == "" {
         return (`rank \`${rank}\`, no rank block (nothing appended)`);
@@ -197,16 +197,16 @@ fn start_cancellation(start) {
     match start.get("cancellation") {
         Some(c) => {
             if lifecycle_null(c) {
-                "none".to_string()
+                "none"
             } else {
                 `${c}`
             }
         }
-        None => "none".to_string(),
+        None => "none",
     }
 }
 
-fn lifecycle_null_str(v) {
+fn null_text(v) {
     v == "null" || v == ""
 }
 
