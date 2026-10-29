@@ -34,7 +34,7 @@ pub fn manifest() {
     }
 }
 
-pub async fn run(input) {
+pub async fn call(input) {
     let session = match text_of(input.get("session")) {
         Some(s) => s,
         None => return Err("coordinator_rank needs `session`: the session's durable address, exactly as `eidolon peers` prints it — never a display name"),

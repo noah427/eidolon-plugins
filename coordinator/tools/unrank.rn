@@ -21,7 +21,7 @@ pub fn manifest() {
     }
 }
 
-pub async fn run(input) {
+pub async fn call(input) {
     let session = match text_of(input.get("session")) {
         Some(s) => s,
         None => return Err("coordinator_unrank needs `session`: the durable address whose assignment is being released"),

@@ -17,7 +17,7 @@ pub fn manifest() {
     }
 }
 
-pub async fn run(input) {
+pub async fn call(input) {
     let caller = my_address().await?;
     call_service("ranks", #{
         "caller": caller,
