@@ -39,7 +39,12 @@ pub async fn call(input) {
         Some(r) => r,
         None => [],
     };
+    let starts = match input.get("starts") {
+        Some(r) => r,
+        None => [],
+    };
     let a = eidolon::plugin_state_write(#{ "key": "store", "value": json::to_string(store)?, "revision": revision_of("store").await? }).await?;
     let b = eidolon::plugin_state_write(#{ "key": "ranks", "value": json::to_string(ranks)?, "revision": revision_of("ranks").await? }).await?;
-    Ok(`seeded store ${a} ranks ${b}`)
+    let c = eidolon::plugin_state_write(#{ "key": "starts", "value": json::to_string(starts)?, "revision": revision_of("starts").await? }).await?;
+    Ok(`seeded store ${a} ranks ${b} starts ${c}`)
 }

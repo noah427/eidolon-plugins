@@ -146,6 +146,13 @@ check "W7: and refuses to decide a halt from an unknown" "$report" "not stated: 
 check_absent "W7: so no notice is invented for a peer that is merely not reporting" "$report" "W7 hook_peer: {\"notes\":[\"w8: halted"
 check "W7: while a stated busy false still halts (W1, and the hooks suite)" "$report" "W1 hook_peer: "
 
+# ---- W8: the two render-only sentences ----
+check_absent "W8: hook_peer decides the release without a fabricated epoch" "$report" "epoch 0 was released"
+check "W8: and says the epoch is not stated" "$report" "epoch not stated was released"
+w8=$(printf '%s\n' "$report" | sed -n '/^W8 adoptions:/,$p')
+check_absent "W8: adoptions never prints a managed start's epoch as 0" "$w8" "adoption epoch 0"
+check "W8: but as not stated" "$w8" "adoption epoch not stated"
+
 if [ "$fail" -ne 0 ]; then
     say "FAIL lifecycle-witness.sh: $fail check(s) failed"
     exit 1

@@ -76,7 +76,7 @@ pub async fn call(input) {
             out += "a managed-start row is not an object; it is shown as it stands\n";
             continue;
         }
-        out += `managed start ${lifecycle_text(start, "operation")}: ${start_rank_word(start)}; durable phase ${lifecycle_text(start, "phase")}, session ${lifecycle_text(start, "session")}, adoption epoch ${lifecycle_number(start, "adoption_epoch")} (not current liveness)\n`;
+        out += `managed start ${lifecycle_text(start, "operation")}: ${start_rank_word(start)}; durable phase ${lifecycle_text(start, "phase")}, session ${lifecycle_text(start, "session")}, adoption epoch ${lifecycle_epoch_word(start, "adoption_epoch")} (not current liveness)\n`;
         out += `  cancellation: ${start_cancellation(start)} (historical exit receipt, not current liveness)\n`;
         out += "  store only\n";
     }
@@ -93,7 +93,7 @@ pub async fn call(input) {
         any = true;
         let worker = lifecycle_text(row, "worker");
         let name = lifecycle_text(row, "name");
-        out += `epoch ${epoch_word(row)} — ${worker}${if name == "" { "" } else { ` (called \`${name}\`)` }}\n`;
+        out += `epoch ${lifecycle_epoch_word(row, "epoch")} — ${worker}${if name == "" { "" } else { ` (called \`${name}\`)` }}\n`;
         out += "  adopted: the time is not stated by this plugin (no clock in the script vocabulary)\n";
         if lifecycle_released(row) {
             let at = lifecycle_text(row, "released_at_ms");
@@ -187,15 +187,6 @@ fn live_line(rows, worker, unseen) {
 // a number-shaped zero would read as a real adoption epoch. The notice id's derivation
 // still uses 0 for an absent epoch — an id is a key, not a claim about the world — but
 // nothing printed here is allowed to make that substitution.
-fn epoch_word(row) {
-    match row.get("epoch") {
-        Some(v) => {
-            if lifecycle_null(v) { "not stated" } else { `${v}` }
-        }
-        None => "not stated",
-    }
-}
-
 fn doorbell_word(row) {
     match row.get("reached") {
         Some(v) => {
@@ -352,13 +343,19 @@ fn claimants(rows, session) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:1eeee2a3b5ef2fee9d5617a7b013eb9cb05dd26a3ca12f7c061b0a61df6c3b0b
+// stamp: sha256:0ba27bcf610273c00cde93678b824e59607ec752bf351c33591c375783db3c45
 
 fn lifecycle_stated(row, key) {
     match row.get(key) {
         Some(v) => !lifecycle_null(v),
         None => false,
     }
+}
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
 }
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }

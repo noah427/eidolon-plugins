@@ -201,7 +201,7 @@ fn lifecycle_notice_text(row) {
     } else {
         `\`${name}\` (\`${worker}\`)`
     };
-    `${who} halted in epoch ${lifecycle_number(row, "epoch")}: the last ending was \`${lifecycle_text(row, "last")}\` with nothing in flight, occurrence \`${lifecycle_text(row, "occurrence")}\`. The adoption is retained — supervision ends only by an explicit release, so this notice is not a claim that the worker is gone.`
+    `${who} halted in epoch ${lifecycle_epoch_word(row, "epoch")}: the last ending was \`${lifecycle_text(row, "last")}\` with nothing in flight, occurrence \`${lifecycle_text(row, "occurrence")}\`. The adoption is retained — supervision ends only by an explicit release, so this notice is not a claim that the worker is gone.`
 }
 
 // The `eidolon::notice` input for one stored row. `event` names the observation
@@ -357,7 +357,7 @@ fn lifecycle_decide(store, observation) {
         if seen {
             return Ok(#{
                 "action": "released",
-                "why": `${worker}: epoch ${lifecycle_number(closed, "epoch")} was released${lifecycle_release_said(closed)}; nothing is written, because a durable release stops what its epoch still owed`,
+                "why": `${worker}: epoch ${lifecycle_epoch_word(closed, "epoch")} was released${lifecycle_release_said(closed)}; nothing is written, because a durable release stops what its epoch still owed`,
             });
         }
         return Ok(#{ "action": "none", "why": `${worker}: not adopted by this session; nothing announced` });
@@ -622,6 +622,17 @@ fn lifecycle_stated(row, key) {
         Some(v) => !lifecycle_null(v),
         None => false,
     }
+}
+
+// An epoch as a word for a person. A null or absent epoch is **not** epoch 0: unknown is not
+// zero, and a number-shaped zero in a sentence is how the next reader learns that numbers
+// here can be invented. The notice id's derivation still uses 0 for an absent epoch — an id
+// is a key, not a claim — but nothing rendered to a person makes that substitution.
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
 }
 
 // Three answers, because two cannot say "not stated": `true`, `false` and `unknown` for

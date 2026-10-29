@@ -185,6 +185,10 @@ pub async fn run(args) {
     check(out, bad, "decide: a released epoch is never handed a notice", field(released, "action"), "released");
     check(out, bad, "decide: and the sentence names the release and its reason",
           field(released, "why").contains("the work is done"), true);
+    let released_unstated = lifecycle_store_put(lifecycle_store_empty(), "adoptions",
+        [#{ "epoch": json::from_string("null")?, "worker": "w1", "released_at_ms": 9 }]);
+    check(out, bad, "decide: a released row with no stated epoch is not given one in the sentence",
+          field(lifecycle_decide(released_unstated, halt)?, "why").contains("epoch not stated was released"), true);
     check(out, bad, "decide: an unadopted worker is nothing to announce",
           field(lifecycle_decide(live_store, #{ "event": "peer_changed", "source": "nobody", "occurrence": "rc:9",
                  "payload": #{ "state": "ending", "last": "failed", "busy": false } })?, "action"), "none");

@@ -36,7 +36,7 @@ pub async fn call(input) {
         let worker = lifecycle_text(row, "worker");
         let name = lifecycle_text(row, "name");
         let who = if name == "" { worker } else { `${name} (${worker})` };
-        out += `${lifecycle_text(row, "notice_id")} — ${who} (epoch ${epoch_word(row)}): state \`${lifecycle_text(row, "state")}\`, last \`${lifecycle_text(row, "last")}\`, occurrence \`${lifecycle_text(row, "occurrence")}\`\n`;
+        out += `${lifecycle_text(row, "notice_id")} — ${who} (epoch ${lifecycle_epoch_word(row, "epoch")}): state \`${lifecycle_text(row, "state")}\`, last \`${lifecycle_text(row, "last")}\`, occurrence \`${lifecycle_text(row, "occurrence")}\`\n`;
         if lifecycle_text(row, "key_kind") == "observed" {
             out += "  (an ending the journal never saw: keyed on that registration instance's own count)\n";
         }
@@ -60,15 +60,6 @@ pub async fn call(input) {
 // The distinction the service drew between "not sent" and "sent but unconfirmed"
 // survives; the second half of it does not, because there is no longer a transport
 // that can half-succeed.
-fn epoch_word(row) {
-    match row.get("epoch") {
-        Some(v) => {
-            if lifecycle_null(v) { "not stated" } else { `${v}` }
-        }
-        None => "not stated",
-    }
-}
-
 fn outcome_word(row, store) {
     let word = lifecycle_text(row, "outcome");
     let record = lifecycle_number(row, "record");
@@ -149,13 +140,19 @@ async fn load_store() {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:1eeee2a3b5ef2fee9d5617a7b013eb9cb05dd26a3ca12f7c061b0a61df6c3b0b
+// stamp: sha256:0ba27bcf610273c00cde93678b824e59607ec752bf351c33591c375783db3c45
 
 fn lifecycle_stated(row, key) {
     match row.get(key) {
         Some(v) => !lifecycle_null(v),
         None => false,
     }
+}
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
 }
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }

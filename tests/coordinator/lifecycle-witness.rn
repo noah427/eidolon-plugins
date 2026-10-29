@@ -214,5 +214,30 @@ pub async fn run(args) {
     }
     out += `W7 store after: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
 
+    // ---- W8: the two remaining sentences that printed a fabricated epoch ----
+    //
+    // Neither can close an obligation, which is why they were follow-ups rather than
+    // conditions — but a number-shaped zero in a sentence a person reads is how the next
+    // reader learns that numbers here can be invented.
+    out += `W8 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "w11", "name": "", "note": "", "epoch": json::from_string("null")?,
+                             "released_at_ms": 7, "release_reason": "the work is done" }],
+            "notices": [],
+            "gaps": [],
+        },
+        "starts": [#{ "operation": "op-without-epoch", "phase": "Supervised", "session": "1793000000000",
+                      "adoption_epoch": json::from_string("null")? }],
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w11", "occurrence": "rc:71",
+            "payload": #{ "state": "ending", "last": "failed", "busy": false } }).await {
+        Ok(v) => out += `W8 hook_peer: ${v}\n`,
+        Err(e) => out += `W8 hook_peer ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(v) => out += `W8 adoptions:\n${v}\n`,
+        Err(e) => out += `W8 adoptions ERR: ${e}\n`,
+    }
+
     Ok(out)
 }

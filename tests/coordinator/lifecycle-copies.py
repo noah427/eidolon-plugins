@@ -48,6 +48,7 @@ MANIFEST = {
         "lifecycle_notice_text",
         "lifecycle_notice_args",
         "lifecycle_stated",
+        "lifecycle_epoch_word",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",
@@ -72,6 +73,7 @@ MANIFEST = {
     ],
     "hook_ready.rn": [
         "lifecycle_stated",
+        "lifecycle_epoch_word",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",
@@ -90,6 +92,7 @@ MANIFEST = {
     ],
     "notices.rn": [
         "lifecycle_stated",
+        "lifecycle_epoch_word",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",
@@ -102,6 +105,7 @@ MANIFEST = {
     ],
     "adoptions.rn": [
         "lifecycle_stated",
+        "lifecycle_epoch_word",
         "lifecycle_store_empty",
         "lifecycle_store_list",
         "lifecycle_store_put",
