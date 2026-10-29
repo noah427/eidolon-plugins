@@ -7,11 +7,20 @@
 // and no path — only the two answers below.
 //
 // The rule this file exists to keep: **a stop is reported only when the log says the exit was
-// observed.** The door's own answer is a completion signal — the verb ran and its record is
-// durable, and nothing more — so the outcome is read from `custody_inspect`'s typed
-// `cancellation` field (`exited`, `attempted`, or absent) and from nowhere else. No sentence is
-// parsed, and `Ok` is never promoted into "the child exited": on a door that formats the act's
-// refusal instead of propagating it, `Ok` carries "exit unconfirmed; supervision retained" too.
+// observed**, and the outcome is read from `custody_inspect`'s typed `cancellation` field
+// (`exited`, `attempted`, or absent) and from nowhere else. No sentence is parsed.
+//
+// `custody_cancel`'s `Ok` is not what decides it, and the reason is worth stating exactly rather
+// than flatteringly. On today's tree the verb propagates its own failure (`custody.rs`: the host
+// call is `host.cancel(...).map_err("exit unconfirmed")?`, and the durability of the exit receipt
+// has its own `map_err`), so **`Ok` does happen to imply a durably observed exit** — the door's
+// formatter carries two arms for outcomes its verb cannot return, and they are unreachable. That
+// is exactly why this file does not lean on `Ok`: the door's answer is prose and not a contract;
+// those dead arms would become live the moment `custody::cancel` began formatting instead of
+// propagating; and that neighbourhood is being refactored right now. A typed field whose meaning
+// is in its own documentation beats a completion signal whose meaning depends on an unreachable
+// branch. A comment that said "the outcome is never `Ok`" would be false today; this one says
+// only what is true of today and why the code does not depend on it.
 //
 // When the exit is not observed, supervision is retained in **this plugin's own ledger**: the
 // live adoption row for the worker carries core's word and the reason, and `coordinator_release`
@@ -302,7 +311,7 @@ fn store_put(store, key, list) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:39b70aec3d33bb24cc7b2420420da4a0b090cef27d71c3e72cba3cc8cefe0ba4
+// stamp: sha256:5571f456e964c4ae3b661519ec5789d9b85a04df6ff9d7f6c40fb2540d806aa0
 
 fn lifecycle_cancel_claim(readable, word) {
     if !readable {

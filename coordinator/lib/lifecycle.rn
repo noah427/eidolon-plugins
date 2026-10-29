@@ -393,9 +393,11 @@ fn lifecycle_release_said(row) {
 // `word` is the log's **typed** outcome — `custody_inspect`'s `cancellation` field, whose
 // documented set is `exited` and `attempted` — and never a sentence. The door's own answer
 // is a completion signal: it says the verb finished and its record is durable, and it is
-// not promoted into a claim about a process. (The door answers `Ok` with "exit observed"
-// *and* with "exit unconfirmed; supervision retained" on trees where the act's refusal is
-// formatted rather than propagated, so `Ok` cannot decide this and is not asked to.)
+// not promoted into a claim about a process. (On today's tree `custody_cancel` returns `Ok` only
+// after an `Exited` receipt is durable — the verb propagates the unobserved case rather than
+// formatting it — but that is a property of the verb and not of this word, and the door's own
+// formatter already carries two arms for outcomes the verb cannot return. So the claim stays a
+// function of the log's field, and neither the prose nor a later refactor can decide it.)
 //
 //   observed    the log states the exit was observed: a stop may be reported
 //   unobserved  the log holds a cancellation whose exit is not observed: supervision stays
