@@ -282,6 +282,27 @@ pub async fn run(args) {
     check(out, bad, "cancel claim: the door's sentence in the word slot never authorizes a stop",
           lifecycle_cancel_claim(true, "cancellation of `op-1`: exit observed; adoption_closed false"), "unobserved");
 
+    // ---- the epoch a sentence states: the log while it has one, the ledger after ----
+    //
+    // The dispatch-level witness cannot reach this rendering: a cancel in the fixture is answered by
+    // core's refusal, which records no outcome, so no sentence with an epoch in it is ever printed.
+    // The decision is pure, so it is checked here — and the null case is the one that matters, since
+    // a null `adoption_epoch` is an absence, not a zero to fall back to.
+    let log_states = #{ "adoption_epoch": 4 };
+    let ledger_states = #{ "epoch": 3 };
+    let log_null = #{ "adoption_epoch": json::from_string("null")? };
+    let picked = lifecycle_epoch_source(log_states, ledger_states);
+    check(out, bad, "epoch source: the log's own answer wins when it states one", picked.word, "4");
+    check(out, bad, "epoch source: and is named as the log's, not the ledger's", picked.source, "the log's answer");
+    let picked = lifecycle_epoch_source(#{}, ledger_states);
+    check(out, bad, "epoch source: with the field gone from the log, the ledger states it", picked.word, "3");
+    check(out, bad, "epoch source: and the sentence says where the number came from", picked.source, "from this ledger's adoption row for it, because the log states no adoption epoch");
+    let picked = lifecycle_epoch_source(log_null, ledger_states);
+    check(out, bad, "epoch source: a null in the log is an absence, not a zero — the ledger answers", picked.word, "3");
+    let picked = lifecycle_epoch_source(#{}, #{});
+    check(out, bad, "epoch source: with neither stating one, the answer is not stated", picked.word, "not stated");
+    check(out, bad, "epoch source: and it says so about both records rather than only one", picked.source, "not stated by either the log or this ledger");
+
     let text = "";
     for line in out {
         text += line + "\n";

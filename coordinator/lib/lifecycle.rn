@@ -388,6 +388,26 @@ fn lifecycle_release_said(row) {
     ` — the release said: ${reason}`
 }
 
+// Which epoch a rendered line states, and — in the same answer — where it came from.
+//
+// Two records may state one: `custody_inspect`'s `adoption_epoch`, while core still carries it, and
+// this plugin's own adoption row. The log wins when it states one, because it is the durable record
+// of the launch; the ledger's is used otherwise and the answer says so; and neither is "not stated",
+// which is not epoch 0 — a null in the log is not a number to fall back to, it is the absence that
+// sends us to the ledger.
+//
+// `adoptions.rn` keeps its own longer chain (a start row is a third source and its sentences name
+// current liveness); this is the two-source pick the cancellation's message needs.
+fn lifecycle_epoch_source(log, ledger) {
+    if lifecycle_stated(log, "adoption_epoch") {
+        return #{ "word": lifecycle_epoch_word(log, "adoption_epoch"), "source": "the log's answer" };
+    }
+    if lifecycle_stated(ledger, "epoch") {
+        return #{ "word": lifecycle_epoch_word(ledger, "epoch"), "source": "from this ledger's adoption row for it, because the log states no adoption epoch" };
+    }
+    #{ "word": "not stated", "source": "not stated by either the log or this ledger" }
+}
+
 // What one cancellation lets this plugin claim about a child's exit.
 //
 // `word` is the log's **typed** outcome — `custody_inspect`'s `cancellation` field, whose

@@ -105,12 +105,15 @@ pub async fn call(input) {
 
     if claim == "unobserved" {
         let marked = mark_supervision(worker, "attempted", reason, operation).await?;
-        let epoch = lifecycle_epoch_word(view, "adoption_epoch");
+        // The epoch the refusal sentence states, from the log while core still carries the field and
+        // from this ledger afterwards — the same treatment `adoptions.rn` gives a start row, because
+        // a reader who is told which row to retry wants to know *which* one.
+        let epoch = epoch_and_source(worker, view).await?;
         // Assembled in a fragment of its own: a template string that is itself interpolated into
         // another one is where the vocabulary traps live (see the lane's vocabulary note).
         let kept = "";
         if worker != "" {
-            kept = ` — and coordinator_release will refuse ${worker} (epoch ${epoch}) until an exit is observed; a retry of this verb with the same reason re-asks the OS half and reads the log again.`;
+            kept = ` — and coordinator_release will refuse ${worker} (epoch ${epoch.word}; ${epoch.source}) until an exit is observed; a retry of this verb with the same reason re-asks the OS half and reads the log again.`;
         }
         return Err(`cancellation of \`${operation}\` recorded a durable intent, and the exit was **not** observed: the log's own outcome word is \`${word}\`, not \`exited\`, so nothing here may be reported as stopped. Supervision is retained — ${marker_said(marked, worker, "attempted")}${kept} The door's answer, carried verbatim and not interpreted: ${sentence}`);
     }
@@ -129,6 +132,22 @@ pub async fn call(input) {
     // `unrecorded`: core's verb answered and the log holds no cancellation for this operation —
     // so the answer was a refusal, and a refusal has nothing to mark.
     Err(`cancellation of \`${operation}\` recorded nothing: the custody log holds no cancellation for it, so the answer above is a refusal rather than a cancellation, and this ledger was left exactly as it was. The door's answer, carried verbatim: ${sentence}`)
+}
+
+// Which epoch the cancellation's sentence states, and where it came from: the log's field while
+// core still carries it, otherwise this ledger's live adoption row for `worker`, otherwise "not
+// stated". Read after the marker is written, so the row this reads is the row the release guard
+// will read.
+async fn epoch_and_source(worker, view) {
+    let ledger = #{};
+    if worker != "" {
+        let loaded = load_store().await?;
+        match lifecycle_find_adoption(store_list(loaded.store, "adoptions"), worker) {
+            Some(r) => ledger = r,
+            None => {}
+        }
+    }
+    lifecycle_epoch_source(view, ledger)
 }
 
 // Record core's word on this plugin's own supervision row for `worker` — the live adoption row,
@@ -311,8 +330,17 @@ fn store_put(store, key, list) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:5571f456e964c4ae3b661519ec5789d9b85a04df6ff9d7f6c40fb2540d806aa0
+// stamp: sha256:495cda0441adb5e72bd5554f59eb8e736e3b7c601503a0d331e26447a99ff9c2
 
+fn lifecycle_epoch_source(log, ledger) {
+    if lifecycle_stated(log, "adoption_epoch") {
+        return #{ "word": lifecycle_epoch_word(log, "adoption_epoch"), "source": "the log's answer" };
+    }
+    if lifecycle_stated(ledger, "epoch") {
+        return #{ "word": lifecycle_epoch_word(ledger, "epoch"), "source": "from this ledger's adoption row for it, because the log states no adoption epoch" };
+    }
+    #{ "word": "not stated", "source": "not stated by either the log or this ledger" }
+}
 fn lifecycle_cancel_claim(readable, word) {
     if !readable {
         return "unknown";

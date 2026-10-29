@@ -49,6 +49,7 @@ MANIFEST = {
     # The one handler whose act is core's and whose *claim* is its own: it reads the log's
     # typed cancellation word, so it carries the decision and the row readers it needs.
     "cancel.rn": [
+        "lifecycle_epoch_source",
         "lifecycle_cancel_claim",
         "lifecycle_stated",
         "lifecycle_true",
