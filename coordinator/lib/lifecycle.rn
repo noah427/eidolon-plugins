@@ -83,7 +83,17 @@ fn lifecycle_evaluate(observation) {
         return #{ "action": "none", "why": `edge \`${state}\` is not an ending` };
     }
     let last = lifecycle_text(payload, "last");
-    if lifecycle_true(payload.get("busy")) {
+    let busy = lifecycle_tristate(payload, "busy");
+    if busy == "unknown" {
+        // A halt is a claim that the peer stopped. `busy` not stated is not a claim that
+        // it stopped, and deciding one from it would put a notice in the conversation for
+        // a peer that is merely not reporting — noise that makes the true notices cheaper
+        // to ignore. So an unknown defers: no notice, and the next observation decides.
+        // (The deferred observation is re-offered by the harness, and `hook_peer` writes
+        // nothing, so nothing is lost by waiting.)
+        return #{ "action": "none", "why": `ending \`${last}\` with \`busy\` not stated: an unknown is not a false, and a halt decided from it would be invented rather than observed` };
+    }
+    if busy == "true" {
         return #{ "action": "none", "why": `ending \`${last}\` while busy: this is not a stalled source` };
     }
     if !lifecycle_halt_word(last) {
@@ -588,6 +598,29 @@ fn lifecycle_text(row, key) {
 // and the fix belongs in every such reader, not in the two that were noticed first — a
 // null `busy` in an observation killed `hook_peer` exactly as a null `record` killed
 // `notices`. Absent, null and unparseable all read as false; nothing is guessed.
+// Three answers, because two cannot say "not stated": `true`, `false` and `unknown` for
+// an absent, null or unparseable value. Used where a decision hangs on the answer — see
+// `lifecycle_evaluate` on `busy`. `lifecycle_true` remains for fields this plugin wrote
+// itself, where absent legitimately means false and no observation is being decided.
+fn lifecycle_tristate(row, key) {
+    match row.get(key) {
+        None => "unknown",
+        Some(v) => {
+            if lifecycle_null(v) {
+                "unknown"
+            } else if v is bool {
+                if v { "true" } else { "false" }
+            } else if `${v}` == "true" {
+                "true"
+            } else if `${v}` == "false" {
+                "false"
+            } else {
+                "unknown"
+            }
+        }
+    }
+}
+
 fn lifecycle_true(v) {
     match v {
         Some(b) => {

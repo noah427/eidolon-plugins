@@ -85,6 +85,12 @@ pub async fn run(args) {
     check(out, bad, "halt: cancelled is not one of the named failures", action(ending("cancelled", false)), "none");
     check(out, bad, "halt: unknown is not inferred to be a failure", action(ending("unknown", false)), "none");
     check(out, bad, "halt: a failed ending while busy is not stalled", action(ending("failed", true)), "none");
+    check(out, bad, "halt: an ending with `busy` absent is not a halt — unknown is not false",
+          action(#{ "payload": #{ "state": "ending", "last": "failed" } }), "none");
+    check(out, bad, "halt: an ending with `busy` null is not a halt either",
+          action(#{ "payload": #{ "state": "ending", "last": "failed", "busy": json::from_string("null")? } }), "none");
+    check(out, bad, "halt: and the deferral says why, rather than staying silent",
+          field(lifecycle_evaluate(#{ "payload": #{ "state": "ending", "last": "failed" } }), "why").contains("not stated"), true);
     check(out, bad, "halt: a turn edge is not a completion",
           action(#{ "payload": #{ "state": "turn", "last": "failed", "busy": false } }), "none");
     check(out, bad, "halt: unavailable writes nothing",

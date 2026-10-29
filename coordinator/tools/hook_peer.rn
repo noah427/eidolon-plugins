@@ -374,7 +374,7 @@ async fn store_blind(notes, uncertain) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:234c1bd2d7f0df48c00f4531e9fb112711b02cb6ba80f6c806fb66bb52e124a0
+// stamp: sha256:ff26797396852481b827ffb9aeed6b34ead90ac1b720c6d4f4ca7cfd741d6612
 
 fn lifecycle_blind(store, notes, uncertain) {
     store.insert("blind", #{ "notes": notes, "uncertain": uncertain });
@@ -421,6 +421,24 @@ fn lifecycle_ascii_byte(c) {
     }
     Err(`character ${c} is outside the ASCII byte set this derivation accepts: a notice id over a different byte spelling would not be the service's id, so the occurrence is refused rather than given a second identity`)
 }
+fn lifecycle_tristate(row, key) {
+    match row.get(key) {
+        None => "unknown",
+        Some(v) => {
+            if lifecycle_null(v) {
+                "unknown"
+            } else if v is bool {
+                if v { "true" } else { "false" }
+            } else if `${v}` == "true" {
+                "true"
+            } else if `${v}` == "false" {
+                "false"
+            } else {
+                "unknown"
+            }
+        }
+    }
+}
 fn lifecycle_evaluate(observation) {
     let payload = lifecycle_payload(observation);
     let state = lifecycle_text(payload, "state").trim().to_lowercase();
@@ -434,7 +452,17 @@ fn lifecycle_evaluate(observation) {
         return #{ "action": "none", "why": `edge \`${state}\` is not an ending` };
     }
     let last = lifecycle_text(payload, "last");
-    if lifecycle_true(payload.get("busy")) {
+    let busy = lifecycle_tristate(payload, "busy");
+    if busy == "unknown" {
+        // A halt is a claim that the peer stopped. `busy` not stated is not a claim that
+        // it stopped, and deciding one from it would put a notice in the conversation for
+        // a peer that is merely not reporting — noise that makes the true notices cheaper
+        // to ignore. So an unknown defers: no notice, and the next observation decides.
+        // (The deferred observation is re-offered by the harness, and `hook_peer` writes
+        // nothing, so nothing is lost by waiting.)
+        return #{ "action": "none", "why": `ending \`${last}\` with \`busy\` not stated: an unknown is not a false, and a halt decided from it would be invented rather than observed` };
+    }
+    if busy == "true" {
         return #{ "action": "none", "why": `ending \`${last}\` while busy: this is not a stalled source` };
     }
     if !lifecycle_halt_word(last) {

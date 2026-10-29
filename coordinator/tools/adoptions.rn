@@ -93,7 +93,7 @@ pub async fn call(input) {
         any = true;
         let worker = lifecycle_text(row, "worker");
         let name = lifecycle_text(row, "name");
-        out += `epoch ${lifecycle_number(row, "epoch")} — ${worker}${if name == "" { "" } else { ` (called \`${name}\`)` }}\n`;
+        out += `epoch ${epoch_word(row)} — ${worker}${if name == "" { "" } else { ` (called \`${name}\`)` }}\n`;
         out += "  adopted: the time is not stated by this plugin (no clock in the script vocabulary)\n";
         if lifecycle_released(row) {
             let at = lifecycle_text(row, "released_at_ms");
@@ -157,7 +157,9 @@ fn live_line(rows, worker, unseen) {
     let c = claimants[0];
     let id = lifecycle_text(c, "id");
     let named = if id == "" { "?" } else { id };
-    let silent = if lifecycle_true(c.get("reached")) { "" } else { " (doorbell silent)" };
+    // `reached` is three answers too: not published is not "silent", and a row that
+    // never said must not read as one that did.
+    let silent = doorbell_word(c);
     let ending = "";
     match c.get("outcome_at") {
         Some(n) => {
@@ -179,6 +181,34 @@ fn live_line(rows, worker, unseen) {
         }
     }
     `live as \`${named}\`${silent}: state \`${lifecycle_text(c, "state")}\`, last \`${lifecycle_text(c, "last")}\`${ending}`
+}
+
+// An epoch as a word. A null or absent epoch is **not** epoch 0: unknown is not zero, and
+// a number-shaped zero would read as a real adoption epoch. The notice id's derivation
+// still uses 0 for an absent epoch — an id is a key, not a claim about the world — but
+// nothing printed here is allowed to make that substitution.
+fn epoch_word(row) {
+    match row.get("epoch") {
+        Some(v) => {
+            if lifecycle_null(v) { "not stated" } else { `${v}` }
+        }
+        None => "not stated",
+    }
+}
+
+fn doorbell_word(row) {
+    match row.get("reached") {
+        Some(v) => {
+            if lifecycle_null(v) {
+                " (doorbell state not published)"
+            } else if lifecycle_true(row.get("reached")) {
+                ""
+            } else {
+                " (doorbell silent)"
+            }
+        }
+        None => " (doorbell state not published)",
+    }
 }
 
 fn start_rank_word(start) {
@@ -322,7 +352,7 @@ fn claimants(rows, session) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:234c1bd2d7f0df48c00f4531e9fb112711b02cb6ba80f6c806fb66bb52e124a0
+// stamp: sha256:ff26797396852481b827ffb9aeed6b34ead90ac1b720c6d4f4ca7cfd741d6612
 
 fn lifecycle_store_empty() {
     #{ "adoptions": [], "notices": [], "gaps": [] }

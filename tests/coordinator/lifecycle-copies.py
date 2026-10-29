@@ -40,6 +40,7 @@ MANIFEST = {
         "lifecycle_eat",
         "lifecycle_hex16",
         "lifecycle_ascii_byte",
+        "lifecycle_tristate",
         "lifecycle_evaluate",
         "lifecycle_halt_word",
         "lifecycle_gap_row",
