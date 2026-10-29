@@ -162,11 +162,30 @@ check "W8: but as not stated" "$w8" "adoption epoch not stated"
 check_absent "W9: the adoption goes through the door, not the monitor" "$report" "W9 adopt ERR"
 check "W9: the door answered its own sentence, naming the epoch" "$report" "in epoch 1"
 check "W9: and this ledger completed its row from it" "$report" "This ledger records it: epoch 1"
-w9=$(printf '%s\n' "$report" | sed -n '/^W9 halt:/,$p')
+w9=$(printf '%s\n' "$report" | sed -n '/^W9 halt:/,/^W9 store after halt:/p')
 check_absent "W9: the halt handler reads the row the writer wrote" "$w9" "not adopted by this session"
 check "W9: and journals the notice it owes" "$w9" "journaled in this session's log as record"
 check "W9: which the ledger holds as written" "$w9" '\"outcome\":\"written\"'
 check "W9: keyed on the epoch the door named, not a fabricated one" "$w9" '\"epoch\":1'
+
+# ---- W10: the crash between the two writes, and the retry that reconciles ----
+check "W10: the first adoption is durable in the harness" "$report" "in epoch 1"
+check "W10: and this ledger held it before the loss" "$report" '\"worker\":\"1793000000043\"'
+w10=$(printf '%s\n' "$report" | sed -n '/^W10 halt before repair:/,$p')
+check "W10: with the row lost, a halt is honestly unannounced" "$w10" "not adopted by this session"
+check "W10: the retry is refused by the door rather than creating a second adoption" "$w10" "already held this adoption"
+check "W10: and it names the same epoch" "$w10" "in epoch 1"
+check "W10: so the repaired ledger row carries it" "$w10" '\"epoch\":1'
+check_absent "W10: with no fabricated epoch anywhere" "$w10" '\"epoch\":0'
+check "W10: a halt after the repair is announced" "$w10" "journaled in this session's log as record"
+# The harness's own record: exactly one adoption for that worker, because the retry was refused.
+adoptions=$("$eidolon" log "$session" --json 2>/dev/null | grep '"Adoption":' | grep -c '1793000000043' || true)
+if [ "${adoptions:-0}" -eq 1 ]; then
+    say "ok   W10: the harness's log holds exactly one adoption for that worker — the retry created none"
+else
+    say "FAIL W10: ${adoptions:-0} Adoption row(s) for that worker in the session log, wanted 1"
+    fail=$((fail + 1))
+fi
 
 if [ "$fail" -ne 0 ]; then
     say "FAIL lifecycle-witness.sh: $fail check(s) failed"

@@ -25,6 +25,16 @@
 // and there is no primitive that reads an adoption back (`custody_inspect` answers for a
 // managed start's operation, and an adoption has none). Two stores are two facts, and
 // this file says which one it is reporting.
+//
+// **The epoch is derived from the door's answer, and that is a bridge, not a fact.**
+// `custody_adopt` returns `{"adopted": "<sentence>"}` — prose — and this file reads one
+// integer out of it so the halt handler can key a notice. Deriving durable identity from
+// wording is the same class of error as reading a display string as an id, one layer out;
+// it is done here only because the door exposes no typed field yet, it is labelled as
+// derived everywhere it appears (code, this file's answers, and the report), and it is
+// deleted the moment `Doors::adopt` returns a structured result. Nothing else in this
+// plugin treats the sentence as authority: the door's own words are quoted, never parsed
+// for anything but that one integer.
 
 pub fn manifest() {
     #{
@@ -87,10 +97,11 @@ pub async fn call(input) {
             if sentence == "" {
                 return Err(`the custody door answered without an \`adopted\` sentence: ${raw}. The adoption may or may not have been written; the door is the record, and this ledger will not invent one`);
             }
-            // The epoch is one integer out of the harness's own sentence, and this is the
-            // one place this file reads prose. It is needed because the halt handler's
-            // notice id is derived over it; if it cannot be read, the row is written
-            // without an epoch and the handler says so rather than keying a notice on 0.
+            // **Derived from prose, deliberately labelled.** The epoch is one integer out of
+            // the door's own sentence, needed because the halt handler's notice id is derived
+            // over it. If it cannot be read the row is written without one and the answer says
+            // halts will not be announced — the rule that no epoch is ever invented applies
+            // here as much as in the readers.
             let epoch = epoch_of(sentence);
             let wrote = record(worker, name, note, caller, epoch).await?;
             Ok(`${sentence}\n${wrote}`)
@@ -140,7 +151,7 @@ async fn record(worker, name, note, coordinator, epoch) {
             if !ledger_stated(existing, "epoch") || held == epoch {
                 return Ok(`This ledger already records epoch ${lifecycle_epoch_word(existing, "epoch")} for that worker, so it wrote nothing: the harness's adoption and this ledger's row agree.`);
             }
-            return Err(`state disagreement: the harness says epoch ${epoch}, and this ledger holds a live adoption of ${worker} in epoch ${held}. Nothing was written. Reconcile the two by hand — a second live row would be a second identity for one adoption`);
+            return Err(`this ledger holds a live adoption of ${worker} in epoch ${held}, and the door's refusal named epoch ${lifecycle_epoch_word(#{ "epoch": epoch }, "epoch")}. Nothing was written: a second live row would be a second identity for one adoption, and this tool will not invent an epoch to make the two agree`);
         }
 
         let row = #{
@@ -170,6 +181,11 @@ async fn record(worker, name, note, coordinator, epoch) {
 }
 
 // The epoch out of the harness's own sentence: `adopted {worker} in epoch {n}…` either way.
+//
+// **A bridge across an API gap.** The door returns prose; this reads one integer out of it
+// because the ledger needs a number and there is no typed field to take. It is derived, not
+// observed, and it disappears when `Doors::adopt` returns a structured result. Nothing here
+// trusts any other word of the sentence.
 //
 // Only `chars()` is used, and no negative literal appears: this Rune's `String` has no
 // `find`, and `return -1` is read as `return` (of unit) followed by unary minus, which is
