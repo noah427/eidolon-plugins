@@ -1,0 +1,149 @@
+// The witnesses the amendment asks for, through the **real handlers and the real
+// dispatcher**: `coordinator_hook_peer`, `coordinator_hook_ready`, `coordinator_adoptions`
+// and `coordinator_notices` are dispatched here exactly as the lifecycle runner
+// dispatches them, against a real `plugin_state` store and a real session log.
+//
+// One scenario per condition, each re-seeding the whole ledger first:
+//   W1  a JSON null in a ledger row and in a roster row, read by all three readers
+//   W2  a ledger that cannot be read is never a false `Ok` (no terminal `Fired`)
+//   W3  a crash after the notice is journaled and before the mark: the reconcile
+//       deduplicates it and keeps the delivery id and record stable
+//   W4  a release racing delivery: `pending`, `written` and `cancelled` all come out
+//       accurate, a delivered notice is never retracted, and no row claims "never sent"
+
+pub fn workflow() {
+    #{
+        name: "lifecycle-witness",
+        description: "Drive the coordinator's three readers and the halt handler through the real store and the real log, once per condition C1-C3.",
+        approval: "read_only",
+        params: #{ "type": "object", "properties": #{} },
+    }
+}
+
+fn field(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+pub async fn run(args) {
+    let out = "";
+    // A tool's answer reaches a workflow as JSON **text**, not as a Rune object, so
+    // every reply this program reads a field from is parsed first.
+    let me = json::from_string(eidolon::tool_call("coordinator_me", #{}).await?)?;
+    let session = field(me, "session");
+    out += `session: ${session}\n`;
+
+    // ---- W1: the documented row shape, and a live claimant ----
+    //
+    // `released_at_ms: null` is what the plan's ledger row looks like, and the roster
+    // publishes `outcome_at: null` for a session with no ending yet — which this run's
+    // own row is. Before the null fix, all three readers threw on one or the other.
+    out += `W1 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [
+                #{ "worker": "w1", "name": "grinder", "note": "", "epoch": 1, "released_at_ms": json::from_string("null")?, "release_reason": "" },
+                #{ "worker": session, "name": "itself", "note": "", "epoch": 2, "released_at_ms": json::from_string("null")?, "release_reason": "" },
+            ],
+            "notices": [
+                #{ "notice_id": "delivered01", "worker": "w1", "epoch": 1, "kind": "stuck", "state": "stuck",
+                   "last": "failed", "occurrence": "rc:1", "key_kind": "outcome", "outcome": "delivered",
+                   "answered_at_ms": json::from_string("null")?, "text": "the retired monitor recorded this one as delivered" },
+            ],
+            "gaps": [],
+        },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:7",
+            "payload": #{ "state": "ending", "last": "iteration limit", "busy": false } }).await {
+        Ok(v) => out += `W1 hook_peer: ${v}\n`,
+        Err(e) => out += `W1 hook_peer ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_hook_ready", #{ "event": "plugin_ready" }).await {
+        Ok(v) => out += `W1 hook_ready: ${v}\n`,
+        Err(e) => out += `W1 hook_ready ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(v) => out += `W1 adoptions:\n${v}\n`,
+        Err(e) => out += `W1 adoptions ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_notices", #{}).await {
+        Ok(v) => out += `W1 notices:\n${v}\n`,
+        Err(e) => out += `W1 notices ERR: ${e}\n`,
+    }
+
+    // ---- W2: a ledger that cannot be read is never a false `Ok` ----
+    //
+    // The handler is given a store whose `adoptions` is not a list: `load_store` refuses
+    // it by name rather than repairing it. A reply of `Ok` here would be `Fired` and
+    // would close the observation forever, so the witness is that the answer is an `Err`
+    // naming the refusal. (A write refused by the store itself — the other half of C2 —
+    // cannot be forced from here: `workflow run` mints a session of its own, so no second
+    // writer can hold the key at the right moment. That is stated in the report.)
+    out += `W2 seed: ${eidolon::tool_call("coordinator_seed_json", #{ "store": #{ "adoptions": "not a list" } }).await?}\n`;
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:8",
+            "payload": #{ "state": "ending", "last": "failed", "busy": false } }).await {
+        Ok(v) => out += `W2 hook_peer OK (WRONG: a false Fired): ${v}\n`,
+        Err(e) => out += `W2 hook_peer ERR: ${e}\n`,
+    }
+
+    // ---- W3: journaled, then the mark lost ----
+    //
+    // The ledger is left saying `pending` while the log already holds the notice, which
+    // is exactly the state the handler's own uncertain path leaves behind. The reconcile
+    // must journal the same id again (the log answers `already`), mark the row with the
+    // record the log named, and not emit a second notice.
+    let id = lifecycle_notice_id("c1", 3, "w3", "rc:21")?;
+    out += `W3 journal: ${eidolon::tool_call("coordinator_journal", #{ "id": id, "text": "the halt, journaled before the mark was lost" }).await?}\n`;
+    out += `W3 id: ${id}\n`;
+    out += `W3 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "w3", "name": "grinder", "note": "", "epoch": 3, "released_at_ms": json::from_string("null")?, "release_reason": "" }],
+            "notices": [#{ "notice_id": id, "worker": "w3", "epoch": 3, "kind": "stuck", "state": "stuck",
+                           "last": "failed", "occurrence": "rc:21", "key_kind": "outcome", "outcome": "pending",
+                           "text": "the halt, journaled before the mark was lost" }],
+            "gaps": [],
+        },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w3", "occurrence": "rc:22",
+            "payload": #{ "state": "turn", "last": "", "busy": false } }).await {
+        Ok(v) => out += `W3 reconcile: ${v}\n`,
+        Err(e) => out += `W3 reconcile ERR: ${e}\n`,
+    }
+    out += `W3 store after: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+
+    // ---- W4: a release racing delivery ----
+    //
+    // Three rows: one open in a released epoch (must be cancelled), one open in a live
+    // epoch (must be journaled and marked), one already `written` in a released epoch
+    // (must be left exactly as it is — a release cannot retract what is in the log).
+    out += `W4 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [
+                #{ "worker": "w5", "name": "", "note": "", "epoch": 1, "released_at_ms": 7, "release_reason": "the work is done" },
+                #{ "worker": "w6", "name": "", "note": "", "epoch": 2, "released_at_ms": json::from_string("null")?, "release_reason": "" },
+                #{ "worker": "w7", "name": "", "note": "", "epoch": 3, "released_at_ms": 8, "release_reason": "the work is done" },
+            ],
+            "notices": [
+                #{ "notice_id": "pendrel1", "worker": "w5", "epoch": 1, "kind": "stuck", "state": "stuck", "last": "failed",
+                   "occurrence": "rc:31", "key_kind": "outcome", "outcome": "pending", "text": "owed to an epoch that closed" },
+                #{ "notice_id": "pendlive2", "worker": "w6", "epoch": 2, "kind": "stuck", "state": "stuck", "last": "failed",
+                   "occurrence": "rc:32", "key_kind": "outcome", "outcome": "pending", "text": "owed to an epoch still open" },
+                #{ "notice_id": "writtenrel3", "worker": "w7", "epoch": 3, "kind": "stuck", "state": "stuck", "last": "failed",
+                   "occurrence": "rc:33", "key_kind": "outcome", "outcome": "written", "record": 41, "text": "already in the log" },
+            ],
+            "gaps": [],
+        },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_hook_peer", #{ "event": "peer_changed", "source": "w9", "occurrence": "rc:34",
+            "payload": #{ "state": "turn", "last": "", "busy": false } }).await {
+        Ok(v) => out += `W4 reconcile: ${v}\n`,
+        Err(e) => out += `W4 reconcile ERR: ${e}\n`,
+    }
+    out += `W4 store after: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
+    match eidolon::tool_call("coordinator_notices", #{}).await {
+        Ok(v) => out += `W4 notices:\n${v}\n`,
+        Err(e) => out += `W4 notices ERR: ${e}\n`,
+    }
+    Ok(out)
+}

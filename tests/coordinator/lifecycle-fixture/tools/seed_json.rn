@@ -1,0 +1,45 @@
+// Test fixture only: put this run's ledger (and its rank list) into a known state.
+// Not shipped.
+//
+// The store is read first so the write carries the revision it stands at: this fixture
+// is a *second* writer in the same session, which is what lets a witness set up a
+// store the handlers could not have produced themselves (a documented-shape row, a
+// row left `pending`, a row already `written` in a released epoch).
+
+pub fn manifest() {
+    #{
+        name: "coordinator_seed_json",
+        description: "Test fixture: replace this run's ledger with the object given, and its rank list with the list given.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "store": #{ "type": "object" },
+                "ranks": #{ "type": "array" },
+            },
+        },
+    }
+}
+
+async fn revision_of(key) {
+    let raw = eidolon::plugin_state_read(#{ "key": key }).await?;
+    let reply = json::from_string(raw)?;
+    match reply.get("revision") {
+        Some(v) => Ok(v),
+        None => Ok(0),
+    }
+}
+
+pub async fn call(input) {
+    let store = match input.get("store") {
+        Some(s) => s,
+        None => return Err("coordinator_seed_json needs `store`"),
+    };
+    let ranks = match input.get("ranks") {
+        Some(r) => r,
+        None => [],
+    };
+    let a = eidolon::plugin_state_write(#{ "key": "store", "value": json::to_string(store)?, "revision": revision_of("store").await? }).await?;
+    let b = eidolon::plugin_state_write(#{ "key": "ranks", "value": json::to_string(ranks)?, "revision": revision_of("ranks").await? }).await?;
+    Ok(`seeded store ${a} ranks ${b}`)
+}
