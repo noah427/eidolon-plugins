@@ -624,6 +624,33 @@ fn lifecycle_prefix_of(rank) {
     ""
 }
 
+// ---- the address is the harness's spelling, never one this plugin invents -----
+//
+// An address is a **file stem** — `session_id_of` is `file_stem()`, and the harness mints it as
+// `{millis}.eid` or `{millis}-{n}.eid`. Nothing in that set begins or ends with whitespace, so a
+// padded address is not a dirty spelling of a real address: it names nobody, and a ledger row
+// written under it is a record no `peers` ever printed.
+//
+// Refused, **never canonicalised**. Trimming and writing would rebind the row onto whatever the
+// trimmed string resembles — an act about one address would become a record about another — and
+// the row *is* the adoption. `trim()` here is a test, not a repair.
+//
+// The test is `!=` rather than a scan for the space character because `trim()` empties space, NBSP
+// and em-space alike, and those are exactly the classes no other guard in this plugin sees:
+// `refuse_control_chars` catches `\n`, `\r`, `\t` and nothing else, so NBSP is accepted by every
+// check written before this one. An *interior* space is unreachable by minting and stays accepted —
+// a residual recorded on the witness map, not silently covered by a rule that would not cover it.
+//
+// The minted shape is not the test either: `1791594791668-1` is a real id (a same-millisecond
+// collision), so "digits and a dash only" would refuse a legitimate address. Whitespace is the
+// question; the shape is not.
+fn lifecycle_refuse_padded_address(field, s) {
+    if s != s.trim() {
+        return Some(`\`${field}\` carries padding: an address is the exact spelling the harness minted, with nothing before it or after it. Copy it from \`eidolon peers\` — this plugin keeps the record under the address it was given, so a padded one is refused rather than trimmed into a different one`);
+    }
+    None
+}
+
 // ---- small readers, kept here so every shape decision is in one file ----
 
 fn lifecycle_payload(observation) {

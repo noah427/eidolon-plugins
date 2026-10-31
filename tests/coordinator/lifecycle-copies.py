@@ -35,6 +35,7 @@ MARKER = "// --- generated: the policy copy, from coordinator/lib/lifecycle.rn -
 # not define. Adding a function here is the deliberate act; `--write` does the rest.
 MANIFEST = {
     "release.rn": [
+        "lifecycle_refuse_padded_address",
         "lifecycle_stated",
         "lifecycle_epoch_word",
         "lifecycle_store_empty",
@@ -65,6 +66,7 @@ MANIFEST = {
         "lifecycle_null",
     ],
     "adopt.rn": [
+        "lifecycle_refuse_padded_address",
         "lifecycle_true",
         "lifecycle_stated",
         "lifecycle_epoch_word",

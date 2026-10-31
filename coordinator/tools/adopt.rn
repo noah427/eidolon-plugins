@@ -63,6 +63,14 @@ pub async fn call(input) {
     if worker.trim() == "" {
         return Err("coordinator_adopt needs a durable address: `session` is empty or blank, and an address with nothing in it names no worker — pass it exactly as `eidolon peers` prints it");
     }
+    // Guard 1b, the padded address — the same contract, one step narrower: a string with something
+    // in it is not necessarily an address the harness ever minted. `"\u{00a0}X"` is non-blank, passes
+    // every control-character check (NBSP is not a control character) and names nobody. Refused, not
+    // trimmed: see `lifecycle_refuse_padded_address`.
+    match lifecycle_refuse_padded_address("session", worker) {
+        Some(e) => return Err(e),
+        None => {}
+    }
     let name = match text_of(input.get("name")) {
         Some(s) => s,
         None => "",
@@ -410,8 +418,14 @@ fn store_put(store, key, list) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:495cda0441adb5e72bd5554f59eb8e736e3b7c601503a0d331e26447a99ff9c2
+// stamp: sha256:7ffca3fdefd8213f8ecb2d07b197687157f57cd766b6cf0a3bfdb7e80a1ba2c1
 
+fn lifecycle_refuse_padded_address(field, s) {
+    if s != s.trim() {
+        return Some(`\`${field}\` carries padding: an address is the exact spelling the harness minted, with nothing before it or after it. Copy it from \`eidolon peers\` — this plugin keeps the record under the address it was given, so a padded one is refused rather than trimmed into a different one`);
+    }
+    None
+}
 fn lifecycle_true(v) {
     match v {
         Some(b) => {

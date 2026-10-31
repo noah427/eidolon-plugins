@@ -53,6 +53,14 @@ pub async fn call(input) {
         Some(e) => return Err(e),
         None => {}
     }
+    // The same padded-address contract `coordinator_adopt` keeps, at the other door over the same
+    // key: the ledger is looked up by exact equality, so a padded address here would find nothing
+    // and answer "not adopted" — true of that string, and false about the worker the caller meant.
+    // Refused with the reason instead, and never folded onto the trimmed spelling.
+    match lifecycle_refuse_padded_address("session", worker) {
+        Some(e) => return Err(e),
+        None => {}
+    }
     let reason = match text_of(input.get("reason")) {
         Some(s) => s,
         None => "",
@@ -269,8 +277,14 @@ fn store_put(store, key, list) {
 // `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
 // is compared against what the generator produces, so renaming a copy does not
 // exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
-// stamp: sha256:495cda0441adb5e72bd5554f59eb8e736e3b7c601503a0d331e26447a99ff9c2
+// stamp: sha256:7ffca3fdefd8213f8ecb2d07b197687157f57cd766b6cf0a3bfdb7e80a1ba2c1
 
+fn lifecycle_refuse_padded_address(field, s) {
+    if s != s.trim() {
+        return Some(`\`${field}\` carries padding: an address is the exact spelling the harness minted, with nothing before it or after it. Copy it from \`eidolon peers\` — this plugin keeps the record under the address it was given, so a padded one is refused rather than trimmed into a different one`);
+    }
+    None
+}
 fn lifecycle_stated(row, key) {
     match row.get(key) {
         Some(v) => !lifecycle_null(v),

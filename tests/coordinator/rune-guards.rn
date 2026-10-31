@@ -12,7 +12,7 @@
 pub fn workflow() {
     #{
         name: "rune-guards",
-        description: "Drive coordinator_adopt and coordinator_release into every guard they keep: a missing argument, a session adopting itself, a second live adoption of the same worker, a release, a re-adoption taking the next epoch, and a release of a worker this ledger never held. args: none",
+        description: "Drive coordinator_adopt and coordinator_release into every guard they keep: a missing argument, a session adopting itself, a second live adoption of the same worker, a release, a re-adoption taking the next epoch, a release of a worker this ledger never held, a padded address, and a control character in either door. args: none",
         approval: "mutating",
         params: #{ "type": "object", "properties": #{} },
     }
@@ -105,6 +105,67 @@ pub async fn run(args) {
         Err(e) => `ERR ${e}`,
     };
     out += `G11 ${g11}\n`;
+
+    // G18 — a PADDED address: a real minted id with a space before it and after it. Non-blank, no
+    // control character, and names nobody: the harness mints a file stem, and no stem is padded.
+    // Refused, and **never trimmed into the address it resembles** — G18e is the check that proves
+    // the refusal did not become a write under the trimmed spelling.
+    let g18 = match eidolon::tool_call("coordinator_adopt", #{ "session": " 1793000005555 ", "name": "padded" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18 ${g18}\n`;
+
+    // G18c/G18d — NBSP at each edge. The case no guard here saw before this rule: NBSP is not a
+    // control character, so `refuse_control_chars` passes it, and it is not a space, so a scan for
+    // `" "` would pass it too. `trim()` is what closes it.
+    let g18c = match eidolon::tool_call("coordinator_adopt", #{ "session": "\u{00a0}1793000006666", "name": "nbsp leading" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18c ${g18c}\n`;
+    let g18d = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000006666\u{00a0}", "name": "nbsp trailing" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18d ${g18d}\n`;
+
+    // G18e — the trim-then-write arm's witness. If the padded call above had canonicalised and
+    // written, this clean adoption would find a live row and be refused in epoch 1; it must instead
+    // be the FIRST adoption of that worker, in epoch 1. This is the assertion that a `trim()`-and-
+    // rebind regression cannot answer green.
+    let g18e = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000005555", "name": "clean after padded" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18e ${g18e}\n`;
+
+    // G18f — an INTERIOR space, asserted as the residual it is rather than left unstated: no minting
+    // path produces one, and the rule does not claim to cover it, so the fixture says out loud that
+    // this ledger accepts it.
+    let g18f = match eidolon::tool_call("coordinator_adopt", #{ "session": "179300000 7777", "name": "interior space" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18f ${g18f}\n`;
+
+    // G19 — `release.rn`'s own control-character guard, which until now no check reached: G5, G7 and
+    // G13 all pass clean addresses, so that copy of `refuse_control_chars` was code with no witness.
+    let g19 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000005555\nx", "reason": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G19 ${g19}\n`;
+
+    // G20 — the same padded rule at the other door over the same key. The worker here IS adopted
+    // (G18e), so a release that merely looked up the string would answer "not adopted by this
+    // session" — true of that spelling and false about the worker the caller means. The answer must
+    // be about the padding.
+    let g20 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000005555 ", "reason": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G20 ${g20}\n`;
 
     // G12 — a release is REFUSED while a cancellation's exit was never observed. The row is seeded
     // because no tool in this fixture can produce an `attempted` word without a real child process

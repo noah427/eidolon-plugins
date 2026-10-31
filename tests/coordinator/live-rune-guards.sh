@@ -109,6 +109,38 @@ check "G11 an address carrying a real newline is refused" "$run" \
     "G11 ERR \`session\` carries a control character"
 check_absent "G11b and it wrote no row either" "$run" "G11 OK adopted"
 
+# G18/G18c/G18d — a padded address. Refused, never trimmed into the address it resembles: the
+# sentence must say the address carries padding and tell the caller where the exact spelling is.
+check "G18 a space-padded address is refused, naming the padding" "$run" \
+    "G18 ERR \`session\` carries padding: an address is the exact spelling the harness minted"
+check "G18 and the refusal says to copy it from \`eidolon peers\`" "$run" "Copy it from \`eidolon peers\`"
+check_absent "G18b and no row was written under the padded spelling" "$run" "G18 OK adopted"
+# NBSP is the case no other guard sees: not a control character, not a space, and `trim()` closes it.
+check "G18c an NBSP before the address is refused" "$run" \
+    "G18c ERR \`session\` carries padding"
+check "G18d an NBSP after the address is refused" "$run" \
+    "G18d ERR \`session\` carries padding"
+# G18e — the trim-then-write arm. A refusal that trimmed and wrote would leave a live row for
+# 1793000005555, and this clean adoption would then be refused as a second live adoption. It must
+# instead be that worker's FIRST adoption, in epoch 1.
+check "G18e the refusal wrote nothing: the clean address is still this ledger's first adoption of it" "$run" \
+    "G18e OK adopted 1793000005555 in epoch 1"
+# G18f — the residual, asserted rather than left unstated: an interior space is unreachable by
+# minting, and the rule does not claim to cover it.
+check "G18f an interior space is still accepted, and the fixture says so (residual)" "$run" \
+    "G18f OK adopted 179300000 7777 in epoch 1"
+# G19 — `release.rn`'s control-character guard: no check reached it before, since G5/G7/G13 all pass
+# clean addresses. This also proves the guard runs before the ledger lookup: the address is unknown
+# and the answer is still about the character, not about the worker.
+check "G19 a control character in release's session is refused" "$run" \
+    "G19 ERR \`session\` carries a control character"
+check_absent "G19b and it was not answered as a release of the trimmed worker" "$run" "G19 OK released"
+# G20 — release's padded rule. The worker is adopted and live at this point, so an answer of "not
+# adopted by this session" would be the wrong sentence for the right reason; the check refuses that.
+check "G20 a padded release is refused for its padding" "$run" \
+    "G20 ERR \`session\` carries padding"
+check_absent "G20b and not answered as the unheld string's release" "$run" "G20 OK"
+
 # G12 — a release over an unobserved exit is refused, and the refusal says which operation and why.
 check "G12 a release is refused while a cancellation exit is unobserved" "$run" \
     "G12 ERR the exit of 1793000007777 was never observed"
