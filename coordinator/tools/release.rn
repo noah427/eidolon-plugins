@@ -158,7 +158,7 @@ fn text_of(v) {
 fn refuse_control_chars(field, s) {
     for c in s.chars() {
         let n = `${c}`;
-        if n == "\\n" || n == "\\r" || n == "\\t" {
+        if n == "\n" || n == "\r" || n == "\t" {
             return Some(`\`${field}\` carries a control character; an address is one word, and a line break in it would be a forged line wherever it is printed`);
         }
     }

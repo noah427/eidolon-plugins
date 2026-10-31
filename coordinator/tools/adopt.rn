@@ -55,12 +55,13 @@ pub async fn call(input) {
         Some(e) => return Err(e),
         None => {}
     }
-    // Guard 1, which the schema cannot keep: `required` refuses a *missing* field, and `""` is a
-    // string. An empty address would write a live row that names nobody — core's own
-    // `adopt_refuses_an_empty_worker_address` guarded this before the verb left, and the row this
-    // ledger keeps is the only record an adoption has.
-    if worker == "" {
-        return Err("coordinator_adopt needs a durable address: `session` is empty, and an empty address names no worker — pass the address exactly as `eidolon peers` prints it");
+    // Guard 1, which the schema cannot keep: `required` refuses a *missing* field, and `""` — or a
+    // string of spaces — is a string. An address with nothing in it would write a live row that names
+    // nobody: core's own `adopt_refuses_an_empty_worker_address` guarded this before the verb left,
+    // and the row this ledger keeps is the only record an adoption has. `trim()` is the plugin's own
+    // idiom for "is there anything here" (`lib/lifecycle.rn`, `hook_peer.rn`, `hook_ready.rn`).
+    if worker.trim() == "" {
+        return Err("coordinator_adopt needs a durable address: `session` is empty or blank, and an address with nothing in it names no worker — pass it exactly as `eidolon peers` prints it");
     }
     let name = match text_of(input.get("name")) {
         Some(s) => s,
@@ -293,7 +294,7 @@ fn text_of(v) {
 fn refuse_control_chars(field, s) {
     for c in s.chars() {
         let n = `${c}`;
-        if n == "\\n" || n == "\\r" || n == "\\t" {
+        if n == "\n" || n == "\r" || n == "\t" {
             return Some(`\`${field}\` carries a control character; an address is one word, and a line break in it would be a forged line wherever it is printed`);
         }
     }

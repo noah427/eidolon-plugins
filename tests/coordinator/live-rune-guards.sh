@@ -34,6 +34,7 @@ fi
 
 fail=0
 checks=0
+skipped=0
 say() { printf '%s\n' "$*"; }
 check() { # check <name> <haystack> <needle>
     checks=$((checks + 1))
@@ -67,45 +68,52 @@ worker=1793000004242
 # G1 — nothing named. The tool's JSON schema refuses this before the body runs, which is a stronger
 # guard than the sentence below it: the check is that the refusal names the missing field.
 check "G1 an adoption with no session names the missing field" "$run" \
-    "missing required field \`session\` (string)"
+    "G1 ERR \`coordinator_adopt\` was called with invalid arguments: missing required field \`session\` (string)"
 # G2 — self-adoption. A run whose roster names no row skips; that is reported, not passed.
-if printf '%s' "$run" | grep -q '^G2 SKIP'; then
-    say "ok   G2 skipped: this run's roster named no row for it (the guard itself is not exercised here)"
+if printf '%s' "$run" | grep -qF 'G2 SKIP'; then
+    checks=$((checks + 1))
+    skipped=$((skipped + 1))
+    say "ok   G2 SKIPPED (counted): this run's roster named no row for it, so the guard itself was not exercised"
 else
-    check "G2 a session cannot adopt itself" "$run" "a session cannot adopt itself"
+    check "G2 a session cannot adopt itself" "$run" "G2 ERR a session cannot adopt itself"
 fi
 # G3 — the first adoption.
-check "G3 the first adoption lands in epoch 1" "$run" "adopted $worker in epoch 1"
+check "G3 the first adoption lands in epoch 1" "$run" "G3 OK adopted $worker in epoch 1"
 # G4 — the second live adoption is refused, naming the epoch and pointing at release.
 check "G4 a second live adoption is refused, naming its epoch" "$run" \
-    "$worker is already adopted by this session, in epoch 1 and still monitored"
+    "G4 ERR $worker is already adopted by this session, in epoch 1 and still monitored"
 check "G4 and the refusal points at the release that ends it" "$run" "\`coordinator_release\` ends it first"
 # G5 — release ends it, and says the record stays.
-check "G5 a release ends monitoring and keeps the record" "$run" "released $worker (epoch 1); monitoring ends now"
+check "G5 a release ends monitoring and keeps the record" "$run" "G5 OK released $worker (epoch 1); monitoring ends now"
 # G6 — a re-adoption is the next epoch, never a reused one.
-check "G6 a re-adoption after a release takes epoch 2" "$run" "adopted $worker in epoch 2"
+check "G6 a re-adoption after a release takes epoch 2" "$run" "G6 OK adopted $worker in epoch 2"
 # G7 — a release of something never held says so.
 check "G7 a release of an unheld worker says there is nothing to release" "$run" \
-    "1793000009494 is not adopted by this session (or was already released); there is nothing to release"
+    "G7 ERR 1793000009494 is not adopted by this session (or was already released); there is nothing to release"
 # G9 — an empty address. The schema cannot refuse it (`""` is a string), so the tool must. This is
 # the guard core's `adopt_refuses_an_empty_worker_address` kept, and until this fixture was written
 # the plugin adopted the empty address into a live row: guard 1 of its own list ("worker non-empty")
 # was prose with no code behind it.
 check "G9 an empty address is refused, naming what is missing" "$run" \
-    "coordinator_adopt needs a durable address: \`session\` is empty"
-check_absent "G9b and no live row naming nobody was written" "$run" "G9 OK adopted  in epoch"
+    "G9 ERR coordinator_adopt needs a durable address: \`session\` is empty or blank"
+check_absent "G9b and no live row naming nobody was written" "$run" "G9 OK adopted"
+check "G10 a blank (spaces-only) address is refused too" "$run" \
+    "G10 ERR coordinator_adopt needs a durable address: \`session\` is empty or blank"
+check_absent "G10b and it wrote no row either" "$run" "G10 OK adopted"
+check "G11 an address carrying a real newline is refused" "$run" \
+    "G11 ERR \`session\` carries a control character"
+check_absent "G11b and it wrote no row either" "$run" "G11 OK adopted"
 
 # G8 — a release with nothing named; refused by the schema, naming the field.
 check "G8 a release with no session names the missing field" "$run" \
-    "coordinator_release\` was called with invalid arguments: missing required field \`session\` (string)"
+    "G8 ERR \`coordinator_release\` was called with invalid arguments: missing required field \`session\` (string)"
 # The refusals must be refusals: none of them may be answered as a success line.
 check_absent "no refusal was answered as an OK" "$run" "G4 OK"
-check_absent "and the second adoption did not land a second live row" "$run" "adopted $worker in epoch 2. A live session"
 
 say ""
 if [ "$fail" -eq 0 ]; then
-    say "live-rune-guards complete: $checks checks, 0 FAIL"
+    say "live-rune-guards complete: $checks checks ($skipped skipped), 0 FAIL"
 else
-    say "live-rune-guards FAILED: $fail of $checks checks"
+    say "live-rune-guards FAILED: $fail of $checks checks ($skipped skipped)"
     exit 1
 fi

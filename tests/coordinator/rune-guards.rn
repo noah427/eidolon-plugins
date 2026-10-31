@@ -89,6 +89,23 @@ pub async fn run(args) {
     };
     out += `G9 ${g9}\n`;
 
+    // G10 — a blank address: spaces only. `""` is not the whole of guard 1; `trim()` is what the
+    // plugin uses elsewhere to ask "is there anything here".
+    let g10 = match eidolon::tool_call("coordinator_adopt", #{ "session": "   ", "name": "blank" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G10 ${g10}\n`;
+
+    // G11 — a real newline inside an address: non-blank, so it reaches the control-character guard
+    // rather than guard 1, and it is the shape that would forge a line wherever the address is
+    // printed.
+    let g11 = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000004242\nx" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G11 ${g11}\n`;
+
     // G8 — a release with no worker named.
     let g8 = match eidolon::tool_call("coordinator_release", #{}).await {
         Ok(t) => `OK ${t}`,
