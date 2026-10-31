@@ -142,7 +142,7 @@ fn left_word(left) {
     if left == 0 {
         return "";
     }
-    ` ${left} pending notice(s) were left alone because their epoch could not be matched to this adoption, and an unmatched epoch is not a reason to cancel one`;
+    ` ${left} pending notice(s) were left alone because their epoch could not be matched to this adoption, and an unmatched epoch is not a reason to cancel one`
 }
 
 fn text_of(v) {

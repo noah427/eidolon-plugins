@@ -142,7 +142,7 @@ pub async fn call(input) {
         }
         refusal = ledger_text(wrote, "detail");
     }
-    Err(`the adoption of ${worker} was **not written down**, so it did not happen (${refusal}). Nothing is claimed: retry, and a write that lands will be the record`);
+    Err(`the adoption of ${worker} was **not written down**, so it did not happen (${refusal}). Nothing is claimed: retry, and a write that lands will be the record`)
 }
 
 // The service's two answers to "what did you see at that address", kept because they keep a live
