@@ -113,11 +113,13 @@ check_absent "G11b and it wrote no row either" "$run" "G11 OK adopted"
 check "G12 a release is refused while a cancellation exit is unobserved" "$run" \
     "G12 ERR the exit of 1793000007777 was never observed"
 check "G12 and the refusal names the operation whose exit is in doubt" "$run" \
-    "operation \`op-x\`"
+    "G12 ERR the exit of 1793000007777 was never observed: \`coordinator_cancel\` recorded a durable cancellation intent (operation \`op-x\`"
 check "G13 the same release goes through when the row carries no unobserved exit" "$run" \
     "G13 OK released 1793000008888 (epoch 1); monitoring ends now"
+# G14 must assert what the rendering SAYS, not that the tool returned Ok: `"G14 OK"` alone stayed
+# green with the epoch deleted from `adoptions.rn`, which the independent review caught.
 check "G14 the adoption rendering names the row's epoch and what the coordinator calls it" "$run" \
-    "G14 OK"
+    "epoch 1 — 1793000008888 (called \`seeded ok\`)"
 
 # G8 — a release with nothing named; refused by the schema, naming the field.
 check "G8 a release with no session names the missing field" "$run" \
