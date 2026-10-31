@@ -49,8 +49,8 @@ pub async fn run(args) {
 
     // U1 — row 10: an adoption whose write is refused says it did not happen.
     let u1 = match eidolon::tool_call("coordinator_adopt", #{ "session": refused, "name": "not written", "note": pad }).await {
-        Ok(t) => `OK len=${t.len()} first=[${t.slice(0, 40)}]`,
-        Err(e) => `ERR len=${e.len()} first=[${e.slice(0, 40)}]`,
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
     };
     out += `U1 ${u1}\n`;
 
