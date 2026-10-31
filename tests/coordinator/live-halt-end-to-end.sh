@@ -217,20 +217,59 @@ check "W18: the handler answered the reconcile, not a fabricated payload" "$rows
 # first cut printed them and asserted none of them, so a notice carrying the wrong ending stayed 6/6
 # green (the reviewer's mutation). Each one is a check now.
 check "W18: it names the ending the harness actually observed" "$rows" '"last": "iteration limit"'
-check "W18: and the occurrence it was keyed on" "$rows" '"occurrence": "rc:'
+# **`occurrence` is shape only, and says so.** The token is the host's own counter and the only
+# place it appears in this fixture is the same row this check reads, so a wrong token and a right
+# one are indistinguishable here: the reviewer made it `rc:99` and the check stayed green. What it
+# can still witness is that the row carries an occurrence at all rather than an empty field, which
+# is what the label now claims. The value is checked where a value exists — `last` above, and
+# `record` below against the id the log assigned.
+check "W18: and the row carries an occurrence (shape only: the token exists nowhere else)" "$rows" '"occurrence": "rc:'
 check "W18: the ledger's word for it is written, not owed" "$rows" '"outcome": "written"'
-check "W18: and it keeps the record the log named" "$rows" '"record": '
 check_absent "W18: the row claims no delivery the log did not record" "$rows" '"outcome": "delivered"'
 # The record, if the sink journaled it: a notice written down is what the ledger's `written`
 # outcome claims, and the log is the only place that claim can be checked.
 # `log` takes the session log, not its id.
-logged=$("$EID" log "$XDG_DATA_HOME/eidolon/sessions/$c.eid" --json 2>/dev/null | grep -c '"PluginNotice"' || true)
+plugin_notices=$("$EID" log "$XDG_DATA_HOME/eidolon/sessions/$c.eid" --json 2>/dev/null | grep -F '"PluginNotice"' || true)
+logged=$(printf '%s\n' "$plugin_notices" | grep -c . || true)
 # "Exactly one", as the commit says: `>= 1` would pass on a fixture that journaled the same notice
 # twice, which is what the notice's dedupe exists to prevent.
 if [ "${logged:-0}" -eq 1 ]; then
     say "ok   W18: exactly one PluginNotice in C's own log"
 else
     say "FAIL W18: ${logged:-0} PluginNotice record(s) in C's log, wanted exactly 1"
+    fail=$((fail + 1))
+fi
+
+# ---- the record, as a **value** and not as a shape ----
+# The commit claimed `record` was measured; the first cut asserted only that the key was present, so
+# the reviewer made the row say `51` against the log's `11` and stayed 11/11 green. The number is the
+# host's: `eidolon::notice` answers with the `RecordId` the notice was appended as, and the row may
+# not invent one. Read from the log's own `PluginNotice` record, whose `id` is assigned there, and
+# compare the two exactly — a substring test cannot tell `"record": 1` from `"record": 11`.
+# `python3 -c` with single-quoted code, not a nested heredoc: an inner `<<'PY'` cannot live inside an
+# outer one, which is where the first attempt at this died.
+record_id=$(printf '%s\n' "$plugin_notices" | python3 -c 'import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    record = json.loads(line)
+    kind = record.get("kind")
+    if isinstance(kind, dict) and "PluginNotice" in kind:
+        print(record.get("id", ""))
+        break
+')
+row_record=$(printf '%s\n' "$rows" | python3 -c 'import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if line:
+        print(json.loads(line).get("record", ""))
+        break
+')
+if [ -n "$record_id" ] && [ "$row_record" = "$record_id" ]; then
+    say "ok   W18: the row keeps the record the log named (record $record_id)"
+else
+    say "FAIL W18: the row's record is [${row_record:-absent}] and the log's PluginNotice is record [${record_id:-absent}]: the id is the host's and the row may not invent one"
     fail=$((fail + 1))
 fi
 
