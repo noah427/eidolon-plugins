@@ -1,0 +1,81 @@
+// The uncertain-write fixture's workflow: a write that is **refused**, and what the two doors say
+// afterwards. Witness map rows 10 and 11 — the two guards whose whole content is "an act that was
+// not written down did not happen", and which had no witness of any kind.
+//
+// The failure is the host's own bound on one state row: a write whose body exceeds
+// `MAX_BODY_BYTES` (1 MiB, `crates/rune/src/plugin_state.rs:199-205`) is refused before a temp file
+// exists, and the refusal says "nothing was written". The body is the whole store, so an adoption
+// carrying an oversized `note`, or a release carrying an oversized `reason`, produces exactly that
+// refusal through the plugin's ordinary path. Nothing is added to production for this test, no
+// permission is changed, and the store stays readable throughout — which is what makes U4, an
+// ordinary adoption after the two refusals, a control rather than a hope.
+//
+// Copied into the disposable config's plugin by `tests/coordinator/live-rune-uncertain-write.sh`.
+
+pub fn workflow() {
+    #{
+        name: "rune-uncertain",
+        description: "Drive coordinator_adopt and coordinator_release into a REFUSED store write, and assert that neither claims to have happened. args: none",
+        approval: "mutating",
+        params: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn run(args) {
+    let out = "";
+    let seeded = "1793000011111";
+    let refused = "1793000022222";
+    let after = "1793000044444";
+
+    // Just over the 1 MiB bound on one state row, built rather than pasted.
+    let pad = "";
+    let chunk = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
+    for i in 0..20000 {
+        pad += chunk;
+    }
+
+    // U0 — a live row to release later, written while the store is ordinary.
+    let seed = match eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": seeded, "epoch": 1, "name": "uncertain-write fixture" }],
+            "notices": [],
+            "gaps": [],
+        },
+    }).await {
+        Ok(_) => "OK",
+        Err(e) => `ERR ${e}`,
+    };
+    out += "U0 " + seed + "\n";
+
+    // U1 — row 10: an adoption whose write is refused says it did not happen.
+    let u1 = match eidolon::tool_call("coordinator_adopt", #{ "session": refused, "name": "not written", "note": pad }).await {
+        Ok(t) => `OK len=${t.len()} first=[${t.slice(0, 40)}]`,
+        Err(e) => `ERR len=${e.len()} first=[${e.slice(0, 40)}]`,
+    };
+    out += `U1 ${u1}\n`;
+
+    // U2 — row 11: a release that cannot be written down did not happen, and says so.
+    let u2 = match eidolon::tool_call("coordinator_release", #{ "session": seeded, "reason": pad }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `U2 ${u2}\n`;
+
+    // U3 — the rows as the ledger still holds them: neither refused act is in here, and the row that
+    // could not be released is still live. The answer and the store must agree.
+    let rows = match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(t) => t,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `U3 ${rows}\n`;
+
+    // U4 — the control: the same store accepts an ordinary adoption straight afterwards, so a U1/U2
+    // answer cannot be satisfied by a ledger that is simply broken.
+    let u4 = match eidolon::tool_call("coordinator_adopt", #{ "session": after, "name": "after the refusal" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `U4 ${u4}\n`;
+
+    Ok(out)
+}

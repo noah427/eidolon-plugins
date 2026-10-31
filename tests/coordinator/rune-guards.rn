@@ -155,17 +155,16 @@ pub async fn run(args) {
     };
     out += `G18f ${g18f}\n`;
 
-    // G18g — the ledger's own rows, read back before G12's seed replaces the store. This is row 14
-    // of the witness map ("an adoption and its release are two durable records") and it asserts what
-    // was WRITTEN DOWN, not what a tool said: the released row is still there with its reason, and
-    // the re-adoption is a second row rather than a rewrite of the first. It is also the read that
-    // catches a write-then-refuse: a padded row left behind by a refusal would show up here while
-    // G18b's success-word check stayed green.
-    let g18g = match eidolon::tool_call("coordinator_adoptions", #{}).await {
-        Ok(t) => t,
+    // G18i — a REAL minted shape nobody must refuse: `1793000005555-1` is a same-millisecond collision
+    // id, and it is the id that makes "digits only" or "no punctuation" the wrong rule. The rule is
+    // about whitespace; this row is here so the read-back below can assert both halves at once —
+    // the dashed address is a row, the padded spellings are not.
+    let g18i = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000005555-1", "name": "dashed id" }).await {
+        Ok(t) => `OK ${t}`,
         Err(e) => `ERR ${e}`,
     };
-    out += `G18g ${g18g}\n`;
+    out += `G18i ${g18i}\n`;
+
 
     // G19 — `release.rn`'s own control-character guard, which until now no check reached: G5, G7 and
     // G13 all pass clean addresses, so that copy of `refuse_control_chars` was code with no witness.
@@ -184,6 +183,18 @@ pub async fn run(args) {
         Err(e) => `ERR ${e}`,
     };
     out += `G20 ${g20}\n`;
+
+    // G18h — the ledger's ADOPTION ROWS as data, read after every door above and before G12's seed
+    // replaces the store. A rendering omits `(called …)` for a row with no name, so a check built on one
+    // asked for a field the defect could drop; these are the rows themselves. The padded spellings, an
+    // empty or blank worker, and a release that was refused but marked anyway are all visible here — the
+    // three shapes the independent review found green in the previous cut.
+    let g18h = match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => t,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18h ${g18h}\n`;
+
 
     // G21 — the LIVE-SESSION branch of the adoption answer: the address is one a live session really
     // carries, so `live_sentence` must take its claimant branch and say what the roster publishes

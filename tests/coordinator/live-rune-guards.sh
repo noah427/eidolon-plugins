@@ -103,8 +103,8 @@ mkdir -p "$plug/workflows"
 cp -r "$repo/coordinator/." "$plug/"
 # The seed fixture (test-only, never shipped) is the only way to put a row carrying
 # `cancellation: attempted` in front of `coordinator_release` without a real child process.
-cp "$here/lifecycle-fixture/tools/seed_json.rn" "$plug/tools/"
-sed -i 's/"rank", "unrank", "ranks", "hook_ready", "hook_peer"\]/"rank", "unrank", "ranks", "hook_ready", "hook_peer", "seed_json"]/' "$plug/plugin.rn"
+cp "$here/lifecycle-fixture/tools/seed_json.rn" "$here/lifecycle-fixture/tools/dump_rows.rn" "$plug/tools/"
+sed -i 's/"rank", "unrank", "ranks", "hook_ready", "hook_peer"\]/"rank", "unrank", "ranks", "hook_ready", "hook_peer", "seed_json", "dump_rows"]/' "$plug/plugin.rn"
 grep -q 'seed_json' "$plug/plugin.rn" || { say "FAIL the seed fixture is not registered"; exit 1; }
 cp "$here/rune-guards.rn" "$plug/workflows/rune-guards.rn"
 "$EID" plugins trust coordinator >/dev/null
@@ -192,23 +192,64 @@ check "G20 a padded release is refused for its padding" "$run" \
     "G20 ERR \`session\` carries padding"
 check_absent "G20b and not answered as the unheld string's release" "$run" "G20 OK"
 
-# ---- row 14 of the witness map, and the review's F4 ----
-# The ledger's rows, read back mid-run by the plugin's own reader, before G12's seed replaces the
-# store. This asserts what was WRITTEN DOWN rather than what a tool said: an adoption and its
-# release are two durable records, and the released one keeps its reason.
-check "row14a the released adoption is still a row, with its epoch and its reason" "$run" \
-    "epoch 1 — 1793000004242 (called \`guard fixture\`)"
-check "row14b that row is marked released and says why" "$run" "released because: the guard fixture is done with it"
-check "row14c the re-adoption is a SECOND row, not a rewrite of the first" "$run" "epoch 2 — 1793000004242"
-# F4: a write-then-refuse would leave a row under the padded spelling while G18b (success word
-# absent) stayed green. The needle is the name each refused adoption carried, because a *legitimate*
-# row renders "epoch 1 — 1793000005555 (called …)" and a needle built from the address alone matches
-# it: this check is about the row's existence, so it asks for the row by the only field no other row
-# has. (The address itself cannot be the needle — the first cut of this check was green for the
-# wrong reason and red on the right one.)
-check_absent "F4a the refused padded adoption left no row behind" "$run" "(called \`padded\`)"
-check_absent "F4b the refused NBSP adoption (leading) left no row behind" "$run" "(called \`nbsp leading\`)"
-check_absent "F4c the refused NBSP adoption (trailing) left no row behind" "$run" "(called \`nbsp trailing\`)"
+# ---- the ledger's rows as data: row 14, and the review's F4 ----
+# G18h is `coordinator_dump_rows`, a test-only reader that returns the adoption rows themselves. The
+# previous cut asked a RENDERING whether a row existed, and a rendering omits `(called …)` when a row
+# has no name — so a defect that dropped the name left the checks green while the row sat in the
+# ledger (review findings m9, m10, m11). These assertions are on workers, epochs and the released
+# flag, none of which a presentation decision can drop.
+rows=$(python3 - "$run" <<'PYROWS'
+import json,re,sys
+t=sys.argv[1]
+m=re.search(r'"report":("(?:[^"\\]|\\.)*")', t, re.S)
+rep=json.loads(m.group(1)) if m else ""
+line=[l for l in rep.split('\n') if l.startswith('G18h ')]
+print(line[0][len('G18h '):] if line else "")
+PYROWS
+)
+rowfacts=$(python3 - "$rows" <<'PYFACTS'
+import json,sys
+try:
+    rows=json.loads(sys.argv[1])
+except Exception:
+    rows=None
+if not isinstance(rows,list):
+    print("rows-parsed=no"); raise SystemExit
+def w(r): return r.get("worker") if isinstance(r.get("worker"),str) else ""
+pads=[r for r in rows if w(r) and w(r)!=w(r).strip()]
+blank=[r for r in rows if w(r).strip()==""]
+same=[r for r in rows if w(r)=="1793000004242"]
+e1=[r for r in same if str(r.get("epoch"))=="1"]
+e2=[r for r in same if str(r.get("epoch"))=="2"]
+clean=[r for r in rows if w(r)=="1793000005555"]
+print("rows-parsed=yes")
+print("padded-rows=%d" % len(pads))
+print("blank-rows=%d" % len(blank))
+print("epoch1-row-present=%d" % len(e1))
+print("epoch1-row-released=%s" % ("true" if e1 and e1[0].get("released") is True else "false"))
+print("epoch1-row-reason=%s" % (e1[0].get("release_reason") if e1 else ""))
+print("epoch2-rows=%d" % len(e2))
+print("clean-5555-rows=%d" % len(clean))
+print("clean-5555-released=%s" % ("true" if any(r.get("released") is True for r in clean) else "false"))
+print("dashed-rows=%d" % len([r for r in rows if w(r)=="1793000005555-1"]))
+PYFACTS
+)
+check "the ledger's rows were read back as data" "$rowfacts" "rows-parsed=yes"
+# F4a/F4b/F4c, restated as one assertion no field can dodge: no row's worker address is padded. This
+# catches the write-then-refuse (m6), the same with the name dropped (m10), and both NBSP spellings.
+check "F4a no row in this ledger carries a padded worker address" "$rowfacts" "padded-rows=0"
+# m9: the empty and blank doors are named as row-absence claims, so they are checked as row absence.
+check "G9c/G10c no row carries an empty or blank worker" "$rowfacts" "blank-rows=0"
+# Row 14: an adoption and its release are two durable records.
+check "row14a the released adoption is still a row, in epoch 1" "$rowfacts" "epoch1-row-present=1"
+check "row14b and it is marked released, with its reason" "$rowfacts" "epoch1-row-released=true"
+check "row14c the re-adoption is a SECOND row, not a rewrite of the first" "$rowfacts" "epoch2-rows=1"
+# m11: a release that was REFUSED for padding must not have marked the row it was refused over. The
+# read-back runs after G20 now; before it ran before G19/G20, so nothing could see this.
+check "G20c the refused padded release marked no row" "$rowfacts" "clean-5555-released=false"
+check "G20d and that row is still the only one for its address" "$rowfacts" "clean-5555-rows=1"
+# Claim 1 of the brief, witnessed rather than asserted: a dashed, same-millisecond id is a real row.
+check "G18i a dashed id is adopted, so the rule is whitespace and not id shape" "$rowfacts" "dashed-rows=1"
 
 # G12 — a release over an unobserved exit is refused, and the refusal says which operation and why.
 check "G12 a release is refused while a cancellation exit is unobserved" "$run" \
