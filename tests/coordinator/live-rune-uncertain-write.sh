@@ -74,22 +74,17 @@ seeded=1793000011111
 refused=1793000022222
 after=1793000044444
 check "U0 the fixture wrote a live row while the store was ordinary" "$run" "U0 OK"
-# Row 10 — and this is where the fixture stops being a witness and becomes a finding. With the same
-# refusal in front of `coordinator_adopt`, the tool answers an EMPTY result: the harness log records
-# `result [w6-1]:` with nothing after it, and the workflow sees a 0-length success. Neither a claim
-# nor a refusal. `finding-adopt-empty-answer-2026-10-31.md` beside this directory is the reproduction.
-# The check is therefore reported and COUNTED as skipped rather than passed silently: when the defect
-# is fixed this branch turns into the row-10 witness, and the fixture will say so by itself.
-if printf '%s' "$run" | grep -qF "U1 ERR the adoption of $refused was **not written down**"; then
-    check "U1 an adoption whose write is refused says it was NOT written down" "$run" \
-        "U1 ERR the adoption of $refused was **not written down**, so it did not happen"
-    check "U1 and the refusal it carries is the one the host gave" "$run" \
-        "over the 1048576-byte bound on one state row; nothing was written"
-else
-    checks=$((checks + 1)); skipped=$((skipped + 1))
-    say "ok   U1 SKIPPED (counted): adopt does not answer the refusal — see finding-adopt-empty-answer-2026-10-31.md"
-fi
-check_absent "U1b and it was not answered as an adoption" "$run" "U1 OK adopted"
+# Row 10 — an adoption whose write is refused says it did not happen. It used to answer an EMPTY
+# success instead, because its refusal ended in a trailing `;` and the block's value was the unit;
+# `b51d6e4` deleted the character and `crates/rune` now reports a unit result as an error rather than
+# an empty success. There is no skip left here: the sentence is required, and `m13` (the `;` put back)
+# is the arm that keeps it.
+check "U1 an adoption whose write is refused says it was NOT written down" "$run" \
+    "U1 ERR the adoption of $refused was **not written down**, so it did not happen"
+check "U1 and the refusal it carries is the one the host gave" "$run" \
+    "over the 1048576-byte bound on one state row; nothing was written"
+check_absent "U1b and it was not answered as an adoption" "$run" "U1 OK"
+check_absent "U1c and it was not answered as a unit result either" "$run" "evaluated to \`()\`"
 # Row 11: the same, for a release.
 check "U2 a release that cannot be written down did not happen" "$run" \
     "U2 ERR the release of $seeded was **not written down**, so it did not happen"
