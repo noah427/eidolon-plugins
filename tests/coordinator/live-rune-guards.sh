@@ -56,6 +56,11 @@ check_absent() { # check_absent <name> <haystack> <needle>
 plug=$XDG_CONFIG_HOME/eidolon/plugins/coordinator
 mkdir -p "$plug/workflows"
 cp -r "$repo/coordinator/." "$plug/"
+# The seed fixture (test-only, never shipped) is the only way to put a row carrying
+# `cancellation: attempted` in front of `coordinator_release` without a real child process.
+cp "$here/lifecycle-fixture/tools/seed_json.rn" "$plug/tools/"
+sed -i 's/"rank", "unrank", "ranks", "hook_ready", "hook_peer"\]/"rank", "unrank", "ranks", "hook_ready", "hook_peer", "seed_json"]/' "$plug/plugin.rn"
+grep -q 'seed_json' "$plug/plugin.rn" || { say "FAIL the seed fixture is not registered"; exit 1; }
 cp "$here/rune-guards.rn" "$plug/workflows/rune-guards.rn"
 "$EID" plugins trust coordinator >/dev/null
 
@@ -103,6 +108,16 @@ check_absent "G10b and it wrote no row either" "$run" "G10 OK adopted"
 check "G11 an address carrying a real newline is refused" "$run" \
     "G11 ERR \`session\` carries a control character"
 check_absent "G11b and it wrote no row either" "$run" "G11 OK adopted"
+
+# G12 — a release over an unobserved exit is refused, and the refusal says which operation and why.
+check "G12 a release is refused while a cancellation exit is unobserved" "$run" \
+    "G12 ERR the exit of 1793000007777 was never observed"
+check "G12 and the refusal names the operation whose exit is in doubt" "$run" \
+    "operation \`op-x\`"
+check "G13 the same release goes through when the row carries no unobserved exit" "$run" \
+    "G13 OK released 1793000008888 (epoch 1); monitoring ends now"
+check "G14 the adoption rendering names the row's epoch and what the coordinator calls it" "$run" \
+    "G14 OK"
 
 # G8 — a release with nothing named; refused by the schema, naming the field.
 check "G8 a release with no session names the missing field" "$run" \

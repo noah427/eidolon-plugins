@@ -106,6 +106,53 @@ pub async fn run(args) {
     };
     out += `G11 ${g11}\n`;
 
+    // G12 — a release is REFUSED while a cancellation's exit was never observed. The row is seeded
+    // because no tool in this fixture can produce an `attempted` word without a real child process
+    // and a real OS half. This is the retired service's own guard, kept at the owner the ruling
+    // gives it, and until now it had no witness of any kind.
+    let seeded = match eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "1793000007777", "epoch": 1, "name": "seeded", "cancellation": "attempted", "cancel_operation": "op-x" }],
+            "notices": [],
+            "gaps": [],
+        },
+    }).await {
+        Ok(t) => `OK`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G12-seed ${seeded}\n`;
+    let g12 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000007777", "reason": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G12 ${g12}\n`;
+
+    // G13 — the same release goes through once the row carries no unobserved exit.
+    let seeded2 = match eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "1793000008888", "epoch": 1, "name": "seeded ok" }],
+            "notices": [],
+            "gaps": [],
+        },
+    }).await {
+        Ok(t) => `OK`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G13-seed ${seeded2}\n`;
+    let g13 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000008888", "reason": "the exit was observed" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G13 ${g13}\n`;
+
+    // G14 — the rendering an operator reads: the adoption row with its epoch and its name. This is
+    // what the deleted `cli::…an_adoption_is_a_row_and_a_sentence` witnessed in core.
+    let g14 = match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G14 ${g14}\n`;
+
     // G8 — a release with no worker named.
     let g8 = match eidolon::tool_call("coordinator_release", #{}).await {
         Ok(t) => `OK ${t}`,
