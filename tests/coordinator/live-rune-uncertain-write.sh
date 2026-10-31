@@ -130,6 +130,7 @@ print("seeded-released=%s" % ("true" if any(r.get("released") is True for r in m
 PYFACTS
 )
 check "U3c the ledger's rows were read back as data" "$facts" "rows-parsed=yes"
+check "U3c and the row is there: a deleted row must not pass vacuously" "$facts" "seeded-rows=1"
 check "U3d the row that could not be released is not marked released" "$facts" "seeded-released=false"
 # The control: the same ledger accepts the next ordinary adoption, in epoch 1.
 check "U4 the store still works after both refusals" "$run" \
