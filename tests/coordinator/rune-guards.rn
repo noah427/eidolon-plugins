@@ -149,6 +149,18 @@ pub async fn run(args) {
     };
     out += `G18f ${g18f}\n`;
 
+    // G18g — the ledger's own rows, read back before G12's seed replaces the store. This is row 14
+    // of the witness map ("an adoption and its release are two durable records") and it asserts what
+    // was WRITTEN DOWN, not what a tool said: the released row is still there with its reason, and
+    // the re-adoption is a second row rather than a rewrite of the first. It is also the read that
+    // catches a write-then-refuse: a padded row left behind by a refusal would show up here while
+    // G18b's success-word check stayed green.
+    let g18g = match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(t) => t,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18g ${g18g}\n`;
+
     // G19 — `release.rn`'s own control-character guard, which until now no check reached: G5, G7 and
     // G13 all pass clean addresses, so that copy of `refuse_control_chars` was code with no witness.
     let g19 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000005555\nx", "reason": "guard fixture" }).await {

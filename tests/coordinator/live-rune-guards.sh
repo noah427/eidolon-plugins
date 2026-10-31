@@ -85,9 +85,11 @@ fi
 # G3 — the first adoption.
 check "G3 the first adoption lands in epoch 1" "$run" "G3 OK adopted $worker in epoch 1"
 # G4 — the second live adoption is refused, naming the epoch and pointing at release.
-check "G4 a second live adoption is refused, naming its epoch" "$run" \
-    "G4 ERR $worker is already adopted by this session, in epoch 1 and still monitored"
-check "G4 and the refusal points at the release that ends it" "$run" "\`coordinator_release\` ends it first"
+# One needle carrying the label and both clauses: a bare pointer clause ("\`coordinator_release\` ends
+# it first") is not anchored to this answer, and the review found it unlabelled the same way G18's
+# first cut was. The epoch and the pointer are one sentence because the tool writes one.
+check "G4 a second live adoption is refused, naming its epoch and the release that ends it" "$run" \
+    "G4 ERR $worker is already adopted by this session, in epoch 1 and still monitored; \`coordinator_release\` ends it first"
 # G5 — release ends it, and says the record stays.
 check "G5 a release ends monitoring and keeps the record" "$run" "G5 OK released $worker (epoch 1); monitoring ends now"
 # G6 — a re-adoption is the next epoch, never a reused one.
@@ -144,6 +146,24 @@ check "G20 a padded release is refused for its padding" "$run" \
     "G20 ERR \`session\` carries padding"
 check_absent "G20b and not answered as the unheld string's release" "$run" "G20 OK"
 
+# ---- row 14 of the witness map, and the review's F4 ----
+# The ledger's rows, read back mid-run by the plugin's own reader, before G12's seed replaces the
+# store. This asserts what was WRITTEN DOWN rather than what a tool said: an adoption and its
+# release are two durable records, and the released one keeps its reason.
+check "row14a the released adoption is still a row, with its epoch and its reason" "$run" \
+    "epoch 1 — 1793000004242 (called \`guard fixture\`)"
+check "row14b that row is marked released and says why" "$run" "released because: the guard fixture is done with it"
+check "row14c the re-adoption is a SECOND row, not a rewrite of the first" "$run" "epoch 2 — 1793000004242"
+# F4: a write-then-refuse would leave a row under the padded spelling while G18b (success word
+# absent) stayed green. The needle is the name each refused adoption carried, because a *legitimate*
+# row renders "epoch 1 — 1793000005555 (called …)" and a needle built from the address alone matches
+# it: this check is about the row's existence, so it asks for the row by the only field no other row
+# has. (The address itself cannot be the needle — the first cut of this check was green for the
+# wrong reason and red on the right one.)
+check_absent "F4a the refused padded adoption left no row behind" "$run" "(called \`padded\`)"
+check_absent "F4b the refused NBSP adoption (leading) left no row behind" "$run" "(called \`nbsp leading\`)"
+check_absent "F4c the refused NBSP adoption (trailing) left no row behind" "$run" "(called \`nbsp trailing\`)"
+
 # G12 — a release over an unobserved exit is refused, and the refusal says which operation and why.
 check "G12 a release is refused while a cancellation exit is unobserved" "$run" \
     "G12 ERR the exit of 1793000007777 was never observed"
@@ -173,7 +193,8 @@ check "G17 a cancel with no operation names the missing field" "$run" \
 check "G8 a release with no session names the missing field" "$run" \
     "G8 ERR \`coordinator_release\` was called with invalid arguments: missing required field \`session\` (string)"
 # The refusals must be refusals: none of them may be answered as a success line.
-check_absent "no refusal was answered as an OK" "$run" "G4 OK"
+# F3: the name reaches exactly as far as the assertion does — this looks at G4's answer only.
+check_absent "G4 was not answered as an OK" "$run" "G4 OK"
 
 say ""
 if [ "$fail" -eq 0 ]; then
