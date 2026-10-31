@@ -230,6 +230,32 @@ check "B: a start row takes its epoch from this ledger when the log states none"
 check_absent "B: and never presents that epoch as the log's answer" "$w12adoptions" 'adoption epoch 3 (the log'
 check "B: while a row neither source can state says so" "$w8" "(neither the log nor this ledger states an adoption epoch)"
 
+# ---- W13: `outcome_word`'s last two branches, the unknown word and the clock ----
+#
+# The fallback sentence has never been read by a test in either direction, and the function's
+# tail is the same semicolon class as `adopt.rn:145`: a trailing `;` there makes the block's value
+# the unit and the host refuses the whole tool, so "the sentence appears" and "the tool answered"
+# are two checks and not one. Scoped to W13's own answer, because every other notices call in this
+# run answers the same function.
+check_absent "W13: notices answers an outcome word it does not write instead of erroring" "$report" "W13 notices ERR"
+w13=$(printf '%s\n' "$report" | sed -n '/^W13 notices:/,$p')
+check "W13: an unknown outcome word is shown as it stands, quoted as it came" "$w13" '`quarantined`: not a word this ledger writes, shown as it stands'
+check "W13: the row stands under its own text" "$w13" "an outcome no version of this ledger writes"
+check "W13: an imported outcome that states its clock keeps it" "$w13" "failed as the service recorded it, answered at 1793000000080"
+# The clockless sentence is a prefix of the clocked one, so absence cannot separate them and a
+# needle ending in a newline would be two greps. Count instead, over the `outcome:` lines only —
+# the footer paragraph explains the whole imported class in the same words, and counting it would
+# make the number 2 for reasons that have nothing to do with this row. One imported row, one
+# sentence, and it carries the clock the row was seeded with.
+imported=$(printf '%s\n' "$w13" | grep -c '^  outcome: .*as the service recorded it' || true)
+clocked=$(printf '%s\n' "$w13" | grep -c '^  outcome: .*as the service recorded it, answered at ' || true)
+if [ "${imported:-0}" -eq 1 ] && [ "${clocked:-0}" -eq 1 ]; then
+    say "ok   W13: exactly one imported row, and its sentence carries the clock it was given"
+else
+    say "FAIL W13: ${imported:-0} imported sentence(s), ${clocked:-0} of them clocked; wanted 1 and 1"
+    fail=$((fail + 1))
+fi
+
 if [ "$fail" -ne 0 ]; then
     say "FAIL lifecycle-witness.sh: $fail check(s) failed"
     exit 1

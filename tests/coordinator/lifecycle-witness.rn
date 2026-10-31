@@ -379,5 +379,38 @@ pub async fn run(args) {
     }
     out += `W12 store after release: ${eidolon::tool_call("coordinator_read", #{ "key": "store" }).await?}\n`;
 
+    // ---- W13: `outcome_word`'s two unread branches ----
+    //
+    // No test in this repository has read the last line `outcome_word` has: an outcome word the
+    // ledger does not write falls through every branch above it and is answered by the fallback.
+    // The fallback is also the function's **tail**, which is exactly where this lane's semicolon
+    // defect lived — a trailing `;` there makes the block's value the unit, and the host refuses
+    // the whole tool with `Type ::std::tuple::Tuple is not supported as try operand` before this
+    // sentence is ever built. So the witness is two-sided: the sentence appears, and the answer is
+    // a notices answer rather than an error. The second row is an imported outcome that *states*
+    // its clock — W1's migrated row carries `answered_at_ms: null`, so the branch that prints the
+    // service's time was the other one nothing read.
+    //
+    // The words here are the fixture's, not the retired monitor's: `quarantined` is written by no
+    // version of this ledger, and that is the point of it.
+    out += `W13 seed: ${eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [],
+            "notices": [
+                #{ "notice_id": "unknown001", "worker": "w13", "epoch": 1, "kind": "stuck", "state": "stuck",
+                   "last": "failed", "occurrence": "rc:13", "key_kind": "outcome", "outcome": "quarantined",
+                   "text": "an outcome no version of this ledger writes" },
+                #{ "notice_id": "clocked002", "worker": "w13", "epoch": 1, "kind": "stuck", "state": "stuck",
+                   "last": "failed", "occurrence": "rc:14", "key_kind": "outcome", "outcome": "failed",
+                   "answered_at_ms": 1793000000080, "text": "the service's failure, with its own clock" },
+            ],
+            "gaps": [],
+        },
+    }).await?}\n`;
+    match eidolon::tool_call("coordinator_notices", #{}).await {
+        Ok(v) => out += `W13 notices:\n${v}\n`,
+        Err(e) => out += `W13 notices ERR: ${e}\n`,
+    }
+
     Ok(out)
 }
