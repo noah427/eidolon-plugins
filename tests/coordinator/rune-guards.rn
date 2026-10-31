@@ -1,0 +1,132 @@
+// The guard fixture's workflow: every refusal `coordinator_adopt` and `coordinator_release` can
+// answer with, driven through the plugin's own tools so the sentences are the shipped ones.
+//
+// Copied into the disposable config's copy of the plugin by
+// `tests/coordinator/live-rune-guards.sh`; not shipped in the plugin's own `workflows/`.
+//
+// Each line is prefixed `G<n>` so the shell can assert one sentence per guard without matching a
+// word that appears in another answer. No service is involved and no port is bound: adoption and
+// release are this ledger's acts, and the one thing this fixture needs from the harness is the
+// roster, for this run's own address.
+
+pub fn workflow() {
+    #{
+        name: "rune-guards",
+        description: "Drive coordinator_adopt and coordinator_release into every guard they keep: a missing argument, a session adopting itself, a second live adoption of the same worker, a release, a re-adoption taking the next epoch, and a release of a worker this ledger never held. args: none",
+        approval: "mutating",
+        params: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn run(args) {
+    let out = "";
+    let worker = "1793000004242";
+
+    // G1 — a worker that is not named at all.
+    let g1 = match eidolon::tool_call("coordinator_adopt", #{}).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G1 ${g1}\n`;
+
+    // G2 — this session adopting itself. The address is read, never supplied: a run whose roster
+    // cannot say skips the guard and says so rather than passing silently.
+    let me = own_address().await;
+    if me == "" {
+        out += "G2 SKIP the roster named no row for this run\n";
+    } else {
+        let g2 = match eidolon::tool_call("coordinator_adopt", #{ "session": me }).await {
+            Ok(t) => `OK ${t}`,
+            Err(e) => `ERR ${e}`,
+        };
+        out += `G2 ${g2}\n`;
+    }
+
+    // G3 — the first adoption of that worker: a new row, epoch 1.
+    let g3 = match eidolon::tool_call("coordinator_adopt", #{ "session": worker, "name": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G3 ${g3}\n`;
+
+    // G4 — a second live adoption of the same worker: refused, naming the epoch and pointing at
+    // release. This is the guard the core test `a_second_live_adoption_is_refused_naming_the_epoch`
+    // used to keep, now that core has no adopt verb at all.
+    let g4 = match eidolon::tool_call("coordinator_adopt", #{ "session": worker, "name": "second" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G4 ${g4}\n`;
+
+    // G5 — release ends it.
+    let g5 = match eidolon::tool_call("coordinator_release", #{ "session": worker, "reason": "the guard fixture is done with it" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G5 ${g5}\n`;
+
+    // G6 — re-adoption after a release is the NEXT epoch, never a reused one and never a second
+    // live row.
+    let g6 = match eidolon::tool_call("coordinator_adopt", #{ "session": worker, "name": "re-adopted" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G6 ${g6}\n`;
+
+    // G7 — a release of a worker this ledger never held says so; it does not silently succeed.
+    let g7 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000009494" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G7 ${g7}\n`;
+
+    // G9 — an EMPTY address. The schema's `required` does not refuse `""`: a string is a string.
+    // This is the guard the deleted core test `adopt_refuses_an_empty_worker_address` kept, and the
+    // plugin's own guard list names it as guard 1 ("worker non-empty").
+    let g9 = match eidolon::tool_call("coordinator_adopt", #{ "session": "", "name": "empty" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G9 ${g9}\n`;
+
+    // G8 — a release with no worker named.
+    let g8 = match eidolon::tool_call("coordinator_release", #{}).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G8 ${g8}\n`;
+
+    Ok(out)
+}
+
+// This run's own address, best effort. A workflow has no `eidolon::swarm_call` (that primitive is
+// a tool's), so the address is read from the `peers` tool's own answer, which states it as
+// "You are `<session id>`". "" means not established, and the caller says so rather than passing.
+async fn own_address() {
+    let text = match eidolon::tool_call("peers", #{}).await {
+        Ok(v) => v,
+        Err(_) => return "",
+    };
+    let line = "";
+    for l in text.split("\n") {
+        if l.contains("You are `") {
+            line = l;
+        }
+    }
+    if line == "" {
+        return "";
+    }
+    let tail = "";
+    let seen = false;
+    for piece in line.split("You are `") {
+        if seen {
+            tail = piece;
+            break;
+        }
+        seen = true;
+    }
+    for piece in tail.split("`") {
+        return piece;
+    }
+    ""
+}

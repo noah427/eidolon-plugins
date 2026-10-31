@@ -55,6 +55,13 @@ pub async fn call(input) {
         Some(e) => return Err(e),
         None => {}
     }
+    // Guard 1, which the schema cannot keep: `required` refuses a *missing* field, and `""` is a
+    // string. An empty address would write a live row that names nobody — core's own
+    // `adopt_refuses_an_empty_worker_address` guarded this before the verb left, and the row this
+    // ledger keeps is the only record an adoption has.
+    if worker == "" {
+        return Err("coordinator_adopt needs a durable address: `session` is empty, and an empty address names no worker — pass the address exactly as `eidolon peers` prints it");
+    }
     let name = match text_of(input.get("name")) {
         Some(s) => s,
         None => "",
