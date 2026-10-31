@@ -84,7 +84,7 @@ check "U1 an adoption whose write is refused says it was NOT written down" "$run
 check "U1 and the refusal it carries is the one the host gave" "$run" \
     "over the 1048576-byte bound on one state row; nothing was written"
 check_absent "U1b and it was not answered as an adoption" "$run" "U1 OK"
-check_absent "U1c and it was not answered as a unit result either" "$run" "evaluated to \`()\`"
+check_absent "U1c and it was not answered as a unit result either" "$run" "U1 ERR the tool's \`call\`"
 # U5 — `release.rn`'s `left_word`, the second site of the same one-character class: a release that
 # leaves a pending notice alone must still RELEASE and say how many it left, which is a sentence the
 # broken tail could not build at all.
@@ -102,6 +102,35 @@ check_absent "U3 the refused adoption is not in the ledger's rows" "$run" "(call
 check "U3 the row that could not be released is still there and not released" "$run" \
     "epoch 1 — $seeded (called \`uncertain-write fixture\`)"
 check_absent "U3b and it does not carry the refusal's reason" "$run" "released because: 0123456789"
+# U3c — the release STATE from the rows the workflow emits after U2. A rendering cannot answer this:
+# a released row renders the same epoch line, and an empty reason is omitted, so a row seeded
+# `released:true, release_reason:""` satisfies both checks above (independent reviewer). This reads
+# the rows themselves, the way G20c/G20d do at the padded door.
+rows=$(python3 - "$run" <<'PYROWS'
+import json,re,sys
+t=sys.argv[1]
+m=re.search(r'"report":("(?:[^"\\]|\\.)*")', t, re.S)
+rep=json.loads(m.group(1)) if m else ""
+line=[l for l in rep.split('\n') if l.startswith('U-rows ')]
+print(line[0][len('U-rows '):] if line else "")
+PYROWS
+)
+facts=$(python3 - "$rows" <<'PYFACTS'
+import json,sys
+try:
+    rows=json.loads(sys.argv[1])
+except Exception:
+    rows=None
+if not isinstance(rows,list):
+    print("rows-parsed=no"); raise SystemExit
+mine=[r for r in rows if isinstance(r.get("worker"),str) and r["worker"]=="1793000011111"]
+print("rows-parsed=yes")
+print("seeded-rows=%d" % len(mine))
+print("seeded-released=%s" % ("true" if any(r.get("released") is True for r in mine) else "false"))
+PYFACTS
+)
+check "U3c the ledger's rows were read back as data" "$facts" "rows-parsed=yes"
+check "U3d the row that could not be released is not marked released" "$facts" "seeded-released=false"
 # The control: the same ledger accepts the next ordinary adoption, in epoch 1.
 check "U4 the store still works after both refusals" "$run" \
     "U4 OK adopted $after in epoch 1"
