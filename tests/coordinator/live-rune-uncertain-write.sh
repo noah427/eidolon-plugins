@@ -85,6 +85,14 @@ check "U1 and the refusal it carries is the one the host gave" "$run" \
     "over the 1048576-byte bound on one state row; nothing was written"
 check_absent "U1b and it was not answered as an adoption" "$run" "U1 OK"
 check_absent "U1c and it was not answered as a unit result either" "$run" "evaluated to \`()\`"
+# U5 — `release.rn`'s `left_word`, the second site of the same one-character class: a release that
+# leaves a pending notice alone must still RELEASE and say how many it left, which is a sentence the
+# broken tail could not build at all.
+check "U5 a release with an unmatched pending notice still releases" "$run" \
+    "U5 OK released 1793000055555 (epoch 1); monitoring ends now"
+check "U5 and it says the notice was left alone, and why" "$run" \
+    "1 pending notice(s) were left alone because their epoch could not be matched to this adoption"
+
 # Row 11: the same, for a release.
 check "U2 a release that cannot be written down did not happen" "$run" \
     "U2 ERR the release of $seeded was **not written down**, so it did not happen"

@@ -69,6 +69,28 @@ pub async fn run(args) {
     };
     out += `U3 ${rows}\n`;
 
+    // U5 — the OTHER site of the same one-character class: `release.rn`'s `left_word` is interpolated
+    // into every release that leaves a pending notice alone. A pending notice whose epoch does not
+    // match the adoption's is left alone and counted, so the sentence is built — which is exactly what
+    // a value-shaped tail with a `;` could not do (it made the whole release fail). Witness for
+    // `left_word`, found by the independent reviewer, fixed in `b51d6e4`, never before regressed.
+    let seed5 = match eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "1793000055555", "epoch": 1, "name": "unmatched notice" }],
+            "notices": [#{ "worker": "1793000055555", "epoch": 2, "outcome": "pending", "notice_id": "n-1", "occurrence": "o-1" }],
+            "gaps": [],
+        },
+    }).await {
+        Ok(_) => "OK",
+        Err(e) => `ERR ${e}`,
+    };
+    out += `U5-seed ${seed5}\n`;
+    let u5 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000055555", "reason": "the unmatched notice stays" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `U5 ${u5}\n`;
+
     // U4 — the control: the same store accepts an ordinary adoption straight afterwards, so a U1/U2
     // answer cannot be satisfied by a ledger that is simply broken.
     let u4 = match eidolon::tool_call("coordinator_adopt", #{ "session": after, "name": "after the refusal" }).await {
