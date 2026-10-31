@@ -153,6 +153,30 @@ pub async fn run(args) {
     };
     out += `G14 ${g14}\n`;
 
+    // G15 — a control character in `cancel`'s `reason`: the shape `refuse_control_chars` exists for,
+    // and the only witness `cancel.rn` has ever had. Before `6ea681e` the function's literals were
+    // escaped, so this input was accepted.
+    let g15 = match eidolon::tool_call("coordinator_cancel", #{ "operation": "op-never-started", "reason": "line one\nline two" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G15 ${g15}\n`;
+
+    // G16 — an operation the custody log holds nothing for: the `unrecorded` branch, which must say
+    // that nothing was recorded and that the ledger was left alone, rather than claiming a stop.
+    let g16 = match eidolon::tool_call("coordinator_cancel", #{ "operation": "op-that-never-existed", "reason": "the guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G16 ${g16}\n`;
+
+    // G17 — no operation at all: refused by the schema, naming the field.
+    let g17 = match eidolon::tool_call("coordinator_cancel", #{ "reason": "the guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G17 ${g17}\n`;
+
     // G8 — a release with no worker named.
     let g8 = match eidolon::tool_call("coordinator_release", #{}).await {
         Ok(t) => `OK ${t}`,

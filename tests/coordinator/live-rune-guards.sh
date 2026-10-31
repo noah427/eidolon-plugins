@@ -121,6 +121,19 @@ check "G13 the same release goes through when the row carries no unobserved exit
 check "G14 the adoption rendering names the row's epoch and what the coordinator calls it" "$run" \
     "epoch 1 — 1793000008888 (called \`seeded ok\`)"
 
+# G15 — `cancel.rn`'s control-character refusal: its only witness, and the arm that proves the
+# literal fix in `6ea681e` reaches this file too (before it, a newline in `reason` was accepted).
+check "G15 a control character in cancel's reason is refused" "$run" \
+    "G15 ERR \`reason\` carries a control character"
+# G16 — an operation the log holds nothing for: the answer claims nothing and writes nothing down,
+# which is a different answer from "no cancellation was ever recorded".
+check "G16 cancelling an operation the log does not know claims nothing" "$run" \
+    "G16 ERR cancellation of \`op-that-never-existed\`: **nothing is claimed and nothing is written down**"
+check_absent "G16b and it was not answered as a stop" "$run" "G16 OK"
+# G17 — no operation named: refused by the schema, naming the field.
+check "G17 a cancel with no operation names the missing field" "$run" \
+    "G17 ERR \`coordinator_cancel\` was called with invalid arguments: missing required field \`operation\`"
+
 # G8 — a release with nothing named; refused by the schema, naming the field.
 check "G8 a release with no session names the missing field" "$run" \
     "G8 ERR \`coordinator_release\` was called with invalid arguments: missing required field \`session\` (string)"
