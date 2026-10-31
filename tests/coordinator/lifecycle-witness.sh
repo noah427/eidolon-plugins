@@ -238,7 +238,11 @@ check "B: while a row neither source can state says so" "$w8" "(neither the log 
 # are two checks and not one. Scoped to W13's own answer, because every other notices call in this
 # run answers the same function.
 check_absent "W13: notices answers an outcome word it does not write instead of erroring" "$report" "W13 notices ERR"
-w13=$(printf '%s\n' "$report" | sed -n '/^W13 notices:/,$p')
+# Scoped by the **seeded ids**, not by "runs to the end of the report": that anchor kept working only
+# while W13 was the last block, and the reviewer showed that widening it reds the count as `2 imported
+# / 1 clocked` because W1's clockless imported sentence is in the same run. The block now ends at the
+# notices footer, so a block appended after W13 cannot change these numbers.
+w13=$(printf '%s\n' "$report" | sed -n '/^unknown001/,/^Nothing here is a claim about who is visible/p')
 check "W13: an unknown outcome word is shown as it stands, quoted as it came" "$w13" '`quarantined`: not a word this ledger writes, shown as it stands'
 check "W13: the row stands under its own text" "$w13" "an outcome no version of this ledger writes"
 check "W13: an imported outcome that states its clock keeps it" "$w13" "failed as the service recorded it, answered at 1793000000080"

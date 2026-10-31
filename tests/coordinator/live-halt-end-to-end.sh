@@ -165,8 +165,11 @@ path, coordinator, worker = sys.argv[1], sys.argv[2], sys.argv[3]
 doc = json.load(open(path))
 value = json.loads(doc["value"])
 value["adoptions"] = [{
+    # The shape `adopt.rn` writes, and nothing else: `released_at_ms` and `release_reason` are
+    # filled in by a release, so seeding them on a live adoption handed the reader fields the
+    # product would not have written.
     "worker": worker, "name": "haltling", "note": "", "epoch": 1,
-    "coordinator": coordinator, "released_at_ms": None, "release_reason": "",
+    "coordinator": coordinator,
 }]
 doc["value"] = json.dumps(value)
 json.dump(doc, open(path, "w"))
@@ -210,14 +213,24 @@ else
     fail=$((fail + 1))
 fi
 check "W18: the handler answered the reconcile, not a fabricated payload" "$rows" '"key_kind": "outcome"'
+# The commit's list of what was measured named `last`, `occurrence`, `outcome` and `record`; the
+# first cut printed them and asserted none of them, so a notice carrying the wrong ending stayed 6/6
+# green (the reviewer's mutation). Each one is a check now.
+check "W18: it names the ending the harness actually observed" "$rows" '"last": "iteration limit"'
+check "W18: and the occurrence it was keyed on" "$rows" '"occurrence": "rc:'
+check "W18: the ledger's word for it is written, not owed" "$rows" '"outcome": "written"'
+check "W18: and it keeps the record the log named" "$rows" '"record": '
+check_absent "W18: the row claims no delivery the log did not record" "$rows" '"outcome": "delivered"'
 # The record, if the sink journaled it: a notice written down is what the ledger's `written`
 # outcome claims, and the log is the only place that claim can be checked.
 # `log` takes the session log, not its id.
 logged=$("$EID" log "$XDG_DATA_HOME/eidolon/sessions/$c.eid" --json 2>/dev/null | grep -c '"PluginNotice"' || true)
-if [ "${logged:-0}" -ge 1 ]; then
-    say "ok   W18: the notice is in C's own log ($logged PluginNotice record(s))"
+# "Exactly one", as the commit says: `>= 1` would pass on a fixture that journaled the same notice
+# twice, which is what the notice's dedupe exists to prevent.
+if [ "${logged:-0}" -eq 1 ]; then
+    say "ok   W18: exactly one PluginNotice in C's own log"
 else
-    say "FAIL W18: no PluginNotice record in C's log: a delivered notice would be a retraction of the ledger"
+    say "FAIL W18: ${logged:-0} PluginNotice record(s) in C's log, wanted exactly 1"
     fail=$((fail + 1))
 fi
 
