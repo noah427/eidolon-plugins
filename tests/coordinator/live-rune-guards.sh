@@ -25,6 +25,13 @@ require_temp_config || exit 2
 
 : "${XDG_STATE_HOME:?set XDG_STATE_HOME to a temp dir}"
 : "${XDG_DATA_HOME:?set XDG_DATA_HOME to a temp dir}"
+# The swarm's presence lives under XDG_RUNTIME_DIR, so this fixture takes one of its own **whether or
+# not the caller's environment already has one**: otherwise the run registers beside every real
+# session on the machine — which it did, on the first cut of this block, because `XDG_RUNTIME_DIR` is
+# in the operator's inherited environment — and G21 would be reading the operator's peers rather
+# than this fixture's. Same rule as `guard.sh` applies to the config: throwaway or refuse.
+runtime=$(mktemp -d)
+export XDG_RUNTIME_DIR=$runtime
 
 EID=${EIDOLON_BIN:-}
 if [ -z "$EID" ] || [ ! -x "$EID" ]; then
@@ -53,6 +60,44 @@ check_absent() { # check_absent <name> <haystack> <needle>
     fi
 }
 
+# One live session, parked on a FIFO, so the adoption answer's live-session branch (G21, witness map
+# row 17) has a real address carrying it. It is an ordinary `eidolon chat` under this fixture's own
+# HOME: no service, no monitor, no port.
+live_dir=$XDG_RUNTIME_DIR/live
+mkdir -p "$live_dir"
+mkfifo "$live_dir/in" 2>/dev/null || true
+( sleep 600 >"$live_dir/in" ) & fifo_pid=$!
+"$EID" chat --provider mock --cwd "$live_dir" <"$live_dir/in" >"$live_dir/out" 2>&1 & live_pid=$!
+cleanup() {
+    kill "$live_pid" "$fifo_pid" 2>/dev/null || true
+    wait "$live_pid" "$fifo_pid" 2>/dev/null || true
+    rm -rf "$runtime" 2>/dev/null || true
+    : # a trap must not end on a failing test: under `set -e` that turns a green fixture into exit 1
+}
+trap cleanup EXIT
+live=""
+for _ in $(seq 1 60); do
+    live=$(ls -t "$XDG_DATA_HOME"/eidolon/sessions/*.eid 2>/dev/null | head -1 | sed 's|.*/||;s|\.eid$||' || true)
+    [ -n "$live" ] && break
+    sleep 0.5
+done
+if [ -z "$live" ]; then
+    say "SKIP the live-session check: no session log appeared for the chat process"
+    live=""
+else
+    # A log file is not a registration: the roster is what `live_sentence` reads, so wait for the
+    # roster and not for the file. A session that never registers is a SKIP, counted, not a pass.
+    registered=0
+    for _ in $(seq 1 60); do
+        if "$EID" peers 2>/dev/null | grep -qF -- "$live"; then registered=1; break; fi
+        sleep 0.5
+    done
+    if [ "$registered" -eq 0 ]; then
+        say "SKIP the live-session check: $live never appeared on this fixture's roster"
+        live=""
+    fi
+fi
+
 plug=$XDG_CONFIG_HOME/eidolon/plugins/coordinator
 mkdir -p "$plug/workflows"
 cp -r "$repo/coordinator/." "$plug/"
@@ -65,7 +110,8 @@ cp "$here/rune-guards.rn" "$plug/workflows/rune-guards.rn"
 "$EID" plugins trust coordinator >/dev/null
 
 say "=== driving the guards through the plugin's own tools ==="
-run=$("$EID" workflow run "$plug" rune-guards --provider mock --yolo 2>&1 || true)
+run=$("$EID" workflow run "$plug" rune-guards --provider mock --yolo \
+    --args "$(printf '{"live":"%s"}' "$live")" 2>&1 || true)
 printf '%s\n' "$run" | sed 's/^/     /'
 
 worker=1793000004242
@@ -189,6 +235,18 @@ check_absent "G16b and it was not answered as a stop" "$run" "G16 OK"
 check "G17 a cancel with no operation names the missing field" "$run" \
     "G17 ERR \`coordinator_cancel\` was called with invalid arguments: missing required field \`operation\`"
 
+# G21 — the LIVE-SESSION branch (witness map row 17): an address a live session actually carries is
+# answered as live, with the state and the last outcome the roster publishes, rather than as a record
+# nobody carries. Skipped and counted when the fixture could not start one.
+if printf '%s' "$run" | grep -qF 'G21 SKIP'; then
+    checks=$((checks + 1)); skipped=$((skipped + 1))
+    say "ok   G21 SKIPPED (counted): no live session was available to carry an address"
+else
+    check "G21 an adoption of a live session is answered as live" "$run" \
+        "G21 OK adopted $live in epoch 1. A live session carries that address now: state"
+    check_absent "G21b and it is not answered as an address nobody carries" "$run" \
+        "G21 OK adopted $live in epoch 1. No live session carries that address"
+fi
 # G8 — a release with nothing named; refused by the schema, naming the field.
 check "G8 a release with no session names the missing field" "$run" \
     "G8 ERR \`coordinator_release\` was called with invalid arguments: missing required field \`session\` (string)"

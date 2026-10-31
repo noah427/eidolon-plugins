@@ -14,13 +14,19 @@ pub fn workflow() {
         name: "rune-guards",
         description: "Drive coordinator_adopt and coordinator_release into every guard they keep: a missing argument, a session adopting itself, a second live adoption of the same worker, a release, a re-adoption taking the next epoch, a release of a worker this ledger never held, a padded address, and a control character in either door. args: none",
         approval: "mutating",
-        params: #{ "type": "object", "properties": #{} },
+        params: #{ "type": "object", "properties": #{ "live": #{ "type": "string" } } },
     }
 }
 
 pub async fn run(args) {
     let out = "";
     let worker = "1793000004242";
+    // The address of the live session the shell started (G21). "" means the fixture could not start
+    // one, and that is reported and counted rather than passed silently.
+    let live = match args.get("live") {
+        Some(v) => `${v}`,
+        None => "",
+    };
 
     // G1 — a worker that is not named at all.
     let g1 = match eidolon::tool_call("coordinator_adopt", #{}).await {
@@ -178,6 +184,19 @@ pub async fn run(args) {
         Err(e) => `ERR ${e}`,
     };
     out += `G20 ${g20}\n`;
+
+    // G21 — the LIVE-SESSION branch of the adoption answer: the address is one a live session really
+    // carries, so `live_sentence` must take its claimant branch and say what the roster publishes
+    // rather than answering as a record nobody carries. Row 17 of the witness map.
+    if live == "" {
+        out += "G21 SKIP the fixture started no live session\n";
+    } else {
+        let g21 = match eidolon::tool_call("coordinator_adopt", #{ "session": live, "name": "live fixture" }).await {
+            Ok(t) => `OK ${t}`,
+            Err(e) => `ERR ${e}`,
+        };
+        out += `G21 ${g21}\n`;
+    }
 
     // G12 — a release is REFUSED while a cancellation's exit was never observed. The row is seeded
     // because no tool in this fixture can produce an `attempted` word without a real child process
