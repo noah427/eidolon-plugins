@@ -32,5 +32,16 @@ pub async fn call(input) {
         b += chunk;
     }
     let eq = a == b;
+    // A second mode for the boundary question: does an INTERPOLATED error survive a call that carried
+    // a large argument? `pad` is never read beyond its length, so nothing here can be blamed for the
+    // answer; the only difference between this and the plain compare is the size of the argument.
+    let pad_len = 0;
+    match input.get("pad") {
+        Some(v) => { pad_len = `${v}`.len(); }
+        None => {}
+    }
+    if pad_len > 0 {
+        return Err(`probe boundary [${eq}] pad=${pad_len}`);
+    }
     Ok(`compared len=${a.len()} equal=${eq}`)
 }

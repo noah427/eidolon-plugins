@@ -19,5 +19,14 @@ pub async fn run(args) {
         Err(e) => `ERR len=${e.len()}`,
     };
     out += `BIG ${big}\n`;
+    // The boundary question: a 1.28 MB argument, then an interpolated error.
+    let pad = "";
+    let chunk = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
+    for i in 0..20000 { pad += chunk; }
+    let err_big = match eidolon::tool_call("coordinator_probe_compare", #{ "pad": pad }).await {
+        Ok(t) => `OK len=${t.len()} [${t}]`,
+        Err(e) => `ERR len=${e.len()} [${e}]`,
+    };
+    out += `ERRBIG ${err_big}\n`;
     Ok(out)
 }
