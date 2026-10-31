@@ -57,8 +57,8 @@ check_absent() { # check_absent <name> <haystack> <needle>
 plug=$XDG_CONFIG_HOME/eidolon/plugins/coordinator
 mkdir -p "$plug/workflows"
 cp -r "$repo/coordinator/." "$plug/"
-cp "$here/lifecycle-fixture/tools/seed_json.rn" "$plug/tools/"
-sed -i 's/"rank", "unrank", "ranks", "hook_ready", "hook_peer"\]/"rank", "unrank", "ranks", "hook_ready", "hook_peer", "seed_json"]/' "$plug/plugin.rn"
+cp "$here/lifecycle-fixture/tools/seed_json.rn" "$here/lifecycle-fixture/tools/dump_rows.rn" "$plug/tools/"
+sed -i 's/"rank", "unrank", "ranks", "hook_ready", "hook_peer"\]/"rank", "unrank", "ranks", "hook_ready", "hook_peer", "seed_json", "dump_rows"]/' "$plug/plugin.rn"
 grep -q 'seed_json' "$plug/plugin.rn" || { say "FAIL the seed fixture is not registered"; exit 1; }
 cp "$here/rune-uncertain.rn" "$plug/workflows/rune-uncertain.rn"
 "$EID" plugins trust coordinator >/dev/null

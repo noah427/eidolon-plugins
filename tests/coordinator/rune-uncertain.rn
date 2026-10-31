@@ -61,6 +61,14 @@ pub async fn run(args) {
     };
     out += `U2 ${u2}\n`;
 
+    // U-rows — the refusal's effect on the ROWS, which a rendering cannot show: a released row
+    // renders the same epoch line and omits its reason when empty.
+    let urows = match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => t,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `U-rows ${urows}\n`;
+
     // U3 — the rows as the ledger still holds them: neither refused act is in here, and the row that
     // could not be released is still live. The answer and the store must agree.
     let rows = match eidolon::tool_call("coordinator_adoptions", #{}).await {

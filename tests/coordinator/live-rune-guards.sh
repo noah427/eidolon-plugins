@@ -247,6 +247,8 @@ check "G9c/G10c no row carries an empty or blank worker" "$rowfacts" "blank-rows
 # Row 14: an adoption and its release are two durable records.
 check "row14a the released adoption is still a row, in epoch 1" "$rowfacts" "epoch1-row-present=1"
 check "row14b and it is marked released, with its reason" "$rowfacts" "epoch1-row-released=true"
+check "row14b and the reason it is marked with is the one the release gave" "$rowfacts" \
+    "epoch1-row-reason=the guard fixture is done with it"
 check "row14c the re-adoption is a SECOND row, not a rewrite of the first" "$rowfacts" "epoch2-rows=1"
 # m11: a release that was REFUSED for padding must not have marked the row it was refused over. The
 # read-back runs after G20 now; before it ran before G19/G20, so nothing could see this.
