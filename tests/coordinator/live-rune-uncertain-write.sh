@@ -67,6 +67,9 @@ say "=== driving two doors at a store that cannot be written ==="
 run=$("$EID" workflow run "$plug" rune-uncertain --provider mock --yolo 2>&1 || true)
 printf '%s\n' "$run" | sed 's/^/     /'
 
+# As in the guard fixture: a run that failed outright would satisfy every absence check below.
+check "the workflow run completed" "$run" '"status":"completed"'
+
 seeded=1793000011111
 refused=1793000022222
 after=1793000044444

@@ -114,6 +114,10 @@ run=$("$EID" workflow run "$plug" rune-guards --provider mock --yolo \
     --args "$(printf '{"live":"%s"}' "$live")" 2>&1 || true)
 printf '%s\n' "$run" | sed 's/^/     /'
 
+# The run must have COMPLETED before any absence check below means anything: a workflow that failed
+# outright satisfies every check_absent in this file, which is how a broken run can look clean.
+check "the workflow run completed" "$run" '"status":"completed"'
+
 worker=1793000004242
 
 # G1 — nothing named. The tool's JSON schema refuses this before the body runs, which is a stronger
