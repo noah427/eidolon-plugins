@@ -111,9 +111,12 @@ check_absent "G11b and it wrote no row either" "$run" "G11 OK adopted"
 
 # G18/G18c/G18d — a padded address. Refused, never trimmed into the address it resembles: the
 # sentence must say the address carries padding and tell the caller where the exact spelling is.
-check "G18 a space-padded address is refused, naming the padding" "$run" \
-    "G18 ERR \`session\` carries padding: an address is the exact spelling the harness minted"
-check "G18 and the refusal says to copy it from \`eidolon peers\`" "$run" "Copy it from \`eidolon peers\`"
+# The needle is the whole G18 sentence, label included, because a bare "Copy it from `eidolon
+# peers`" passes on G20's answer: a check may not reach wider than the answer it is about. (The
+# first cut of this pair had exactly that defect, and the guard-deleted arm exposed it by
+# staying green on a suite where G18 itself was red.)
+check "G18 a space-padded address is refused, naming the padding and where the spelling comes from" "$run" \
+    "G18 ERR \`session\` carries padding: an address is the exact spelling the harness minted, with nothing before it or after it. Copy it from \`eidolon peers\`"
 check_absent "G18b and no row was written under the padded spelling" "$run" "G18 OK adopted"
 # NBSP is the case no other guard sees: not a control character, not a space, and `trim()` closes it.
 check "G18c an NBSP before the address is refused" "$run" \
