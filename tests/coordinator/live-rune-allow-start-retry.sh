@@ -6,6 +6,12 @@
 #   HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
 #     EIDOLON_BIN=/path/to/eidolon bash tests/coordinator/live-rune-allow-start-retry.sh
 #
+# That is the whole invocation: none of those directories has to exist first. This script creates
+# every one it needs — it writes a timing log and a session snapshot under `$XDG_STATE_HOME` — and
+# refuses by name (exit 2) if one cannot be made or written. The presence→socket gap it measures is
+# a **check**, not a printed aside: a run whose timing log is absent or empty fails by name instead
+# of answering `none` and exiting 0.
+#
 # WHY. `custody_allow_start` can refuse with "brief delivery is unconfirmed" because the correlated
 # delivery dials `<presence>/sock` and presence is registered before the socket binds. Two questions
 # follow, and this run answers both from what the tree says rather than from what it ought to say:
@@ -70,8 +76,33 @@ check_re() { # check_re <name> <haystack> <regex>
         say "FAIL $1: wanted to match /$3/ in [$2]"; fail=$((fail + 1)); fi
 }
 
+# ---- setup: every directory this fixture needs, made before anything is driven ---------------------
+#
+# This one *writes evidence* into `$XDG_STATE_HOME`: the timing log the gap is measured from, and the
+# at-socket session snapshot. Run cold without that directory the writes failed quietly, the
+# measurement section printed `dir-to-sock-ms=none`, and the run still exited 0 — a witness that could
+# not fail and could not measure, which deletes the number it exists to produce. So each directory is
+# made here, and one that cannot be made or written stops the run by name (exit 2) before the plugin
+# is copied, before the workflow is driven and before any check is counted.
+setup_refuse() { # setup_refuse <path> <reason>
+    printf 'refusing: %s %s\n' "$1" "$2" >&2
+    printf '  nothing was run and no check was counted; this is the fixture'"'"'s setup, not the port.\n' >&2
+    printf '  the documented invocation is: t=$(mktemp -d); HOME=$t XDG_CONFIG_HOME=$t/cfg \\\n' >&2
+    printf '    XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data EIDOLON_BIN=/path/to/eidolon bash %s\n' "$0" >&2
+    exit 2
+}
+for d in "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"; do
+    mkdir -p "$d" 2>/dev/null
+    if [ ! -d "$d" ]; then setup_refuse "$d" "does not exist and \`mkdir -p\` could not create it"; fi
+    if ! : >"$d/.fixture-writable" 2>/dev/null; then
+        setup_refuse "$d" "exists but is not writable (this fixture writes its timing log, snapshot and ledger there)"
+    fi
+    rm -f "$d/.fixture-writable"
+done
+
 say "=== the harness under test ==="
 say_bin
+say "setup: config=$XDG_CONFIG_HOME state=$XDG_STATE_HOME data=$XDG_DATA_HOME (created where absent)"
 
 plug=$XDG_CONFIG_HOME/eidolon/plugins/coordinator
 mkdir -p "$plug/workflows"
@@ -161,15 +192,27 @@ check_re "R1 the child was held" "$child_session" '^[0-9]{6,}$'
 
 say ""
 say "=== the socket, measured from outside the workflow ==="
-sed 's/^/     /' "$timing"
-dir_ms=$(awk '/ dir /{print $1; exit}' "$timing")
-sock_ms=$(awk '/ sock /{print $1; exit}' "$timing")
+sed 's/^/     /' "$timing" 2>/dev/null
+dir_ms=$(awk '/ dir /{print $1; exit}' "$timing" 2>/dev/null)
+sock_ms=$(awk '/ sock /{print $1; exit}' "$timing" 2>/dev/null)
+# The gap is the finding's headline number, so its absence is a failure of this fixture, not a word
+# in the output: `none` used to be printed here while the run exited 0, which is how a cold directory
+# deleted the measurement without anything noticing. Both figures must be present and must be
+# milliseconds before anything is subtracted.
+measured=unmeasured
 if [ -n "$dir_ms" ] && [ -n "$sock_ms" ]; then
-    say "     presence directory seen first, socket $((sock_ms - dir_ms)) ms later"
-    printf 'dir-to-sock-ms=%s\n' "$((sock_ms - dir_ms))"
-else
-    printf 'dir-to-sock-ms=none\n'
+    case "$dir_ms$sock_ms" in
+        *[!0-9]*) : ;;                 # not millisecond figures; leave it unmeasured rather than guess
+        *) measured=$((sock_ms - dir_ms)) ;;
+    esac
 fi
+if [ "$measured" = unmeasured ]; then
+    printf 'dir-to-sock-ms=unmeasured (dir=%s sock=%s from %s)\n' "${dir_ms:-absent}" "${sock_ms:-absent}" "$timing"
+else
+    say "     presence directory seen first, socket ${measured} ms later"
+    printf 'dir-to-sock-ms=%s\n' "$measured"
+fi
+check_re "R1b the presence-to-socket gap was measured, in milliseconds" "$measured" '^[0-9]+$'
 
 # ---- the two asks --------------------------------------------------------------------------------
 check "R2 the first ask was refused" "$rep" "R1-ALLOW-ERR:"
