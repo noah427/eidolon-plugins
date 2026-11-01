@@ -1,0 +1,98 @@
+// tests/coordinator/rune-allow-start-retry.rn — one operation: hold, allow_start, wait for the sock,
+// allow_start again, inspect. Copied into the disposable config by
+// `tests/coordinator/live-rune-allow-start-retry.sh`; not shipped.
+//
+// Both asks go through `coordinator_allow_start_only`, a fixture tool: a workflow's Rune module is
+// `tool_call`/`park`/`ask_model`/`ask_decision` only, so the door is reached the ordinary way.
+//
+// The question this workflow asks is narrow and it does not assume the answer: when
+// `custody_allow_start` refuses with "brief delivery is unconfirmed" because the child's presence
+// socket was not bound yet, does re-issuing the **same operation** land the brief, or does it refuse
+// again? Both halves are reported verbatim, and the second attempt is only issued after the socket
+// exists, so a refusal cannot be blamed on the fixture having been early.
+
+pub fn workflow() {
+    #{
+        name: "rune-allow-start-retry",
+        description: "Hold one child, ask the door to open its barrier, wait for the presence socket, then ask again and inspect. args: {operation, workspace, model, brief, sock_dir}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation id" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child" },
+                "model": #{ "type": "string", "description": "The child's model key" },
+                "brief": #{ "type": "string", "description": "The assignment the door would journal" },
+                "sock_dir": #{ "type": "string", "description": "The runtime root holding <session>/sock, absolute" },
+            },
+            "required": ["operation", "workspace", "model", "brief", "sock_dir"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-allow-start-retry needs \`${key}\``),
+    }
+}
+
+fn session_of(answer) {
+    match json::from_string(`${answer}`) {
+        Ok(v) => {
+            match v.get("session") {
+                Some(s) => `${s}`,
+                None => "",
+            }
+        }
+        Err(_) => "",
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    let sock_dir = needed(args, "sock_dir")?;
+    let out = "";
+
+    let sock = "";
+    match eidolon::tool_call("coordinator_hold_only", #{
+        "operation": operation, "workspace": workspace, "model": model, "brief": brief,
+    }).await {
+        Ok(t) => {
+            let session = session_of(t);
+            sock = `${sock_dir}/${session}/sock`;
+            out += `R0-HELD: session ${session}; ${t}\n`;
+            out += `R0-SOCK: ${sock}\n`;
+        }
+        Err(e) => return Ok(`R0-HELD-ERR: ${e}\n`),
+    }
+
+    // The first ask, which this run expects to be refused: the socket is not bound yet.
+    match eidolon::tool_call("coordinator_allow_start_only", #{ "operation": operation }).await {
+        Ok(t) => out += `R1-ALLOW-OK: ${t}\n`,
+        Err(e) => out += `R1-ALLOW-ERR: ${e}\n`,
+    }
+
+    // Only now wait for the socket, and only then ask again. The path comes from the hold's own
+    // answer, so the barrier is about this child rather than a guess about it.
+    if sock == "" {
+        return Ok(`${out}R2-WAIT-ERR: the hold did not name a child, so there is no socket to wait for\n`);
+    }
+    match eidolon::tool_call("coordinator_wait_for_socket", #{ "path": sock }).await {
+        Ok(t) => out += `R2-SOCK: ${t}\n`,
+        Err(e) => return Ok(`${out}R2-SOCK-ERR: ${e}\n`),
+    }
+
+    match eidolon::tool_call("coordinator_allow_start_only", #{ "operation": operation }).await {
+        Ok(t) => out += `R3-ALLOW-OK: ${t}\n`,
+        Err(e) => out += `R3-ALLOW-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": operation }).await {
+        Ok(t) => out += `R4-RECORD: ${t}\n`,
+        Err(e) => out += `R4-RECORD-ERR: ${e}\n`,
+    }
+    Ok(out)
+}

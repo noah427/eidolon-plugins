@@ -1,0 +1,36 @@
+// Test fixture only: core's **allow_start** door and nothing else. Not shipped.
+//
+// Workflows compile against a narrow module — `tool_call`, `park`, `ask_model`, `ask_decision` — so a
+// workflow cannot reach `eidolon::custody_allow_start` directly; that is deliberate, not a gap. This
+// file is the ordinary way through: a tool script may call the door, and a workflow reaches the tool.
+//
+// It exists so one experiment can hold a child and then ask the *same* operation's barrier to open
+// twice, with the answers verbatim. The door's answer is a `StartView` — `session`, `brief_record`,
+// `wake` — and this returns it unchanged, so what is asserted is the door's typed answer rather than
+// a plugin's sentence about it.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_allow_start_only",
+        description: "Test fixture: core's allow_start door for one operation, answered verbatim. Opens the barrier from the record's own bytes and attempts the brief.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation whose barrier should open." },
+            },
+            "required": ["operation"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let operation = match input.get("operation") {
+        Some(v) => `${v}`,
+        None => return Err("coordinator_allow_start_only needs `operation`"),
+    };
+    if operation == "" || operation == "null" {
+        return Err("coordinator_allow_start_only needs a non-empty `operation`");
+    }
+    eidolon::custody_allow_start(#{ "operation": operation }).await
+}

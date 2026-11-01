@@ -1,0 +1,91 @@
+// Test fixture only: wait until a child's presence `sock` path exists, and answer what the filesystem
+// said. Not shipped.
+//
+// WHY. `custody_allow_start` can refuse with "brief delivery is unconfirmed" because the correlated
+// delivery dials `<presence>/sock` and the socket is not bound yet — presence is registered first and
+// the bind follows. Whether a *repeat* of the same operation can land the brief depends on the socket
+// existing when the second attempt dials. This fixture gives the workflow a way to wait for that,
+// rather than racing it, so the second attempt is a witness and not a coin toss.
+//
+// The probe is `eidolon::fs_read` on the socket path, which is not a regular file: opening it fails
+// immediately (a Unix socket cannot be read like a file) and the *kind* of failure is the answer.
+// "No such file or directory" means it is not there yet; any other error means the path exists. A
+// plain read that succeeds would mean the path is a regular file, which is not what this fixture
+// expects and is reported rather than accepted.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_wait_for_socket",
+        description: "Test fixture: wait (bounded) until a socket path exists, answering how many probes it took and what the filesystem said. Refuses loudly on timeout.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "path": #{ "type": "string", "description": "The socket path, absolute." },
+                "tries": #{ "type": "number", "description": "How many probes before refusing. Default 1000000." },
+            },
+            "required": ["path"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let path = match text_of(input.get("path")) {
+        Some(s) => s,
+        None => return Err("coordinator_wait_for_socket needs `path`"),
+    };
+    let tries = match number_of(input.get("tries")) {
+        Some(n) => n,
+        None => 1000000,
+    };
+    let n = 0;
+    let last = "";
+    while n < tries {
+        n += 1;
+        // A fresh string each probe: `fs_read` takes its path by value, and a loop that hands it the
+        // same binding twice is taking an already-moved value.
+        match eidolon::fs_read(`${path}`, None, None).await {
+            Ok(_) => return Ok(`probe ${n}: \`${path}\` opened as a regular file, which is not a socket; this fixture does not treat that as the doorbell it is waiting for`),
+            Err(e) => {
+                let why = `${e}`;
+                if why.contains("No such file or directory") {
+                    last = why;
+                } else {
+                    return Ok(`probe ${n}: the path exists and refuses a plain read, as a socket does: ${why}`);
+                }
+            }
+        }
+    }
+    Err(`coordinator_wait_for_socket gave up after ${n} probes of \`${path}\`: it never appeared, and the repeat must not be issued on the hope that it did. Last probe: ${last}`)
+}
+
+fn text_of(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            if s == "null" || s == "" {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        None => None,
+    }
+}
+
+fn number_of(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            if s == "null" || s == "" {
+                None
+            } else {
+                match json::from_string(s) {
+                    Ok(n) => Some(n),
+                    Err(_) => None,
+                }
+            }
+        }
+        None => None,
+    }
+}
