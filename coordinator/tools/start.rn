@@ -1,10 +1,20 @@
-// One dispatcher-admitted managed start: the caller is derived from the harness,
-// never an input. The service's token is transport auth, as for adopt; it is not
-// a new authority grant. Start/retry always re-enters this registry tool's gate.
+// One dispatcher-admitted managed start, in **three local acts**: core's `custody_hold` establishes
+// the child at its startup barrier and releases nothing; this plugin's own adoption row is written
+// down and read back; and only then does core's `custody_allow_start` open the barrier from the
+// record's own bytes. No service is dialled — the coordinator monitor is retiring, and what was one
+// `start` call is now two doors a script can stand between.
+//
+// The order is the guarantee. Every custody door a plugin could reach before the held one ran hold
+// and release in a single act, so a row written after that call was written after the child could
+// already run — durable-before-release, reversed. Holding first and releasing last is what makes the
+// row's existence a fact about the child rather than a hope about it.
+//
+// The caller is derived from the harness, never an input; the rank block and the destination are the
+// door's, never a request field. Start/retry always re-enters this registry tool's gate.
 pub fn manifest() {
     #{
         name: "coordinator_start",
-        description: "Start and adopt one managed worker as one operation. The harness holds the child before its first model turn; adoption is made durable before release. Name an operation id and retry ONLY the same immutable input to reconcile. An optional rank appends that rank's block (the plugin's ranks/<rank>.md) beside the persona at spawn; the monitor binds the digest of the block's exact bytes into the operation, so editing the file and retrying the same operation is refused, not re-told. A partial outcome is not success and never causes a blind replacement. The brief is one correlated delivery: a key minted once and stored before the send, so repeating this same operation carries the same key and the worker deduplicates it instead of receiving a second brief. That delivery establishes a journal record in the worker's log — not execution, not consumption, and not a turn — and it wakes nobody. Separately from it, once the brief is journaled the monitor attempts one ordinary wake naming that record rather than restating it, because a journaled record starts no turn by itself. That is one attempt per start attempt, not a guarantee of delivery: `Answered` with `delivered` or `queued` has arrived and is never sent again, while `failed`, `refused`, `partial`, an `Undeliverable` wake and a bare `Attempted` are re-attempted — so repeating the operation re-attempts only the wake, never a second brief. The child uses persistent headless chat unless `visible` is true, in which case it runs in a terminal window whose destination the service decides and pins; a visible launch refuses before any process exists unless this host can establish a no-focus map, and desktop/persona enforcement is not implied either way. Model/spend/workspace permissions are decided by this call's dispatcher, not by rank. A journaled receipt says the record is in the worker's log; it is not proof the model read it, that a turn ran, or that the work happened. `wake` is the externally tagged `WakeState`: `Answered` carries the transport's `outcome` and `words`, and `Undeliverable` carries a `why`. An `Undeliverable` wake means no wake reached the worker and the accepted work has not begun.",
+        description: "Start and adopt one managed worker as one operation, in three local acts and no service: core's `custody_hold` establishes the child at its startup barrier and releases nothing, this tool writes its own adoption row durably and reads it back, and only then does core's `custody_allow_start` open the barrier from the record's own bytes. Nothing is reported as started unless that row is durably in this ledger: `written` by this attempt and read back after the write, or `found` from an earlier attempt of the same operation — a row this call did not write, which the answer says in those words; a write that is uncertain or refused releases nothing; a release the log observes as `running` has opened the barrier and leaves the rest of the start — most often its brief — not established, while a release that was refused or is not so observed leaves whether the child ran unknown. Name an operation id and retry ONLY the same immutable input to reconcile. An optional rank appends that rank's block (the plugin's ranks/<rank>.md) beside the persona at spawn; the door reads the block and binds the digest of its exact bytes into the operation, so editing the file and retrying the same operation is refused, not re-told. A partial outcome is not success and never causes a blind replacement. The brief is one correlated delivery: a key minted once and stored before the send, so repeating this same operation carries the same key and the worker deduplicates it instead of receiving a second brief. That delivery establishes a journal record in the worker's log — not execution, not consumption, and not a turn — and it wakes nobody. Separately from it, once the brief is journaled the door attempts one ordinary wake naming that record rather than restating it, because a journaled record starts no turn by itself. That is one attempt per start attempt, not a guarantee of delivery: `Answered` with `delivered` or `queued` has arrived and is never sent again, while `failed`, `refused`, `partial`, `cancelled`, an `Undeliverable` wake and a bare `Attempted` are re-attempted — so repeating the operation re-attempts only the wake, never a second brief. The child uses persistent headless chat unless `visible` is true, in which case it runs in a terminal window whose destination the host resolves once and pins in the record; a visible launch refuses before any process exists unless this host can establish a no-focus map, and desktop/persona enforcement is not implied either way. Model/spend/workspace permissions are decided by this call's dispatcher, not by rank. A journaled receipt says the record is in the worker's log; it is not proof the model read it, that a turn ran, or that the work happened. `wake` is the externally tagged `WakeState`: `Answered` carries the transport's `outcome` and `words`, and `Undeliverable` carries a `why`. An `Undeliverable` wake means no wake reached the worker and the accepted work has not begun.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
@@ -15,8 +25,8 @@ pub fn manifest() {
                 "model": #{ "type": "string", "description": "Explicit provider:model key; this may spend within the admitted scope." },
                 "persona": #{ "type": "string", "description": "Optional requested persona; not an authority grant or verified visibility claim." },
                 "rank": #{ "type": "string", "enum": ["imperator", "legatus", "tribunus", "miles", "centurio"],
-                    "description": "Optional rank whose block under the plugin's ranks/ is appended beside the persona at spawn, through the CLI's generic --system-append. The monitor reads the block and binds the digest of its exact bytes into this operation's immutable input; a rank with no written block appends nothing. Not a persona rewrite, not an enforcement, and not a permission." },
-                "visible": #{ "type": "boolean", "description": "Ask for a desktop-visible child: the same managed child, in a terminal window, instead of a persistent headless chat. The workspace is NOT a caller's input — the service resolves it from the Imperator's own window, once per operation, and pins it in the record, so a retry reuses the destination the operation was admitted with. On a host that cannot promise the child will not take the operator's keyboard, a visible launch refuses at its guard before any process exists. Default false." },
+                    "description": "Optional rank whose block under the plugin's ranks/ is appended beside the persona at spawn, through the CLI's generic --system-append. The door reads the block and binds the digest of its exact bytes into this operation's immutable input; a rank with no written block appends nothing. Not a persona rewrite, not an enforcement, and not a permission." },
+                "visible": #{ "type": "boolean", "description": "Ask for a desktop-visible child: the same managed child, in a terminal window, instead of a persistent headless chat. The destination is NOT a caller's input — the host resolves it once per operation from the Imperator's own window and pins it in the record, so a retry reuses the destination the operation was admitted with, and there is none to invent. On a host that cannot promise the child will not take the operator's keyboard, a visible launch refuses at its guard before any process exists. Default false." },
                 "brief": #{ "type": "string", "description": "Bounded assignment journaled into the worker's own log after durable supervision, under a key minted once for this operation; not an inbox message, and it does not wake the worker." },
             },
             "required": ["operation", "workspace", "model", "brief"],
@@ -25,55 +35,413 @@ pub fn manifest() {
 }
 
 pub async fn call(input) {
-    let caller = my_address().await?;
-    let args = #{ "caller": caller };
-    for field in ["operation", "workspace", "model", "brief"] {
-        let value = match text_of(input.get(field)) {
-            Some(s) => s,
-            None => return Err(`coordinator_start needs ${field}`),
-        };
-        if field != "brief" {
-            match refuse_control_chars(field, value) { Some(e) => return Err(e), None => {} }
-        }
-        args.insert(field, value);
-    }
-    match text_of(input.get("persona")) {
-        Some(persona) => { args.insert("persona", persona); }
+    // ---- the ask: every field here is a caller's, and the caller itself is not ----
+    let operation = match text_of(input.get("operation")) {
+        Some(s) => s,
+        None => return Err("coordinator_start needs `operation`: the idempotency key for this exact start request, not a session address"),
+    };
+    match refuse_control_chars("operation", operation) {
+        Some(e) => return Err(e),
         None => {}
     }
-    // The rank's name only. There is no `rank_digest` argument to send: the
-    // monitor reads the block itself and binds the digest of those exact bytes,
-    // so a retry whose file changed refuses instead of injecting new text.
+    if operation == "" {
+        return Err("coordinator_start needs a non-empty `operation`: it is the key this ledger and the custody log both find a record by, and an empty one names nothing to retry");
+    }
+    // An operation id is a **key**, and both records are found by exact equality on it: a padded one
+    // would name a different operation to this ledger and to the log, so a retry spelled ` op` would
+    // mint a second record and a second row for one request and answer "started" twice. Refused
+    // rather than trimmed, for the same reason `coordinator_adopt` refuses a padded address.
+    if operation != operation.trim() {
+        return Err(`\`operation\` carries padding (\`${operation}\`): an operation id is the exact spelling a retry must repeat, and a padded one is a different operation to both this ledger and the custody log — it would mint a second record for one request. Pass it with nothing before or after it.`);
+    }
+    let workspace = match need(input, "workspace") { Ok(s) => s, Err(e) => return Err(e) };
+    let model = match need(input, "model") { Ok(s) => s, Err(e) => return Err(e) };
+    let brief = match text_of(input.get("brief")) {
+        Some(s) => s,
+        None => return Err("coordinator_start needs `brief`: the assignment is journaled into the worker's own log, and an empty one would be a start with nothing to do"),
+    };
+    match refuse_control_chars("workspace", workspace) {
+        Some(e) => return Err(e),
+        None => {}
+    }
+    match refuse_control_chars("model", model) {
+        Some(e) => return Err(e),
+        None => {}
+    }
+
+    let ask = #{ "operation": operation, "workspace": workspace, "model": model, "brief": brief };
+    match text_of(input.get("persona")) {
+        Some(persona) => { ask.insert("persona", persona); }
+        None => {}
+    }
+    // The rank's **name** only. There is no `rank_digest` argument to send: the door reads the block
+    // itself and binds the digest of those exact bytes, so a retry whose file changed refuses
+    // instead of injecting new text.
     match text_of(input.get("rank")) {
         Some(rank) => match refuse_control_chars("rank", rank) {
             Some(e) => return Err(e),
-            None => { args.insert("rank", rank); }
+            None => { ask.insert("rank", rank); }
         },
         None => {}
     }
-    // A visible launch is a shape the caller may ask for and nothing more. There
-    // is no destination to send and none to invent: the service resolves it from
-    // the Imperator's own window on the first attempt and pins it in the record,
-    // so a retry reuses the admitted number instead of resolving a second time.
-    // Sent only when true, which keeps a headless call's payload byte-identical
-    // to what it was before this argument existed.
+    // A visible launch is a shape the caller may ask for and nothing more. There is no destination
+    // to send and none to invent: the host resolves it from the Imperator's own window on the first
+    // attempt and pins it in the record. Sent only when asked for, which keeps a headless call's
+    // payload byte-identical to what it was before this argument existed.
     match input.get("visible") {
         Some(v) => {
             let said = `${v}`;
             if said == "true" {
-                args.insert("visible", true);
+                ask.insert("shape", "terminal");
             } else if said != "false" {
                 return Err(`coordinator_start: \`visible\` must be true or false, not ${said}: a launch shape is not a string to be guessed at`);
             }
         }
         None => {}
     }
-    call_service("start", args).await
+
+    // The adopting address, read **before** anything is held: the row cannot be written without it,
+    // and a child held with no row to record it is the one state this tool must never create. A
+    // harness that publishes no seat refuses here, in the same words the door has always used.
+    let caller = my_address().await?;
+
+    // ---- 1. the hold: a child at its barrier, and nothing released ----
+    let held = match eidolon::custody_hold(ask).await {
+        Ok(raw) => raw,
+        Err(e) => return Err(hold_refused(operation, `${e}`).await),
+    };
+    let hview = match json::from_string(held) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(`the hold for \`${operation}\` answered something that is not JSON (${e}): ${held}. This attempt wrote no adoption row and released nothing, so nothing here is reported as started.`)
+        }
+    };
+    if !(hview is Object) {
+        return Err(`the hold for \`${operation}\` answered something that is not an object: ${held}. This attempt wrote no adoption row and released nothing, so nothing here is reported as started.`);
+    }
+    let session = match lifecycle_text(hview, "session") {
+        s => s,
+    };
+    if session == "" {
+        return Err(`the hold for \`${operation}\` answered without a bound session (${held}). A child this tool cannot name is one it cannot record: no adoption row was written and nothing was released, and nothing is reported as started. The child, if any, is at its barrier and this session's exit is what aborts it.`);
+    }
+
+    // ---- 2. this plugin's own row, durably, before anything is released ----
+    let recorded = record(caller, session, operation).await?;
+    let status = ledger_text(recorded, "status");
+    let epoch = lifecycle_number(recorded, "epoch");
+
+    if status == "conflict" {
+        return Err(`operation \`${operation}\` and the child \`${session}\` disagree with what this ledger already holds (${ledger_text(recorded, "detail")}), so this attempt wrote nothing and released nothing: a second live row for one child would be a second epoch claiming the same worker, and a row for this operation naming another child would be a second answer to a question the custody log owns. Whether the child ran is not this tool's to say.`);
+    }
+    if status == "released" {
+        return Err(`the child \`${session}\` for operation \`${operation}\` has a row in this ledger, in epoch ${epoch}, and that epoch was **released**: a start retry does not reopen monitoring, so this attempt wrote nothing, released nothing, and did not open the barrier. If the child should run under monitoring, that is a new operation id — a re-adoption is a new epoch, never a reopened one.`);
+    }
+    // An uncertain write is **before any release was attempted**, and that is the clean case: the
+    // barrier is still closed, so the child cannot have run. The row itself is not a fact.
+    if status == "uncertain" {
+        return Err(`the adoption row for \`${session}\` **may or may not be written down**: this ledger's write came back uncertain (${ledger_text(recorded, "detail")}). No release was attempted, so the child cannot have run — it is at its startup barrier and nothing opened it — but nothing here is reported as started either, and this ledger's record of it is not a fact to build on. Retry this same operation: it re-enters \`custody_hold\`, which is idempotent and answers this same child, finds this attempt's row by that address if the bytes did land, and writes no second one.`);
+    }
+    // A refusal wrote nothing at all, which is the same clean case with one fact more.
+    if status == "refused" {
+        return Err(`this ledger **refused** the adoption row for \`${session}\` (${ledger_text(recorded, "detail")}), so nothing was written and nothing was released: no release was attempted, so the child cannot have run — it is at its startup barrier and nothing opened it — and nothing is reported as started. Retry this same operation, which re-enters \`custody_hold\` and answers this same child.`);
+    }
+    if status != "written" && status != "found" {
+        // Not a state this file knows how to continue from. Fail closed rather than guess.
+        return Err(`the adoption row for \`${session}\` answered \`${status}\`, which this tool does not recognise: nothing was released, and nothing is reported as started.`);
+    }
+    let provenance = if status == "written" {
+        "written by this attempt and read back after the write"
+    } else {
+        "found from an earlier attempt of this operation, which this attempt did not write a second time"
+    };
+
+    // ---- 3. and only now the barrier ----
+    let released = match eidolon::custody_allow_start(#{ "operation": operation }).await {
+        Ok(raw) => raw,
+        Err(e) => return Err(released_unknown(operation, session, epoch, provenance, `${e}`).await),
+    };
+    let view = match json::from_string(released) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(`the barrier for \`${operation}\` answered something that is not JSON (${e}): ${released}. The adoption row for \`${session}\` is ${provenance} in epoch ${epoch}, and whether the child ran with it is unknown — the door answered, and its answer cannot be read. Nothing is reported as started and nothing is released by a compensating act.`)
+        }
+    };
+    if !(view is Object) {
+        return Err(`the barrier for \`${operation}\` answered something that is not an object: ${released}. The adoption row for \`${session}\` is ${provenance} in epoch ${epoch}, and whether the child ran with it is unknown. Nothing is reported as started and nothing is released by a compensating act.`);
+    }
+    Ok(started_sentence(operation, session, epoch, provenance, view))
 }
 
-// This session's own durable address, as the harness publishes it. There is no
-// other source for it in this file: not an argument, not an environment
-// variable, not a name somebody typed.
+// This ledger's row for one operation, whichever state it is in: a row of this operation's that was
+// released is still this operation's history, and the caller decides what that means. Matched on the
+// field `record` writes, by exact equality -- an operation id is a key, never a pattern.
+fn find_by_operation(adoptions, operation) {
+    for a in adoptions {
+        if a is Object && lifecycle_text(a, "operation") == operation {
+            return Some(a);
+        }
+    }
+    None
+}
+
+// Write this plugin's own adoption row for the child the log just bound, **durably**, and answer what
+// happened.
+//
+// The row is this ledger's, and it keeps the ledger's own key: `worker`, the durable address the
+// custody log answered.
+//
+// **Where the operation id goes, and why.** On this row, as one more field of the same ledger key.
+// `worker`/`name`/`note`/`coordinator`/`epoch` are the row's ownership and epoch; `operation` is its
+// provenance, naming the start that wrote it. One key, one compare-and-set, the mechanism `adopt`
+// and `cancel` already use -- no second list and no second durable write inside the two-door window,
+// so nothing new sits between `written` and the release. The alternative the brief allows, a record
+// of its own keyed by operation, would be a second write whose failure lands *after* the adoption
+// row is `written`: a partial outcome with no state to describe it, which is a worse guarantee for
+// a fact this row can carry in a field.
+//
+// The operation id here is **provenance, not binding**. Which child an operation is bound to is the
+// custody log's fact -- `custody_hold` is idempotent on the operation and `custody_inspect` answers
+// the operation, its phase and its session -- so a retry asks the log which child it is bound to and
+// checks that against this row. The row never answers "which child" on its own, and if the two
+// disagree the answer is a refusal, not a repair.
+//
+// The epoch is the ledger's own **next number** for that worker -- `max(epoch) + 1` over its rows
+// here, never supplied by a caller and never read out of prose -- exactly as `coordinator_adopt`
+// keeps it. An earlier attempt's row is found by operation and answered as `found`, so a retry
+// duplicates neither the epoch nor the row.
+//
+// Answers one of: written | found | uncertain | refused | released | conflict.
+async fn record(caller, session, operation) {
+    let attempt = 0;
+    let refusal = "";
+    while attempt < 2 {
+        attempt += 1;
+        let loaded = load_store().await?;
+        let store = loaded.store;
+        let adoptions = store_list(store, "adoptions");
+
+        // This operation's own row, if an earlier attempt wrote one: found by the field this file
+        // puts on it, so a retry is answered from the row that exists rather than from an inference.
+        match find_by_operation(adoptions, operation) {
+            Some(r) => {
+                let written_for = lifecycle_text(r, "worker");
+                if written_for != session {
+                    return Ok(#{ "status": "conflict", "epoch": lifecycle_number(r, "epoch"), "detail": `this ledger's row for the operation names \`${written_for}\`, and the custody log bound \`${session}\`` });
+                }
+                if lifecycle_released(r) {
+                    return Ok(#{ "status": "released", "epoch": lifecycle_number(r, "epoch") });
+                }
+                return Ok(#{ "status": "found", "epoch": lifecycle_number(r, "epoch") });
+            }
+            None => {}
+        }
+        // No row of this operation's. A **live** adoption of this child by something else -- an
+        // `adopt` of it, or a start row that predates this field -- is a second epoch claiming one
+        // worker: refused rather than joined.
+        match lifecycle_find_adoption(adoptions, session) {
+            Some(r) => {
+                return Ok(#{ "status": "conflict", "epoch": lifecycle_number(r, "epoch"), "detail": `this ledger already holds a live adoption of \`${session}\` in epoch ${lifecycle_number(r, "epoch")} that operation \`${operation}\` did not write` });
+            }
+            None => {}
+        }
+        // Released, and not this operation's: history for this child. A start retry does not reopen
+        // monitoring, so it is reported and nothing is written.
+        match lifecycle_find_any(adoptions, session) {
+            Some(r) => {
+                if lifecycle_released(r) {
+                    return Ok(#{ "status": "released", "epoch": lifecycle_number(r, "epoch") });
+                }
+            }
+            None => {}
+        }
+
+        let high = 0;
+        for a in adoptions {
+            if a is Object && lifecycle_text(a, "worker") == session && lifecycle_stated(a, "epoch") {
+                let e = lifecycle_number(a, "epoch");
+                if e > high { high = e; }
+            }
+        }
+        let epoch = high + 1;
+        adoptions.push(#{
+            "worker": session,
+            "name": "",
+            "note": "",
+            "coordinator": caller,
+            "epoch": epoch,
+            "operation": operation,
+        });
+        let wrote = write_store(store_put(store, "adoptions", adoptions), loaded.revision).await?;
+        let status = ledger_text(wrote, "status");
+        if status == "written" {
+            return Ok(#{ "status": "written", "epoch": epoch });
+        }
+        if status == "uncertain" {
+            return Ok(#{ "status": "uncertain", "epoch": epoch, "detail": ledger_text(wrote, "detail") });
+        }
+        // Refused: the compare-and-set lost, so the store moved under this attempt. Re-read and
+        // decide again — a second decision, not a blind retry — which is what makes a row another
+        // writer landed for this child come back as `found` rather than as a duplicate.
+        refusal = ledger_text(wrote, "detail");
+    }
+    Ok(#{ "status": "refused", "epoch": 0, "detail": refusal })
+}
+
+// What this tool can say when the **hold** itself did not establish a child.
+//
+// Nothing was written by this attempt and nothing was released, and the sentence says exactly that.
+// Two facts are read back rather than asserted: the custody log's record for the operation (phase
+// and session — the log's facts, not this plugin's binding), and this ledger's own row for the
+// session the log names, which an earlier attempt of this operation may have written. A retry after
+// the holder's death is **not** a repair: it claims no child, writes no second row, releases
+// nothing, and says so.
+async fn hold_refused(operation, why) {
+    let out = `the hold for \`${operation}\` did not establish a child: ${why}. This attempt wrote no adoption row and released nothing, so nothing here is reported as started.`;
+    let seen = inspect_record(operation).await;
+    let readable = lifecycle_true(seen.get("readable"));
+    if readable {
+        let phase = lifecycle_text(seen, "phase");
+        let session = lifecycle_text(seen, "session");
+        let observed = lifecycle_text(seen, "observed");
+        out += ` The custody log's own record for this operation: phase ${stated(phase)}, session ${stated(session)}; its current observation, quoted and not adopted as a claim by this plugin: ${stated(observed)}.`;
+        if session != "" {
+            out += ledger_sentence(session).await;
+        }
+    } else {
+        out += ` The custody log did not answer for this operation (${lifecycle_text(seen, "why")}), so this tool cannot say whether a record exists for it, and it claims nothing about any child.`;
+    }
+    out
+}
+
+// What this ledger holds for that address, as one clause of a refusal. Never throws: a sentence
+// built while reporting one failure must not replace it with a second.
+async fn ledger_sentence(session) {
+    let loaded = match load_store().await {
+        Ok(l) => l,
+        Err(e) => return (` This ledger could not be read (${e}), so this tool cannot say whether an earlier attempt wrote a row for \`${session}\`.`),
+    };
+    let adoptions = match lifecycle_store_list(loaded.store, "adoptions") {
+        Ok(v) => v,
+        Err(e) => return (` This ledger's rows could not be read (${e}), so nothing is claimed about an earlier attempt.`),
+    };
+    match lifecycle_find_adoption(adoptions, session) {
+        Some(r) => return (` This ledger's own row for \`${session}\` is there, in epoch ${lifecycle_epoch_word(r, "epoch")} and still monitored; an earlier attempt of this operation wrote it, and this attempt wrote no second one and released nothing.`),
+        None => {}
+    }
+    match lifecycle_find_any(adoptions, session) {
+        Some(r) => return (` This ledger's own row for \`${session}\` is there and was released in epoch ${lifecycle_epoch_word(r, "epoch")}; this attempt wrote no second one and did not reopen it.`),
+        None => {}
+    }
+    ` This ledger holds no row for \`${session}\`: no adoption of it was ever written down here, so nothing is claimed about it.`
+}
+
+// The partial outcome: the hold answered and the row is written, and what came after did not
+// establish a start. Which of two facts this is, the file decides from the **observation it already
+// fetched**, never from core's prose.
+//
+// `allow_start` answers `Err` for two materially different acts, and the difference is the whole
+// sentence: a release the host never acknowledged may or may not have opened the barrier, while a
+// release it acknowledged and observed `running` has **certainly** opened it — the child is running
+// and only its brief is unestablished (`crates/core/src/custody.rs`: `release_barrier` refuses unless
+// the release is acknowledged and the child is then observed `Running`, and the brief is delivered
+// after that). `custody_inspect`'s contract already keeps those apart: `phase` is the record's,
+// `observed` is the host's, and a disagreement between them is a fact to report rather than resolve.
+//
+// So the branch is `observed == "running"`, which is the same evidence `release_barrier` asserts for
+// itself. Keying it on a sentence — `release unconfirmed`, `brief delivery is unconfirmed` — would
+// make this file's honesty depend on core's wording surviving an edit, which is the evidence this
+// lane has already been burned by. The fallback is the wider claim and therefore the one that needs
+// evidence: no observation of `running`, no assertion that anything runs.
+//
+// In both branches the row was `written`, the epoch stands, nothing is stopped, and nothing is
+// released by a compensating act: supervision stays with the row, and the next move is the caller's.
+async fn released_unknown(operation, session, epoch, provenance, why) {
+    let seen = inspect_record(operation).await;
+    let readable = lifecycle_true(seen.get("readable"));
+    let observed = lifecycle_text(seen, "observed");
+    let out = "";
+    if readable && observed == "running" {
+        out = `the adoption row for \`${session}\` is ${provenance} in epoch ${epoch}, and the barrier is **open**: the log's own observation for this operation is \`running\`, so the child is running. What is not established is its **brief** — ${why}. This is a start whose delivery was not confirmed, not an unknown child: nothing here reports the start as complete, nothing is stopped, and nothing is released by a compensating act — supervision stays with this ledger's row, and a repeat re-issues the same operation under the same durable delivery key rather than sending an ordinary message beside it.`;
+    } else {
+        out = `the adoption row for \`${session}\` is ${provenance} in epoch ${epoch}, but the release was **refused or not confirmed**: ${why}. Whether the child ran is **unknown** — a release that was not acknowledged may nevertheless have opened the barrier, and nothing here observed it — so nothing is reported as started, nothing is stopped, and nothing is released by a compensating act. Supervision stays with this ledger's row, which is what a release would otherwise end.`;
+    }
+    if readable {
+        out += ` The custody log's record for this operation: phase ${stated(lifecycle_text(seen, "phase"))}, session ${stated(lifecycle_text(seen, "session"))}, cancellation ${stated(lifecycle_text(seen, "cancellation"))}; its current observation, quoted and not adopted as a claim by this plugin: ${stated(observed)}.`;
+    } else {
+        out += ` The custody log did not answer for this operation (${lifecycle_text(seen, "why")}), so the record's own words are not available here.`;
+    }
+    out += " Re-issuing this same operation re-asks the door and re-reads both records; it does not mint a second row, a second epoch or a second brief.";
+    out
+}
+
+// The custody log's answer about one operation, kept apart from this ledger's: `readable` says
+// whether the log answered as an object at all, and the four fields are its words verbatim. A door
+// that answered prose instead of JSON is a `readable: false` with its reason kept, never an empty
+// view that would read like an operation nobody ever started.
+async fn inspect_record(operation) {
+    let out = #{ "readable": false, "why": "the custody log was not asked" };
+    match eidolon::custody_inspect(#{ "operation": operation }).await {
+        Ok(raw) => match json::from_string(raw) {
+            Ok(v) => {
+                if v is Object {
+                    out = #{
+                        "readable": true,
+                        "phase": lifecycle_text(v, "phase"),
+                        "session": lifecycle_text(v, "session"),
+                        "cancellation": lifecycle_text(v, "cancellation"),
+                        "observed": lifecycle_text(v, "observed"),
+                    };
+                } else {
+                    out = #{ "readable": false, "why": `the custody log answered something that is not an object: ${raw}` };
+                }
+            }
+            Err(e) => {
+                out = #{ "readable": false, "why": `the custody log answered something that is not JSON (${e}): ${raw}` };
+            }
+        },
+        Err(e) => {
+            out = #{ "readable": false, "why": `${e}` };
+        }
+    }
+    out
+}
+
+// What a successful release is worth, in the order the guarantee reads: the row was durable before
+// the barrier opened, the record holds the brief, and the wake is a transport attempt.
+fn started_sentence(operation, session, epoch, provenance, view) {
+    let record_word = match lifecycle_number(view, "brief_record") {
+        0 => "not re-read by this attempt",
+        n => `journaled as record ${n}`,
+    };
+    let wake = match text_of(view.get("wake")) {
+        Some(w) => w,
+        None => "not stated",
+    };
+    `started \`${session}\` under operation \`${operation}\`: this ledger's adoption row was ${provenance}, in epoch ${epoch}, before the barrier was opened. The door's release answered the brief ${record_word} and the wake \`${wake}\`. The record is in the worker's log and is not proof it was read, that a turn ran, or that the work happened; an \`answered\` wake has arrived and is never sent again, and any other word is re-attempted by repeating this same operation, which never sends a second brief.`
+}
+
+// A value as a clause: the empty string is "not stated", never a silent blank.
+fn stated(s) {
+    if s == "" { "not stated" } else { s }
+}
+
+// A required text field, refused by name when it is absent or empty.
+fn need(input, key) {
+    match text_of(input.get(key)) {
+        Some(s) => {
+            if s == "" {
+                Err(`coordinator_start needs a non-empty \`${key}\``)
+            } else {
+                Ok(s)
+            }
+        }
+        None => Err(`coordinator_start needs \`${key}\``),
+    }
+}
+
+// This session's own durable address, as the harness publishes it. There is no other source for it
+// in this file: not an argument, not an environment variable, not a name somebody typed.
 async fn my_address() {
     let raw = match eidolon::swarm_call("roster", #{}).await {
         Ok(v) => v,
@@ -105,9 +473,9 @@ async fn my_address() {
     }
 }
 
-// This session's own row: a `me` object beside the list, or the one row that
-// marks itself. Either shape is the harness's to choose; neither existing is a
-// refusal, never a guess from the first row and never a name.
+// This session's own row: a `me` object beside the list, or the one row that marks itself. Either
+// shape is the harness's to choose; neither existing is a refusal, never a guess from the first row
+// and never a name.
 fn my_row(roster) {
     if roster is Object {
         match roster.get("me") {
@@ -137,10 +505,10 @@ fn my_row(roster) {
     None
 }
 
-// The refusal a harness without the structured roster gets, naming exactly what is
-// missing rather than degrading to something that would look like a working
-// adoption. This plugin reads session state as data: it will not parse `peers`'
-// prose, and it will not read the presence directory itself.
+// The refusal a harness without the structured roster gets, naming exactly what is missing rather
+// than degrading to something that would look like a working adoption. This plugin reads session
+// state as data: it will not parse `peers`' prose, and it will not read the presence directory
+// itself.
 fn no_roster(why) {
     `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
 }
@@ -160,8 +528,8 @@ fn text_of(v) {
     }
 }
 
-// A newline in an address or a name would forge a roster row or split a notice;
-// a NUL or a tab is not a thing an address has. Refused before anything is sent.
+// A newline in an address or a name would forge a roster row or split a notice; a NUL or a tab is
+// not a thing an address has. Refused before anything is sent.
 fn refuse_control_chars(field, s) {
     if s.contains("\n") {
         return Some(`${field} contains a newline, which would forge a row rather than name a session`);
@@ -175,36 +543,221 @@ fn refuse_control_chars(field, s) {
     None
 }
 
-// The monitor service (../service). Everything that decides anything lives there,
-// so that the record and the notice have one implementation and the tools stay
-// thin doors onto it.
-fn service() {
-    #{
-        name: "coordinator",
-        base_url: "http://127.0.0.1:8095",
-        token_file: "~/.config/eidolon/coordinator.token",
-        auth: #{ header: "Authorization", prefix: "Bearer " },
-        timeout_s: 30,
+// ---- the ledger, and the pure policy this tool repeats ---------------------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front of workflows, so
+// the policy cannot be imported here. Everything from the generated region down is the library's
+// text, emitted by `tests/coordinator/lifecycle-copies.py --write`; `lifecycle-drift.sh` fails if it
+// drifts.
+
+async fn load_store() {
+    let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = lifecycle_number(reply, "revision");
+    let store = lifecycle_store_empty();
+    match reply.get("value") {
+        Some(v) => {
+            if lifecycle_null(v) {
+                // Nothing written yet. `revision: 0, value: null` is the fact a first write
+                // compares against, not a corrupt row — and a *fresh* ledger is the ordinary case
+                // for a session whose first act is a start.
+            } else if v is String {
+                let got = json::from_string(`${v}`)?;
+                if got is Object {
+                    store = got;
+                } else {
+                    return Err(`the \`store\` row is not the object this ledger writes (${v}); it is refused rather than repaired or overwritten`);
+                }
+            } else {
+                return Err("the `store` row's value is not the JSON text this ledger writes; it is refused rather than repaired or overwritten");
+            }
+        }
+        None => {}
+    }
+    for key in ["adoptions", "notices", "gaps"] {
+        store = lifecycle_store_put(store, key, lifecycle_store_list(store, key)?);
+    }
+    Ok(#{ "store": store, "revision": revision })
+}
+
+async fn write_store(store, revision) {
+    let text = json::to_string(store)?;
+    match eidolon::plugin_state_write(#{ "key": "store", "value": text, "revision": revision }).await {
+        Ok(_) => {
+            let check = json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?)?;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        Ok(#{ "status": "written", "revision": lifecycle_number(check, "revision") })
+                    } else {
+                        Ok(#{ "status": "uncertain", "detail": "the read-back did not carry the bytes just written" })
+                    }
+                }
+                None => Ok(#{ "status": "uncertain", "detail": "the read-back carried no value" }),
+            }
+        }
+        Err(e) => {
+            let check = match json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?) {
+                Ok(v) => v,
+                Err(bad) => return Ok(#{ "status": "uncertain", "detail": `the write was refused (${e}) and the read-back would not parse (${bad})` }),
+            };
+            let same = false;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        same = true;
+                    }
+                }
+                None => {}
+            }
+            if same {
+                Ok(#{ "status": "uncertain", "detail": `the write answered an error (${e}) and the bytes are now at the path: it may have landed` })
+            } else {
+                Ok(#{ "status": "refused", "detail": `${e}` })
+            }
+        }
     }
 }
 
-// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
-async fn call_service(method, args) {
-    let body = json::to_string(#{ "method": method, "args": args })?;
-    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
-        }
-    };
-    let reply = json::from_string(sent)?;
-    if reply.status != 200 {
-        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
+// The two readers this file needs under names of its own, so a call site reads a sentence rather
+// than a library idiom. Each is one line over the generated policy below.
+fn ledger_text(row, key) {
+    lifecycle_text(row, key)
+}
+
+fn ledger_number(row, key) {
+    lifecycle_number(row, key)
+}
+
+fn store_list(store, key) {
+    lifecycle_store_list(store, key)?
+}
+
+fn store_put(store, key, list) {
+    lifecycle_store_put(store, key, list)
+}
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:7ffca3fdefd8213f8ecb2d07b197687157f57cd766b6cf0a3bfdb7e80a1ba2c1
+
+fn lifecycle_stated(row, key) {
+    match row.get(key) {
+        Some(v) => !lifecycle_null(v),
+        None => false,
     }
-    let out = json::from_string(reply.body)?;
-    if out.ok {
-        Ok(out.result)
-    } else {
-        Err(out.error)
+}
+fn lifecycle_true(v) {
+    match v {
+        Some(b) => {
+            if lifecycle_null(b) {
+                false
+            } else if b is bool {
+                b
+            } else {
+                `${b}` == "true"
+            }
+        }
+        None => false,
+    }
+}
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
+}
+fn lifecycle_store_empty() {
+    #{ "adoptions": [], "notices": [], "gaps": [] }
+}
+fn lifecycle_store_list(store, key) {
+    match store.get(key) {
+        None => Ok([]),
+        Some(v) => {
+            if v is Vec {
+                Ok(v)
+            } else {
+                Err(`the store's \`${key}\` is not a list (${v}); it is refused rather than repaired or overwritten`)
+            }
+        }
+    }
+}
+fn lifecycle_store_put(store, key, list) {
+    store.insert(key, list);
+    store
+}
+fn lifecycle_live_adoptions(adoptions) {
+    let out = [];
+    for a in adoptions {
+        if a is Object && !lifecycle_released(a) {
+            out.push(a);
+        }
+    }
+    out
+}
+fn lifecycle_find_adoption(adoptions, worker) {
+    for a in lifecycle_live_adoptions(adoptions) {
+        if lifecycle_text(a, "worker") == worker {
+            return Some(a);
+        }
+    }
+    None
+}
+fn lifecycle_find_any(adoptions, worker) {
+    for a in adoptions {
+        if a is Object && lifecycle_text(a, "worker") == worker {
+            return Some(a);
+        }
+    }
+    None
+}
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
+        None => "",
+    }
+}
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+fn lifecycle_released(row) {
+    if lifecycle_true(row.get("released")) {
+        return true;
+    }
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+fn lifecycle_null(v) {
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
     }
 }

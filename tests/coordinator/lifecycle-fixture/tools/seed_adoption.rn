@@ -1,0 +1,134 @@
+// Test fixture only: seed ONE adoption row naming an operation and a worker the custody log will not
+// bind, so the `conflict` branch of `coordinator_start` can be exercised. Not shipped.
+//
+// **This is seeded adversarial state and it is labeled as such.** It writes the plugin's own store
+// with the plugin's own primitive, in a throwaway session, and it proves the branch *works* — that it
+// refuses, that its sentence names both sides, that it writes nothing. It is **not** evidence that
+// anything in the tree can produce the disagreement: that is a separate question, and the answer
+// recorded beside this file is that the honest routes do not reach it.
+//
+// It refuses to run on a store that already holds a value, so it can never quietly seed on top of a
+// ledger a real start wrote.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_seed_adoption",
+        description: "Test fixture: write one adoption row for an operation, naming a worker the custody log will not bind, into a fresh store. Seeded state for the conflict branch — not a producer of real state.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation the seeded row claims." },
+                "worker": #{ "type": "string", "description": "The session id the seeded row names; deliberately not the child a hold will bind." },
+            },
+            "required": ["operation", "worker"],
+        },
+    }
+}
+
+fn text_of(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            if s == "null" || s == "" {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        None => None,
+    }
+}
+
+// This session's own address, from the roster, or the empty string. A seeded row that names no
+// coordinator is still a row `record()` reasons about: the branch reads `worker` and `operation`,
+// never this field.
+async fn my_address() {
+    match eidolon::swarm_call("roster", #{}).await {
+        Ok(raw) => match json::from_string(raw) {
+            Ok(roster) => {
+                match roster.get("me") {
+                    Some(me) => {
+                        match me.get("session") {
+                            Some(s) => `${s}`,
+                            None => "",
+                        }
+                    }
+                    None => "",
+                }
+            }
+            Err(_) => "",
+        },
+        Err(_) => "",
+    }
+}
+
+pub async fn call(input) {
+    let operation = match text_of(input.get("operation")) {
+        Some(s) => s,
+        None => return Err("coordinator_seed_adoption needs `operation`"),
+    };
+    let worker = match text_of(input.get("worker")) {
+        Some(s) => s,
+        None => return Err("coordinator_seed_adoption needs `worker`"),
+    };
+    let me = my_address().await;
+    let row = #{
+        "worker": worker,
+        "name": "",
+        "note": "",
+        "coordinator": me,
+        "epoch": 1,
+        "operation": operation,
+    };
+    // Read, modify, write — the same three steps `record()` takes, because the store is **not** empty
+    // in a fresh session: the plugin's own `plugin_ready` handler writes one before any tool runs.
+    let attempt = 0;
+    let last = "";
+    while attempt < 3 {
+        attempt += 1;
+        let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+        let reply = json::from_string(raw)?;
+        let revision = match reply.get("revision") {
+            Some(v) => `${v}`,
+            None => "0",
+        };
+        let store = #{ "adoptions": [], "notices": [], "gaps": [] };
+        match reply.get("value") {
+            Some(v) => {
+                if v is String {
+                    let got = json::from_string(`${v}`)?;
+                    if got is Object {
+                        store = got;
+                    }
+                }
+            }
+            None => {}
+        }
+        let adoptions = [];
+        match store.get("adoptions") {
+            Some(v) => {
+                if v is Vec {
+                    adoptions = v;
+                }
+            }
+            None => {}
+        }
+        adoptions.push(row);
+        // A row is shared into the store it was read from, so this is the only write the tool needs.
+        let text = json::to_string(store)?;
+        let n = match json::from_string(revision) {
+            Ok(v) => v,
+            Err(_) => 0,
+        };
+        match eidolon::plugin_state_write(#{ "key": "store", "value": text, "revision": n }).await {
+            Ok(t) => return Ok(t),
+            Err(e) => {
+                // The compare-and-set lost: re-read and decide again, which is a second decision
+                // rather than a blind retry.
+                last = `${e}`;
+            }
+        }
+    }
+    Err(`coordinator_seed_adoption could not write the seeded row after ${attempt} attempts: ${last}`)
+}

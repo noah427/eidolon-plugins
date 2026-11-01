@@ -1,14 +1,45 @@
-// Cancellation is separately admitted; start authority never implies cleanup.
+// `coordinator_cancel`: ask one managed start to stop. The **act is core's**; the claim is ours.
+//
+// The architecture cut (operator ruling 2026-10-29) gives core the generic half: `eidolon::
+// custody_cancel` writes the cancellation intent durably and asks the OS half that owns the
+// child for its exit. This plugin dials no monitor for it, and `start.rn` no longer dials one
+// either — its port onto the held door and the release is done, so nothing in this plugin calls a
+// service — and it can see no pid, no descriptor
+// and no path — only the two answers below.
+//
+// The rule this file exists to keep: **a stop is reported only when the log says the exit was
+// observed**, and the outcome is read from `custody_inspect`'s typed `cancellation` field
+// (`exited`, `attempted`, or absent) and from nowhere else. No sentence is parsed.
+//
+// `custody_cancel`'s `Ok` is not what decides it, and the reason is worth stating exactly rather
+// than flatteringly. On today's tree the verb propagates its own failure (`custody.rs`: the host
+// call is `host.cancel(...).map_err("exit unconfirmed")?`, and the durability of the exit receipt
+// has its own `map_err`), so **`Ok` does happen to imply a durably observed exit** — the door's
+// formatter carries two arms for outcomes its verb cannot return, and they are unreachable. That
+// is exactly why this file does not lean on `Ok`: the door's answer is prose and not a contract;
+// those dead arms would become live the moment `custody::cancel` began formatting instead of
+// propagating; and that neighbourhood is being refactored right now. A typed field whose meaning
+// is in its own documentation beats a completion signal whose meaning depends on an unreachable
+// branch. A comment that said "the outcome is never `Ok`" would be false today; this one says
+// only what is true of today and why the code does not depend on it.
+//
+// When the exit is not observed, supervision is retained in **this plugin's own ledger**: the
+// live adoption row for the worker carries core's word and the reason, and `coordinator_release`
+// refuses that worker until an exit is observed. The guard is the retired service's own, kept at
+// the owner this ruling gives it; its original text is in this repository's history, in
+// `coordinator/service/src/lib.rs` (deleted at `14f1c4c`), at the line that refused release on an
+// unobserved exit.
+
 pub fn manifest() {
     #{
         name: "coordinator_cancel",
-        description: "Cancel one owned managed-start operation only before ANY release attempt. Closes its private channel/stdin and observes exit; no signals, force-kill, PID lookup or automatic retries. Refuses released/uncertain-release children and lost ownership after restart. Durable intent blocks future start/release; timeout leaves exit unconfirmed and supervision retained. Confirmed exit does not close adoption: coordinator_release remains separate.",
+        description: "Ask one managed start to stop, through core's generic cancellation door: the intent is recorded durably before any pipe closes, and the exit is observed by the OS half that owns the child. No signals, no force-kill, no PID lookup, no automatic retry. The outcome is read from the log's typed cancellation word, never from a sentence: exit observed is reported as a stop, and an exit that is not observed is recorded on this plugin's own supervision row as retained — release then refuses that worker until the exit is observed. Confirmed exit does not close an adoption: coordinator_release remains a separate act.",
         approval: "mutating",
         input_schema: #{
             "type": "object", "additionalProperties": false,
             "properties": #{
-                "operation": #{ "type": "string", "description": "Existing start operation owned by this caller, not a PID or session address." },
-                "reason": #{ "type": "string", "description": "Reason recorded before pipe closure; explicit retries must retain it." },
+                "operation": #{ "type": "string", "description": "Existing start operation owned by this caller, not a PID and not a session address." },
+                "reason": #{ "type": "string", "description": "Recorded with the durable intent before any closure; an explicit retry must retain it." },
             },
             "required": ["operation", "reason"],
         },
@@ -16,152 +47,440 @@ pub fn manifest() {
 }
 
 pub async fn call(input) {
-    let caller = my_address().await?;
-    let args = #{ "caller": caller };
-    for field in ["operation", "reason"] {
-        let value = match text_of(input.get(field)) {
-            Some(s) => s,
-            None => return Err(`coordinator_cancel needs ${field}`),
-        };
-        args.insert(field, value);
+    let operation = match text_of(input.get("operation")) {
+        Some(s) => s,
+        None => return Err("coordinator_cancel needs `operation`: the managed start's own operation id — not a session address and not a pid"),
+    };
+    let reason = match text_of(input.get("reason")) {
+        Some(s) => s,
+        None => return Err("coordinator_cancel needs `reason`: it is written with the durable intent before any closure, so it is not optional and a retry must carry the same one"),
+    };
+    match refuse_control_chars("operation", operation) {
+        Some(e) => return Err(e),
+        None => {}
     }
-    call_service("cancel", args).await
-}
+    match refuse_control_chars("reason", reason) {
+        Some(e) => return Err(e),
+        None => {}
+    }
 
-// This session's own durable address, as the harness publishes it. There is no
-// other source for it in this file: not an argument, not an environment
-// variable, not a name somebody typed.
-async fn my_address() {
-    let raw = match eidolon::swarm_call("roster", #{}).await {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}`)),
-    };
-    let roster = match json::from_string(raw) {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}; \`swarm_call("roster")\` answered: ${raw}`)),
-    };
-    let me = match my_row(roster) {
-        Some(r) => r,
-        None => {
-            return Err(no_roster(
-                "the roster carries no row for this session: `me` is null or absent, and nothing else in it marks which row is the caller — so this plugin cannot tell which address is the one it would adopt from",
-            ))
-        }
-    };
-    match me.get("session") {
-        Some(s) => {
-            let addr = `${s}`;
-            if addr == "" || addr == "null" {
-                return Err(no_roster(
-                    "this session has no durable address: the roster publishes `session` as null, and null means not established — not no-such-session. The harness has not minted an id into a log yet, and an adoption is keyed on that address, so none can be made until it exists",
-                ))
-            }
-            Ok(addr)
-        }
-        None => Err(no_roster("this session's own row carries no `session` field at all")),
+    // ---- 1. the act, and only what a completion signal is worth ----
+    let sentence = "";
+    match eidolon::custody_cancel(#{ "operation": operation, "reason": reason }).await {
+        Ok(s) => sentence = `${s}`,
+        Err(e) => sentence = `${e}`,
     }
-}
 
-// This session's own row: a `me` object beside the list, or the one row that
-// marks itself. Either shape is the harness's to choose; neither existing is a
-// refusal, never a guess from the first row and never a name.
-fn my_row(roster) {
-    if roster is Object {
-        match roster.get("me") {
-            Some(m) => {
-                // `me` is null when the caller has no registration of its own —
-                // `eidolon peers --json` is such a scan. Null is not a row.
-                if m is Object {
-                    return Some(m);
-                }
-                return None;
-            }
-            None => {}
-        }
-    }
-    if roster is Vec {
-        for row in roster {
-            match row.get("me") {
-                Some(flag) => {
-                    if `${flag}` == "true" {
-                        return Some(row);
+    // ---- 2. the fact, as typed data, from the same operation's record ----
+    let readable = false;
+    let why = "";
+    let view = #{};
+    match eidolon::custody_inspect(#{ "operation": operation }).await {
+        Ok(raw) => {
+            match json::from_string(raw) {
+                Ok(v) => {
+                    if v is Object {
+                        view = v;
+                        readable = true;
+                    } else {
+                        why = `the custody log answered something that is not an object: ${raw}`;
                     }
                 }
-                None => {}
+                Err(e) => {
+                    why = `the custody log answered something that is not JSON (${e}): ${raw}`;
+                }
             }
         }
+        Err(e) => {
+            why = `${e}`;
+        }
     }
-    None
+    // The word, not the sentence. A null or absent `cancellation` is the empty string, which is
+    // "the log holds no cancellation here" — a different answer from every value.
+    let word = lifecycle_text(view, "cancellation");
+    let worker = lifecycle_text(view, "session");
+    let claim = lifecycle_cancel_claim(readable, word);
+
+    if claim == "observed" {
+        let marked = mark_supervision(worker, "exited", reason, operation).await?;
+        return Ok(`exit observed for \`${operation}\`: the log's own outcome word is \`exited\`, and the OS half that owns the child was the one that observed it. A stop may be reported on that evidence. ${marker_said(marked, worker, "exited")} No adoption was closed by this cancellation — \`coordinator_release\` is a separate act, and it is the one that ends monitoring.`);
+    }
+
+    if claim == "unobserved" {
+        let marked = mark_supervision(worker, "attempted", reason, operation).await?;
+        // The epoch the refusal sentence states, from the log while core still carries the field and
+        // from this ledger afterwards — the same treatment `adoptions.rn` gives a start row, because
+        // a reader who is told which row to retry wants to know *which* one.
+        //
+        // **No `?` here.** `epoch_and_source` answers a map, not a `Result` — the same shape
+        // `start_epoch_and_source` has in `adoptions.rn` — and a `?` on it is a Rune **runtime**
+        // error ("Type `::std::object::Object` is not supported as try operand"), invisible at
+        // compile time, not a compilation failure. This branch was **unreached by every path run so
+        // far** rather than unreachable: core persists the intent as `Attempted` *before* it calls
+        // the host, so a crash between the two leaves it durable, and a resumed session that cancels
+        // again gets `check_cancel`'s refusal and then `custody_inspect` answering `attempted`,
+        // which lands here. What no run had done until this fixture's first run of the branch is go
+        // down that path — and while core still recorded an unobserved exit as `exited` (before
+        // `537d999`) the ordinary in-process path did not reach it either. `epoch_and_source`
+        // is total for the same reason: a sentence built while reporting a refusal must not replace
+        // it with a second failure.
+        let epoch = epoch_and_source(worker, view).await;
+        // Assembled in a fragment of its own: a template string that is itself interpolated into
+        // another one is where the vocabulary traps live (see the lane's vocabulary note).
+        let kept = "";
+        if worker != "" {
+            kept = ` — and coordinator_release will refuse ${worker} (epoch ${epoch.word}; ${epoch.source}) until an exit is observed; a retry of this verb with the same reason re-asks the OS half and reads the log again.`;
+        }
+        return Err(`cancellation of \`${operation}\` recorded a durable intent, and the exit was **not** observed: the log's own outcome word is \`${word}\`, not \`exited\`, so nothing here may be reported as stopped. Supervision is retained — ${marker_said(marked, worker, "attempted")}${kept} The door's answer, carried verbatim and not interpreted: ${sentence}`);
+    }
+
+    if claim == "unknown" {
+        // No marker is written: a word nobody read is not a fact, and a marker invented here
+        // would block a release for a reason the log never gave.
+        //
+        // "The log did not answer" covers two cases this plugin cannot tell apart — the verb was
+        // refused, or the record exists and could not be read — because telling them apart means
+        // parsing a sentence. Neither is a stop, and neither is written down, so the sentence
+        // says both and claims neither.
+        return Err(`cancellation of \`${operation}\`: **nothing is claimed and nothing is written down**. The custody log did not answer for this operation, so either the verb was refused or its record cannot be read here; this plugin does not tell those apart by their wording. It is not the same answer as "no cancellation was ever recorded", and it is not a stop. The door's answer, carried verbatim: ${sentence}. The log's own words: ${why}`);
+    }
+
+    // `unrecorded`: core's verb answered and the log holds no cancellation for this operation —
+    // so the answer was a refusal, and a refusal has nothing to mark.
+    Err(`cancellation of \`${operation}\` recorded nothing: the custody log holds no cancellation for it, so the answer above is a refusal rather than a cancellation, and this ledger was left exactly as it was. The door's answer, carried verbatim: ${sentence}`)
 }
 
-// The refusal a harness without the structured roster gets, naming exactly what is
-// missing rather than degrading to something that would look like a working
-// adoption. This plugin reads session state as data: it will not parse `peers`'
-// prose, and it will not read the presence directory itself.
-fn no_roster(why) {
-    `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
+// Which epoch the cancellation's sentence states, and where it came from: the log's field while
+// core still carries it, otherwise this ledger's live adoption row for `worker`, otherwise "not
+// stated". Read after the marker is written, so the row this reads is the row the release guard
+// will read.
+async fn epoch_and_source(worker, view) {
+    let ledger = #{};
+    if worker != "" {
+        // An unreadable ledger leaves the epoch to the log or to "not stated"; it does not turn a
+        // cancellation refusal into a different error, and this function therefore never fails.
+        match load_store().await {
+            Ok(loaded) => {
+                match lifecycle_find_adoption(store_list(loaded.store, "adoptions"), worker) {
+                    Some(r) => ledger = r,
+                    None => {}
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    lifecycle_epoch_source(view, ledger)
+}
+
+// Record core's word on this plugin's own supervision row for `worker` — the live adoption row,
+// which is the thing that would otherwise go on watching a child whose exit is unknown.
+//
+// The word is core's and is stored as given (`attempted`, `exited`): this plugin observed
+// neither. A row that does not exist is not created — an adoption this ledger never made is not
+// something a cancellation may invent — and the answer says which of these happened, because a
+// release guard built on a row that was never written would refuse nothing.
+async fn mark_supervision(worker, word, reason, operation) {
+    if worker == "" {
+        return Ok(#{ "status": "no worker" });
+    }
+    let attempt = 0;
+    let refusal = "";
+    while attempt < 2 {
+        attempt += 1;
+        let loaded = load_store().await?;
+        let store = loaded.store;
+        let adoptions = store_list(store, "adoptions");
+        let row = lifecycle_find_adoption(adoptions, worker);
+        match row {
+            Some(r) => {
+                // Objects are shared with the store they came from: mutating the row rewrites the
+                // store, which is what is then written. Not a copy, and deliberately so.
+                r.insert("cancellation", word);
+                r.insert("cancel_reason", reason);
+                r.insert("cancel_operation", operation);
+            }
+            None => return Ok(#{ "status": "no row" }),
+        }
+        let wrote = write_store(store_put(store, "adoptions", adoptions), loaded.revision).await?;
+        let status = ledger_text(wrote, "status");
+        if status == "written" {
+            return Ok(#{ "status": "written" });
+        }
+        if status == "uncertain" {
+            return Ok(#{ "status": "uncertain", "detail": ledger_text(wrote, "detail") });
+        }
+        refusal = ledger_text(wrote, "detail");
+    }
+    Ok(#{ "status": "refused", "detail": refusal })
+}
+
+// What the ledger's share of that answer means, for a person reading it.
+fn marker_said(marked, worker, word) {
+    let status = ledger_text(marked, "status");
+    if status == "written" {
+        return (`this ledger recorded it as \`${word}\` on the live adoption row for \`${worker}\` (read back after the write).`);
+    }
+    if status == "uncertain" {
+        return (`this ledger's marker for \`${worker}\` **may or may not** be written down (${ledger_text(marked, "detail")}), so do not rely on the release guard seeing it.`);
+    }
+    if status == "refused" {
+        return (`this ledger **refused** the marker (${ledger_text(marked, "detail")}), so it is not written down here and the release guard will not see it.`);
+    }
+    if status == "no row" {
+        return (`this ledger holds no live adoption row for \`${worker}\`, so there was nothing here to mark: no supervision of this plugin's was ever recorded for it, and the exit fact is the log's alone.`);
+    }
+    `the log states no session for this operation, so no worker was named to supervise and nothing was marked.`
 }
 
 fn text_of(v) {
     match v {
         Some(x) => {
-            let s = `${x}`;
-            // A JSON null arrives as the unit value, whose text form is `null`.
-            if s == "null" || s == "" {
-                None
+            if x is String {
+                let s = `${x}`;
+                if s == "null" {
+                    None
+                } else {
+                    Some(s)
+                }
             } else {
-                Some(s)
+                None
             }
         }
         None => None,
     }
 }
 
-// A newline in an address or a name would forge a roster row or split a notice;
-// a NUL or a tab is not a thing an address has. Refused before anything is sent.
 fn refuse_control_chars(field, s) {
-    if s.contains("\n") {
-        return Some(`${field} contains a newline, which would forge a row rather than name a session`);
-    }
-    if s.contains("\r") {
-        return Some(`${field} contains a carriage return`);
-    }
-    if s.contains("\t") {
-        return Some(`${field} contains a tab`);
+    for c in s.chars() {
+        let n = `${c}`;
+        if n == "\n" || n == "\r" || n == "\t" {
+            return Some(`\`${field}\` carries a control character; an operation id and a reason are single words of text, and a line break in either would be a forged line wherever it is printed`);
+        }
     }
     None
 }
 
-// The monitor service (../service). Everything that decides anything lives there,
-// so that the record and the notice have one implementation and the tools stay
-// thin doors onto it.
-fn service() {
-    #{
-        name: "coordinator",
-        base_url: "http://127.0.0.1:8095",
-        token_file: "~/.config/eidolon/coordinator.token",
-        auth: #{ header: "Authorization", prefix: "Bearer " },
-        timeout_s: 30,
+// ---- the ledger, and the pure policy this tool repeats ---------------------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front of
+// workflows, so the policy cannot be imported here. Everything from the generated region down is
+// the library's text, emitted by `tests/coordinator/lifecycle-copies.py --write`;
+// `lifecycle-drift.sh` fails if it drifts.
+
+async fn load_store() {
+    let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = lifecycle_number(reply, "revision");
+    let store = lifecycle_store_empty();
+    match reply.get("value") {
+        Some(v) => {
+            if lifecycle_null(v) {
+                // Nothing written yet: `revision: 0, value: null` is the fact a first write compares
+                // against, not a corrupt row.
+            } else if v is String {
+                let got = json::from_string(`${v}`)?;
+                if got is Object {
+                    store = got;
+                } else {
+                    return Err(`the \`store\` row is not the object this ledger writes (${v}); it is refused rather than repaired or overwritten`);
+                }
+            } else {
+                return Err("the `store` row's value is not the JSON text this ledger writes; it is refused rather than repaired or overwritten");
+            }
+        }
+        None => {}
+    }
+    for key in ["adoptions", "notices", "gaps"] {
+        store = lifecycle_store_put(store, key, lifecycle_store_list(store, key)?);
+    }
+    Ok(#{ "store": store, "revision": revision })
+}
+
+async fn write_store(store, revision) {
+    let text = json::to_string(store)?;
+    match eidolon::plugin_state_write(#{ "key": "store", "value": text, "revision": revision }).await {
+        Ok(_) => {
+            let check = json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?)?;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        Ok(#{ "status": "written", "revision": lifecycle_number(check, "revision") })
+                    } else {
+                        Ok(#{ "status": "uncertain", "detail": "the read-back did not carry the bytes just written" })
+                    }
+                }
+                None => Ok(#{ "status": "uncertain", "detail": "the read-back carried no value" }),
+            }
+        }
+        Err(e) => {
+            let check = match json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?) {
+                Ok(v) => v,
+                Err(bad) => return Ok(#{ "status": "uncertain", "detail": `the write was refused (${e}) and the read-back would not parse (${bad})` }),
+            };
+            let same = false;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        same = true;
+                    }
+                }
+                None => {}
+            }
+            if same {
+                Ok(#{ "status": "uncertain", "detail": `the write answered an error (${e}) and the bytes are now at the path: it may have landed` })
+            } else {
+                Ok(#{ "status": "refused", "detail": `${e}` })
+            }
+        }
     }
 }
 
-// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
-async fn call_service(method, args) {
-    let body = json::to_string(#{ "method": method, "args": args })?;
-    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
-        }
-    };
-    let reply = json::from_string(sent)?;
-    if reply.status != 200 {
-        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
+fn ledger_text(row, key) {
+    lifecycle_text(row, key)
+}
+
+fn store_list(store, key) {
+    lifecycle_store_list(store, key)?
+}
+
+fn store_put(store, key, list) {
+    lifecycle_store_put(store, key, list)
+}
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:7ffca3fdefd8213f8ecb2d07b197687157f57cd766b6cf0a3bfdb7e80a1ba2c1
+
+fn lifecycle_epoch_source(log, ledger) {
+    if lifecycle_stated(log, "adoption_epoch") {
+        return #{ "word": lifecycle_epoch_word(log, "adoption_epoch"), "source": "the log's answer" };
     }
-    let out = json::from_string(reply.body)?;
-    if out.ok {
-        Ok(out.result)
-    } else {
-        Err(out.error)
+    if lifecycle_stated(ledger, "epoch") {
+        return #{ "word": lifecycle_epoch_word(ledger, "epoch"), "source": "from this ledger's adoption row for it, because the log states no adoption epoch" };
+    }
+    #{ "word": "not stated", "source": "not stated by either the log or this ledger" }
+}
+fn lifecycle_cancel_claim(readable, word) {
+    if !readable {
+        return "unknown";
+    }
+    if word == "" {
+        return "unrecorded";
+    }
+    if word == "exited" {
+        return "observed";
+    }
+    "unobserved"
+}
+fn lifecycle_stated(row, key) {
+    match row.get(key) {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+fn lifecycle_true(v) {
+    match v {
+        Some(b) => {
+            if lifecycle_null(b) {
+                false
+            } else if b is bool {
+                b
+            } else {
+                `${b}` == "true"
+            }
+        }
+        None => false,
+    }
+}
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
+}
+fn lifecycle_store_empty() {
+    #{ "adoptions": [], "notices": [], "gaps": [] }
+}
+fn lifecycle_store_list(store, key) {
+    match store.get(key) {
+        None => Ok([]),
+        Some(v) => {
+            if v is Vec {
+                Ok(v)
+            } else {
+                Err(`the store's \`${key}\` is not a list (${v}); it is refused rather than repaired or overwritten`)
+            }
+        }
+    }
+}
+fn lifecycle_store_put(store, key, list) {
+    store.insert(key, list);
+    store
+}
+fn lifecycle_live_adoptions(adoptions) {
+    let out = [];
+    for a in adoptions {
+        if a is Object && !lifecycle_released(a) {
+            out.push(a);
+        }
+    }
+    out
+}
+fn lifecycle_find_adoption(adoptions, worker) {
+    for a in lifecycle_live_adoptions(adoptions) {
+        if lifecycle_text(a, "worker") == worker {
+            return Some(a);
+        }
+    }
+    None
+}
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
+        None => "",
+    }
+}
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+fn lifecycle_released(row) {
+    if lifecycle_true(row.get("released")) {
+        return true;
+    }
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+fn lifecycle_null(v) {
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
     }
 }

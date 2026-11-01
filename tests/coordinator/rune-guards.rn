@@ -1,0 +1,323 @@
+// The guard fixture's workflow: every refusal `coordinator_adopt` and `coordinator_release` can
+// answer with, driven through the plugin's own tools so the sentences are the shipped ones.
+//
+// Copied into the disposable config's copy of the plugin by
+// `tests/coordinator/live-rune-guards.sh`; not shipped in the plugin's own `workflows/`.
+//
+// Each line is prefixed `G<n>` so the shell can assert one sentence per guard without matching a
+// word that appears in another answer. No service is involved and no port is bound: adoption and
+// release are this ledger's acts, and the one thing this fixture needs from the harness is the
+// roster, for this run's own address.
+
+pub fn workflow() {
+    #{
+        name: "rune-guards",
+        description: "Drive coordinator_adopt and coordinator_release into every guard they keep: a missing argument, a session adopting itself, a second live adoption of the same worker, a release, a re-adoption taking the next epoch, a release of a worker this ledger never held, a padded address, and a control character in either door. args: none",
+        approval: "mutating",
+        params: #{ "type": "object", "properties": #{ "live": #{ "type": "string" } } },
+    }
+}
+
+pub async fn run(args) {
+    let out = "";
+    let worker = "1793000004242";
+    // The address of the live session the shell started (G21). "" means the fixture could not start
+    // one, and that is reported and counted rather than passed silently.
+    let live = match args.get("live") {
+        Some(v) => `${v}`,
+        None => "",
+    };
+
+    // G1 — a worker that is not named at all.
+    let g1 = match eidolon::tool_call("coordinator_adopt", #{}).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G1 ${g1}\n`;
+
+    // G2 — this session adopting itself. The address is read, never supplied: a run whose roster
+    // cannot say skips the guard and says so rather than passing silently.
+    let me = own_address().await;
+    if me == "" {
+        out += "G2 SKIP the roster named no row for this run\n";
+    } else {
+        let g2 = match eidolon::tool_call("coordinator_adopt", #{ "session": me }).await {
+            Ok(t) => `OK ${t}`,
+            Err(e) => `ERR ${e}`,
+        };
+        out += `G2 ${g2}\n`;
+    }
+
+    // G3 — the first adoption of that worker: a new row, epoch 1.
+    let g3 = match eidolon::tool_call("coordinator_adopt", #{ "session": worker, "name": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G3 ${g3}\n`;
+
+    // G4 — a second live adoption of the same worker: refused, naming the epoch and pointing at
+    // release. This is the guard the core test `a_second_live_adoption_is_refused_naming_the_epoch`
+    // used to keep, now that core has no adopt verb at all.
+    let g4 = match eidolon::tool_call("coordinator_adopt", #{ "session": worker, "name": "second" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G4 ${g4}\n`;
+
+    // G5 — release ends it.
+    let g5 = match eidolon::tool_call("coordinator_release", #{ "session": worker, "reason": "the guard fixture is done with it" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G5 ${g5}\n`;
+
+    // G6 — re-adoption after a release is the NEXT epoch, never a reused one and never a second
+    // live row.
+    let g6 = match eidolon::tool_call("coordinator_adopt", #{ "session": worker, "name": "re-adopted" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G6 ${g6}\n`;
+
+    // G7 — a release of a worker this ledger never held says so; it does not silently succeed.
+    let g7 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000009494" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G7 ${g7}\n`;
+
+    // G9 — an EMPTY address. The schema's `required` does not refuse `""`: a string is a string.
+    // This is the guard the deleted core test `adopt_refuses_an_empty_worker_address` kept, and the
+    // plugin's own guard list names it as guard 1 ("worker non-empty").
+    let g9 = match eidolon::tool_call("coordinator_adopt", #{ "session": "", "name": "empty" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G9 ${g9}\n`;
+
+    // G10 — a blank address: spaces only. `""` is not the whole of guard 1; `trim()` is what the
+    // plugin uses elsewhere to ask "is there anything here".
+    let g10 = match eidolon::tool_call("coordinator_adopt", #{ "session": "   ", "name": "blank" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G10 ${g10}\n`;
+
+    // G11 — a real newline inside an address: non-blank, so it reaches the control-character guard
+    // rather than guard 1, and it is the shape that would forge a line wherever the address is
+    // printed.
+    let g11 = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000004242\nx" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G11 ${g11}\n`;
+
+    // G18 — a PADDED address: a real minted id with a space before it and after it. Non-blank, no
+    // control character, and names nobody: the harness mints a file stem, and no stem is padded.
+    // Refused, and **never trimmed into the address it resembles** — G18e is the check that proves
+    // the refusal did not become a write under the trimmed spelling.
+    let g18 = match eidolon::tool_call("coordinator_adopt", #{ "session": " 1793000005555 ", "name": "padded" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18 ${g18}\n`;
+
+    // G18c/G18d — NBSP at each edge. The case no guard here saw before this rule: NBSP is not a
+    // control character, so `refuse_control_chars` passes it, and it is not a space, so a scan for
+    // `" "` would pass it too. `trim()` is what closes it.
+    let g18c = match eidolon::tool_call("coordinator_adopt", #{ "session": "\u{00a0}1793000006666", "name": "nbsp leading" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18c ${g18c}\n`;
+    let g18d = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000006666\u{00a0}", "name": "nbsp trailing" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18d ${g18d}\n`;
+
+    // G18e — the trim-then-write arm's witness. If the padded call above had canonicalised and
+    // written, this clean adoption would find a live row and be refused in epoch 1; it must instead
+    // be the FIRST adoption of that worker, in epoch 1. This is the assertion that a `trim()`-and-
+    // rebind regression cannot answer green.
+    let g18e = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000005555", "name": "clean after padded" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18e ${g18e}\n`;
+
+    // G18f — an INTERIOR space, asserted as the residual it is rather than left unstated: no minting
+    // path produces one, and the rule does not claim to cover it, so the fixture says out loud that
+    // this ledger accepts it.
+    let g18f = match eidolon::tool_call("coordinator_adopt", #{ "session": "179300000 7777", "name": "interior space" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18f ${g18f}\n`;
+
+    // G18i — a REAL minted shape nobody must refuse: `1793000005555-1` is a same-millisecond collision
+    // id, and it is the id that makes "digits only" or "no punctuation" the wrong rule. The rule is
+    // about whitespace; this row is here so the read-back below can assert both halves at once —
+    // the dashed address is a row, the padded spellings are not.
+    let g18i = match eidolon::tool_call("coordinator_adopt", #{ "session": "1793000005555-1", "name": "dashed id" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18i ${g18i}\n`;
+
+
+    // G19 — `release.rn`'s own control-character guard, which until now no check reached: G5, G7 and
+    // G13 all pass clean addresses, so that copy of `refuse_control_chars` was code with no witness.
+    let g19 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000005555\nx", "reason": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G19 ${g19}\n`;
+
+    // G20 — the same padded rule at the other door over the same key. The worker here IS adopted
+    // (G18e), so a release that merely looked up the string would answer "not adopted by this
+    // session" — true of that spelling and false about the worker the caller means. The answer must
+    // be about the padding.
+    let g20 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000005555 ", "reason": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G20 ${g20}\n`;
+
+    // G18h — the ledger's ADOPTION ROWS as data, read after every door above and before G12's seed
+    // replaces the store. A rendering omits `(called …)` for a row with no name, so a check built on one
+    // asked for a field the defect could drop; these are the rows themselves. The padded spellings, an
+    // empty or blank worker, and a release that was refused but marked anyway are all visible here — the
+    // three shapes the independent review found green in the previous cut.
+    let g18h = match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => t,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G18h ${g18h}\n`;
+
+
+    // G21 — the LIVE-SESSION branch of the adoption answer: the address is one a live session really
+    // carries, so `live_sentence` must take its claimant branch and say what the roster publishes
+    // rather than answering as a record nobody carries. Row 17 of the witness map.
+    if live == "" {
+        out += "G21 SKIP the fixture started no live session\n";
+    } else {
+        let g21 = match eidolon::tool_call("coordinator_adopt", #{ "session": live, "name": "live fixture" }).await {
+            Ok(t) => `OK ${t}`,
+            Err(e) => `ERR ${e}`,
+        };
+        out += `G21 ${g21}\n`;
+    }
+
+    // G12 — a release is REFUSED while a cancellation's exit was never observed. The row is seeded
+    // because no tool in this fixture can produce an `attempted` word without a real child process
+    // and a real OS half. This is the retired service's own guard, kept at the owner the ruling
+    // gives it, and until now it had no witness of any kind.
+    let seeded = match eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "1793000007777", "epoch": 1, "name": "seeded", "cancellation": "attempted", "cancel_operation": "op-x" }],
+            "notices": [],
+            "gaps": [],
+        },
+    }).await {
+        Ok(t) => `OK`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G12-seed ${seeded}\n`;
+    let g12 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000007777", "reason": "guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G12 ${g12}\n`;
+
+    // G13 — the same release goes through once the row carries no unobserved exit.
+    let seeded2 = match eidolon::tool_call("coordinator_seed_json", #{
+        "store": #{
+            "adoptions": [#{ "worker": "1793000008888", "epoch": 1, "name": "seeded ok" }],
+            "notices": [],
+            "gaps": [],
+        },
+    }).await {
+        Ok(t) => `OK`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G13-seed ${seeded2}\n`;
+    let g13 = match eidolon::tool_call("coordinator_release", #{ "session": "1793000008888", "reason": "the exit was observed" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G13 ${g13}\n`;
+
+    // G14 — the rendering an operator reads: the adoption row with its epoch and its name. This is
+    // what the deleted `cli::…an_adoption_is_a_row_and_a_sentence` witnessed in core.
+    let g14 = match eidolon::tool_call("coordinator_adoptions", #{}).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G14 ${g14}\n`;
+
+    // G15 — a control character in `cancel`'s `reason`: the shape `refuse_control_chars` exists for,
+    // and the only witness `cancel.rn` has ever had. Before `6ea681e` the function's literals were
+    // escaped, so this input was accepted.
+    let g15 = match eidolon::tool_call("coordinator_cancel", #{ "operation": "op-never-started", "reason": "line one\nline two" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G15 ${g15}\n`;
+
+    // G16 — an operation the custody log holds nothing for: the `unrecorded` branch, which must say
+    // that nothing was recorded and that the ledger was left alone, rather than claiming a stop.
+    let g16 = match eidolon::tool_call("coordinator_cancel", #{ "operation": "op-that-never-existed", "reason": "the guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G16 ${g16}\n`;
+
+    // G17 — no operation at all: refused by the schema, naming the field.
+    let g17 = match eidolon::tool_call("coordinator_cancel", #{ "reason": "the guard fixture" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G17 ${g17}\n`;
+
+    // G8 — a release with no worker named.
+    let g8 = match eidolon::tool_call("coordinator_release", #{}).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `G8 ${g8}\n`;
+
+    Ok(out)
+}
+
+// This run's own address, best effort. A workflow has no `eidolon::swarm_call` (that primitive is
+// a tool's), so the address is read from the `peers` tool's own answer, which states it as
+// "You are `<session id>`". "" means not established, and the caller says so rather than passing.
+async fn own_address() {
+    let text = match eidolon::tool_call("peers", #{}).await {
+        Ok(v) => v,
+        Err(_) => return "",
+    };
+    let line = "";
+    for l in text.split("\n") {
+        if l.contains("You are `") {
+            line = l;
+        }
+    }
+    if line == "" {
+        return "";
+    }
+    let tail = "";
+    let seen = false;
+    for piece in line.split("You are `") {
+        if seen {
+            tail = piece;
+            break;
+        }
+        seen = true;
+    }
+    for piece in tail.split("`") {
+        return piece;
+    }
+    ""
+}

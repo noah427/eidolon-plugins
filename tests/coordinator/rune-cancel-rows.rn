@@ -1,0 +1,153 @@
+// tests/coordinator/rune-cancel-rows.rn — the two held cancel branches, with real children.
+// Copied into the disposable config by `tests/coordinator/live-rune-cancel-rows.sh`; not shipped.
+//
+// `cancel.rn` reads the log's typed `cancellation` word and decides what it may claim from it. Two
+// of its four answers were unreachable while every custody door ran hold and release in one act,
+// because no plugin could stand at a held child: `observed` (the exit was seen) and `unobserved`
+// (the intent is durable and the exit was not seen). Both need that child, so this workflow holds
+// one, adopts it through the shipped tool — so the ledger row under test is written by production
+// code — and cancels it.
+//
+// Two operations, in one session, because the holder is the session: the first child is cancelled
+// and observed; the second is stopped by the fixture before the cancel is issued, so the
+// cancellation's exit cannot be observed and the door answers the other way.
+//
+// The stop is not a race. The workflow does not cancel the second child until the fixture's watcher
+// has published its own marker saying it read a pid, checked it, stopped it and read the stop back
+// — `coordinator_wait_for_stop` is that wait. Without it, a green line would be green for whichever
+// of two processes happened to run first.
+//
+// Then both records and both ledger rows are dumped, so the claims are checked against the log's
+// typed fields and the ledger's own bytes rather than against the plugin's prose.
+
+pub fn workflow() {
+    #{
+        name: "rune-cancel-rows",
+        description: "Hold two children, adopt them, cancel one that exits and one whose exit cannot be observed, then read both records and the ledger. args: {observed_op, unobserved_op, stop_marker, workspace, model}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "observed_op": #{ "type": "string", "description": "Operation for the child whose exit is observed" },
+                "unobserved_op": #{ "type": "string", "description": "Operation for the child the fixture stops before the cancel" },
+                "stop_marker": #{ "type": "string", "description": "The fixture watcher's marker file, absolute; the workflow does not cancel the second child until it exists" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the children" },
+                "model": #{ "type": "string", "description": "The children's model key" },
+            },
+            "required": ["observed_op", "unobserved_op", "stop_marker", "workspace", "model"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-cancel-rows needs \`${key}\``),
+    }
+}
+
+// The session a hold answered, or "" — the workflow keeps going so the harness's own words reach
+// the fixture rather than stopping at the first refusal.
+fn session_of(answer) {
+    match json::from_string(`${answer}`) {
+        Ok(v) => {
+            match v.get("session") {
+                Some(s) => `${s}`,
+                None => "",
+            }
+        }
+        Err(_) => "",
+    }
+}
+
+pub async fn run(args) {
+    let observed_op = needed(args, "observed_op")?;
+    let unobserved_op = needed(args, "unobserved_op")?;
+    let stop_marker = needed(args, "stop_marker")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let out = "";
+    let brief = "a held child the fixture cancels";
+
+    // ---- the child whose exit will be observed ----
+    let held = #{ "operation": observed_op, "workspace": workspace, "model": model, "brief": brief };
+    let first = "";
+    match eidolon::tool_call("coordinator_hold_only", held).await {
+        Ok(t) => {
+            first = session_of(t);
+            out += `C0-HELD: ${t}\n`;
+        }
+        Err(e) => out += `C0-HELD-ERR: ${e}\n`,
+    }
+    if first != "" {
+        match eidolon::tool_call("coordinator_adopt", #{ "session": first, "name": "fixture held child", "note": "row 20a" }).await {
+            Ok(t) => out += `C1-ADOPT-OK: ${t}\n`,
+            Err(e) => out += `C1-ADOPT-ERR: ${e}\n`,
+        }
+    }
+
+    match eidolon::tool_call("coordinator_cancel", #{ "operation": observed_op, "reason": "the fixture asks the held child to stop" }).await {
+        Ok(t) => out += `C2-CANCEL-OK: ${t}\n`,
+        Err(e) => out += `C2-CANCEL-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": observed_op }).await {
+        Ok(t) => out += `C3-RECORD: ${t}\n`,
+        Err(e) => out += `C3-RECORD-ERR: ${e}\n`,
+    }
+    // The guard that must now pass: an observed exit releases.
+    if first != "" {
+        match eidolon::tool_call("coordinator_release", #{ "session": first, "reason": "the exit was observed" }).await {
+            Ok(t) => out += `C4-RELEASE-OK: ${t}\n`,
+            Err(e) => out += `C4-RELEASE-ERR: ${e}\n`,
+        }
+    }
+
+    // ---- the child the fixture stops, so its exit cannot be observed ----
+    let held2 = #{ "operation": unobserved_op, "workspace": workspace, "model": model, "brief": brief };
+    let second = "";
+    match eidolon::tool_call("coordinator_hold_only", held2).await {
+        Ok(t) => {
+            second = session_of(t);
+            out += `C5-HELD: ${t}\n`;
+        }
+        Err(e) => out += `C5-HELD-ERR: ${e}\n`,
+    }
+    if second != "" {
+        match eidolon::tool_call("coordinator_adopt", #{ "session": second, "name": "fixture stopped child", "note": "row 20a unobserved" }).await {
+            Ok(t) => out += `C6-ADOPT-OK: ${t}\n`,
+            Err(e) => out += `C6-ADOPT-ERR: ${e}\n`,
+        }
+    }
+    // The fixture's watcher stops this child, and this waits for the watcher's own word before the
+    // cancel is issued: `Held` is journaled before the child reports it to the parent, so the pid is
+    // already written down by the time the hold answers, and the watcher is polling from before the
+    // run starts. A refusal here is not a reason to cancel anyway — an exit observed after a
+    // cancelling nobody arranged would be the wrong witness, so the error is carried into the
+    // report and the driver fails on it.
+    match eidolon::tool_call("coordinator_wait_for_stop", #{ "path": stop_marker }).await {
+        Ok(t) => out += `C6b-STOPPED: ${t}\n`,
+        Err(e) => out += `C6b-STOP-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_cancel", #{ "operation": unobserved_op, "reason": "the fixture asks the stopped child to stop" }).await {
+        Ok(t) => out += `C7-CANCEL-OK: ${t}\n`,
+        Err(e) => out += `C7-CANCEL-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": unobserved_op }).await {
+        Ok(t) => out += `C8-RECORD: ${t}\n`,
+        Err(e) => out += `C8-RECORD-ERR: ${e}\n`,
+    }
+    // The guard that must now refuse: an unobserved exit keeps supervision.
+    if second != "" {
+        match eidolon::tool_call("coordinator_release", #{ "session": second, "reason": "the exit was not observed" }).await {
+            Ok(t) => out += `C9-RELEASE-OK: ${t}\n`,
+            Err(e) => out += `C9-RELEASE-ERR: ${e}\n`,
+        }
+    }
+
+    match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => out += `C10-ROWS: ${t}\n`,
+        Err(e) => out += `C10-ROWS-ERR: ${e}\n`,
+    }
+
+    Ok(out)
+}

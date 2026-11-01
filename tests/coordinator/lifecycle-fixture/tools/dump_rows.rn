@@ -1,0 +1,38 @@
+// Test fixture only: the ledger's ADOPTION ROWS, as data. Not shipped.
+//
+// The guard fixture's read-backs go through `coordinator_adoptions`, which renders rows for an
+// operator: its text omits `(called …)` when a row has no name, which is why a check built on that
+// text asked for a field the defect could drop. This returns the rows themselves, so a witness can
+// ask "which workers are in this ledger, and is this one released" without going through a
+// presentation decision. Added on the independent reviewer's finding m10/m11.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_dump_rows",
+        description: "Test fixture: this run's adoption rows, as JSON. Reads the store and returns nothing it did not read.",
+        approval: "read_only",
+        input_schema: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn call(input) {
+    let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+    let reply = json::from_string(raw)?;
+    let value = match reply.get("value") {
+        Some(v) => v,
+        None => return Ok("[]"),
+    };
+    if value is String {
+        let store = json::from_string(`${value}`)?;
+        match store.get("adoptions") {
+            Some(rows) => {
+                if rows is Vec {
+                    return Ok(json::to_string(rows)?);
+                }
+                return Ok("[]");
+            }
+            None => return Ok("[]"),
+        }
+    }
+    Ok("[]")
+}

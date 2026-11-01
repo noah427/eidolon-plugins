@@ -1,0 +1,99 @@
+// tests/coordinator/rune-start-conflict.rn — contract witness 3: the `conflict` refusal, from a
+// producer the tree can actually reach.
+//
+// `record()` in `coordinator/tools/start.rn` refuses when **this ledger's** row for an operation and
+// **the custody log's** child for that operation disagree. It had no witness anywhere. The question a
+// witness has to answer first is whether anything honest can produce that disagreement, because a
+// manufactured one would prove the branch is reachable and nothing about when.
+//
+// It can, and this file is the shape: the plugin's ledger belongs to the **plugin** and is shared by
+// every session in the config, while the custody log belongs to the **session** — `claim_launch`
+// filters on `request.caller`, so a second session presenting an operation id the first session
+// already used is admitted fresh and binds a child of its own. The ledger then holds the first
+// session's row for that operation, naming the first session's child, and the second session's log
+// binds the same operation to a different child. Neither side is wrong about its own child. That is
+// the disagreement the branch exists for, produced by two ordinary calls and no seeded state.
+//
+// The driver runs this file **three times**, in three sessions:
+//   A  an ordinary start, which writes this session's row for the operation;
+//   B  the same operation id and the same bytes in a **second** session — the route that would have
+//      produced a disagreement if the ledger were the plugin's. It is not: plugin state is keyed by
+//      `(plugin, session, key)`, so each session writes its own store and B neither sees A's row nor
+//      conflicts. That run is the producer search, and its answer is "no".
+//   C  a **seeded** session: one adoption row written by a fixture tool, naming a worker the hold
+//      will not bind. That is labeled seeded state, not producer proof; what it proves is that the
+//      branch refuses, in its own words, and writes nothing.
+
+pub fn workflow() {
+    #{
+        name: "rune-start-conflict",
+        description: "Call the shipped coordinator_start once for an operation, then read this ledger's rows, this session's custody record and this session's address. args: {operation, workspace, model, brief}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation id both sessions present" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child" },
+                "model": #{ "type": "string", "description": "The child's model key" },
+                "brief": #{ "type": "string", "description": "The assignment the door journals" },
+                "seed_worker": #{ "type": "string", "description": "Test-only: when set, seed one adoption row for this operation naming this worker before the start. Empty means no seed." },
+            },
+            "required": ["operation", "workspace", "model", "brief"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-start-conflict needs \`${key}\``),
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    let seed_worker = match args.get("seed_worker") {
+        Some(v) => `${v}`,
+        None => "",
+    };
+    let out = "";
+
+    // ---- the seed, when this run is the labeled one ----
+    if seed_worker != "" && seed_worker != "null" {
+        match eidolon::tool_call("coordinator_seed_adoption", #{
+            "operation": operation, "worker": seed_worker,
+        }).await {
+            Ok(t) => out += `S0-SEED: ${t}\n`,
+            Err(e) => out += `S0-SEED-ERR: ${e}\n`,
+        }
+    }
+
+    match eidolon::tool_call("coordinator_start", #{
+        "operation": operation, "workspace": workspace, "model": model, "brief": brief,
+    }).await {
+        Ok(t) => out += `S1-OK: ${t}\n`,
+        Err(e) => out += `S1-ERR: ${e}\n`,
+    }
+
+    // The ledger as data: whether the first session's row is still the only one, and whether the
+    // refusal wrote anything, are facts about the store rather than about a sentence.
+    match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => out += `S2-ROWS: ${t}\n`,
+        Err(e) => out += `S2-ROWS-ERR: ${e}\n`,
+    }
+    // **This session's** record for the operation — the other half of the disagreement, read from
+    // the log rather than from the ledger.
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": operation }).await {
+        Ok(t) => out += `S3-RECORD: ${t}\n`,
+        Err(e) => out += `S3-RECORD-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_me", #{}).await {
+        Ok(t) => out += `S4-ME: ${t}\n`,
+        Err(e) => out += `S4-ME-ERR: ${e}\n`,
+    }
+
+    Ok(out)
+}

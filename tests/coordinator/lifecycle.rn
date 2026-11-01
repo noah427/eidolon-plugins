@@ -1,0 +1,314 @@
+// The lifecycle consumer's pure policy, checked against fixed vectors.
+//
+// `tests/coordinator/lifecycle-shape.sh` copies this file into a throwaway plugin
+// beside `coordinator/lib/lifecycle.rn`, so `eidolon workflow run` compiles the
+// library in front and this program calls it directly. No harness primitive, no
+// roster, no store, no peer: every check is a function of values written here.
+//
+// The notice-id vectors are computed from the retired service's `notice_id` algorithm — its source
+// is in this repository's history, `coordinator/service/src/lib.rs`, deleted at `14f1c4c`: FNV-1a 64
+// over the four parts, 0x1f before each, lowercase 16-digit hex. The Rust tests do not print an
+// expected id, so these were computed independently from that source, not copied from a run.
+
+fn field(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+fn canon(v) {
+    match json::to_string(v) {
+        Ok(s) => s,
+        Err(_) => `${v}`,
+    }
+}
+
+fn check(out, bad, name, got, want) {
+    if canon(got) == canon(want) {
+        out.push("ok   " + name);
+    } else {
+        out.push("FAIL " + name + ": got " + canon(got) + ", want " + canon(want));
+        bad.push(name);
+    }
+}
+
+fn action(observation) {
+    field(lifecycle_evaluate(observation), "action")
+}
+
+fn ending(last, busy) {
+    #{ "payload": #{ "state": "ending", "last": last, "busy": busy } }
+}
+
+pub fn workflow() {
+    #{
+        name: "lifecycle",
+        description: "Check the lifecycle consumer's pure policy: the service's notice id byte for byte, the halt decision, gap and unavailable handling, the watch list, notice shape and dedupe, the retry bound, and decoration idempotence. No harness primitive and no store.",
+        approval: "read_only",
+        params: #{ "type": "object", "properties": #{} },
+    }
+}
+
+pub async fn run(args) {
+    let out = [];
+    let bad = [];
+
+    // ---- the notice id: the service's derivation, byte for byte ----
+    check(out, bad, "notice id: outcome:7",
+          lifecycle_notice_id("/c.eid", 1, "/w.eid", "outcome:7")?, "734a0bd6b39395a7");
+    check(out, bad, "notice id: rc:42",
+          lifecycle_notice_id("/c.eid", 1, "/w.eid", "rc:42")?, "57854ad841a80b39");
+    check(out, bad, "notice id: reg with registration and instance",
+          lifecycle_notice_id("1793169806605", 2, "1793173779989", "reg:abc@1000#3")?, "bd5d3f95a28d82bb");
+    check(out, bad, "notice id: empty coordinator is still part of the key",
+          lifecycle_notice_id("", 1, "w", "rc:0")?, "5dcde737a17598e4");
+
+    let same = lifecycle_notice_id("c1", 1, "w1", "rc:7")?;
+    check(out, bad, "notice id: sixteen lowercase hex digits", `${same.len()}` + ":" + same, "16:356845f06c836344");
+    check(out, bad, "notice id: epoch is part of the key (one halt, two epochs, two ids)",
+          same == lifecycle_notice_id("c1", 2, "w1", "rc:7")?, false);
+    check(out, bad, "notice id: occurrence is part of the key (two halts, two ids)",
+          same == lifecycle_notice_id("c1", 1, "w1", "rc:8")?, false);
+    check(out, bad, "notice id: coordinator is part of the key (two recipients, two ids)",
+          same == lifecycle_notice_id("c2", 1, "w1", "rc:7")?, false);
+    match lifecycle_notice_id("c1", 1, "w1", "é") {
+        Ok(_) => check(out, bad, "notice id: a non-ASCII token is refused, not given a second spelling", "accepted", "refused"),
+        Err(_) => check(out, bad, "notice id: a non-ASCII token is refused, not given a second spelling", "refused", "refused"),
+    }
+
+    // ---- the halt decision ----
+    check(out, bad, "halt: iteration limit with busy false", action(ending("iteration limit", false)), "halt");
+    check(out, bad, "halt: errored with busy false", action(ending("errored", false)), "halt");
+    check(out, bad, "halt: failed with busy false", action(ending("failed", false)), "halt");
+    check(out, bad, "halt: completed is not a halt", action(ending("completed", false)), "none");
+    check(out, bad, "halt: cancelled is not one of the named failures", action(ending("cancelled", false)), "none");
+    check(out, bad, "halt: unknown is not inferred to be a failure", action(ending("unknown", false)), "none");
+    check(out, bad, "halt: a failed ending while busy is not stalled", action(ending("failed", true)), "none");
+    check(out, bad, "halt: an ending with `busy` absent is not a halt — unknown is not false",
+          action(#{ "payload": #{ "state": "ending", "last": "failed" } }), "none");
+    check(out, bad, "halt: an ending with `busy` null is not a halt either",
+          action(#{ "payload": #{ "state": "ending", "last": "failed", "busy": json::from_string("null")? } }), "none");
+    check(out, bad, "halt: and the deferral says why, rather than staying silent",
+          field(lifecycle_evaluate(#{ "payload": #{ "state": "ending", "last": "failed" } }), "why").contains("not stated"), true);
+    check(out, bad, "halt: a turn edge is not a completion",
+          action(#{ "payload": #{ "state": "turn", "last": "failed", "busy": false } }), "none");
+    check(out, bad, "halt: unavailable writes nothing",
+          action(#{ "payload": #{ "state": "unavailable", "last": "failed", "busy": false } }), "ignore");
+    check(out, bad, "halt: a gap is a gap, never a halt",
+          action(#{ "payload": #{ "state": "gap", "last": "failed", "busy": false } }), "gap");
+    check(out, bad, "halt: an observation with no payload is not a halt", action(#{ "event": "peer_changed" }), "none");
+
+    // A gap row carries the harness's own reason and coverage, or says it was not
+    // stated. It never carries a notice id.
+    let gap = lifecycle_gap_row(#{ "event": "peer_changed", "source": "w1", "occurrence": "rc:10",
+                                   "gap": #{ "reason": "missed two turns", "coverage": "rc:8..rc:10" } });
+    check(out, bad, "gap row: reason is kept", field(gap, "reason"), "missed two turns");
+    check(out, bad, "gap row: coverage is kept", field(gap, "coverage"), "rc:8..rc:10");
+    check(out, bad, "gap row: kind", field(gap, "kind"), "coverage_gap");
+    check(out, bad, "gap row: no notice id", field(gap, "notice_id"), "");
+    let bare = lifecycle_gap_row(#{ "event": "peer_changed", "source": "w1", "payload": #{ "state": "gap" } });
+    check(out, bad, "gap row: a missing reason is stated, not invented", field(bare, "reason") != "", true);
+    check(out, bad, "gap row: missing coverage is stated, not invented", field(bare, "coverage"), "not stated by the harness");
+
+    // ---- the watch list and the notice store ----
+    let adoptions = [
+        #{ "epoch": 1, "coordinator": "c1", "worker": "w1", "name": "one", "adopted_at_ms": 0 },
+        #{ "epoch": 2, "coordinator": "c1", "worker": "w2", "name": "two", "adopted_at_ms": 0 },
+        #{ "epoch": 1, "coordinator": "c1", "worker": "w1", "name": "duplicate row", "adopted_at_ms": 0 },
+        #{ "epoch": 1, "coordinator": "c1", "worker": "w3", "name": "released", "adopted_at_ms": 0, "released_at_ms": 9 },
+    ];
+    check(out, bad, "watch: live workers, once each, in stored order", lifecycle_watch(adoptions), ["w1", "w2"]);
+    check(out, bad, "watch: a released row is history, not watched", lifecycle_watch([adoptions[3]]), []);
+    match lifecycle_find_adoption(adoptions, "w3") {
+        Some(_) => check(out, bad, "adoption lookup: a released row is not live", "found", "none"),
+        None => check(out, bad, "adoption lookup: a released row is not live", "none", "none"),
+    }
+    match lifecycle_find_adoption(adoptions, "w2") {
+        Some(a) => check(out, bad, "adoption lookup: the live row is found", field(a, "name"), "two"),
+        None => check(out, bad, "adoption lookup: the live row is found", "none", "two"),
+    }
+    // ---- the notice row: the ledger's shape, with the transport's half gone ----
+    // `attempts` and `transport` are deliberately absent rather than zero and empty:
+    // the harness journals the notice, the ring is not evidence, and there is no
+    // attempt to count. A test that looked for `0` would be asserting the vocabulary
+    // the ledger exists to drop.
+    let notice = lifecycle_notice(adoptions[1], ending("iteration limit", false), "reg:r1@1000#2")?;
+    check(out, bad, "notice: id is derived from the adoption's coordinator, epoch, worker and occurrence",
+          field(notice, "notice_id"), "eef2e471d2fecf19");
+    check(out, bad, "notice: key kind names an unjournaled registration count", field(notice, "key_kind"), "observed");
+    check(out, bad, "notice: state is stuck", field(notice, "state"), "stuck");
+    check(out, bad, "notice: kind is stuck", field(notice, "kind"), "stuck");
+    check(out, bad, "notice: outcome starts pending", field(notice, "outcome"), "pending");
+    check(out, bad, "notice: no attempt count — there is no transport to have attempted", field(notice, "attempts"), "");
+    check(out, bad, "notice: no transport's words", field(notice, "transport"), "");
+    check(out, bad, "notice: no record until the log names one", field(notice, "record"), "");
+    check(out, bad, "notice: last outcome is the harness's word", field(notice, "last"), "iteration limit");
+    check(out, bad, "notice: the words are composed and stored with the row, so a resume sends what was written down",
+          field(notice, "text").contains("halted in epoch 2"), true);
+    check(out, bad, "notice: and they say what the notice does not mean",
+          field(notice, "text").contains("not a claim that the worker is gone"), true);
+    let args = lifecycle_notice_args(notice);
+    check(out, bad, "notice args: the id, the text and the observation the row answers",
+          [field(args, "id"), field(args, "event"), field(args, "source"), field(args, "occurrence")],
+          [field(notice, "notice_id"), "peer_changed", "w2", "reg:r1@1000#2"]);
+
+    // ---- the ledger: one key, and every decision taken against it ----
+    let empty = lifecycle_store_empty();
+    check(out, bad, "store: three lists", [lifecycle_store_list(empty, "adoptions")?, lifecycle_store_list(empty, "notices")?, lifecycle_store_list(empty, "gaps")?], [[], [], []]);
+    match lifecycle_store_list(#{ "notices": "no" }, "notices") {
+        Ok(_) => check(out, bad, "store: a field that is not a list is refused, not repaired", "accepted", "refused"),
+        Err(_) => check(out, bad, "store: a field that is not a list is refused, not repaired", "refused", "refused"),
+    }
+    let live_store = lifecycle_store_put(lifecycle_store_empty(), "adoptions", adoptions);
+    check(out, bad, "store: putting one list leaves the others empty",
+          [lifecycle_store_list(live_store, "notices")?, lifecycle_store_list(live_store, "gaps")?], [[], []]);
+    check(out, bad, "epoch liveness: the live row's epoch is open", lifecycle_epoch_live(live_store, "w1", 1)?, true);
+    check(out, bad, "epoch liveness: a released row's epoch is closed", lifecycle_epoch_live(live_store, "w3", 1)?, false);
+    check(out, bad, "epoch liveness: a worker never adopted has no open epoch", lifecycle_epoch_live(live_store, "nobody", 1)?, false);
+
+    let halt = #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:7",
+                 "payload": #{ "state": "ending", "last": "iteration limit", "busy": false } };
+    let decided = lifecycle_decide(live_store, halt)?;
+    check(out, bad, "decide: a live adoption's halt owes one notice", field(decided, "action"), "halt");
+    check(out, bad, "decide: the owed row starts pending", field(decided.notice, "outcome"), "pending");
+    let recorded = lifecycle_record(live_store, decided)?;
+    check(out, bad, "record: the row is appended and a durable write is owed", lifecycle_true(recorded.get("dirty")), true);
+    let owed_store = recorded.store;
+    check(out, bad, "record: one notice row is now in the store", lifecycle_store_list(owed_store, "notices")?.len(), 1);
+    check(out, bad, "record: and no gap row was invented", lifecycle_store_list(owed_store, "gaps")?.len(), 0);
+    check(out, bad, "decide: the same occurrence again is one notice, no second",
+          field(lifecycle_decide(owed_store, halt)?, "action"), "dup");
+    let released_store = lifecycle_store_put(lifecycle_store_empty(), "adoptions",
+        [#{ "epoch": 1, "worker": "w1", "released_at_ms": 9, "release_reason": "the work is done" }]);
+    let released = lifecycle_decide(released_store, halt)?;
+    check(out, bad, "decide: a released epoch is never handed a notice", field(released, "action"), "released");
+    check(out, bad, "decide: and the sentence names the release and its reason",
+          field(released, "why").contains("the work is done"), true);
+    let released_unstated = lifecycle_store_put(lifecycle_store_empty(), "adoptions",
+        [#{ "epoch": json::from_string("null")?, "worker": "w1", "released_at_ms": 9 }]);
+    check(out, bad, "decide: a released row with no stated epoch is not given one in the sentence",
+          field(lifecycle_decide(released_unstated, halt)?, "why").contains("epoch not stated was released"), true);
+    check(out, bad, "decide: an unadopted worker is nothing to announce",
+          field(lifecycle_decide(live_store, #{ "event": "peer_changed", "source": "nobody", "occurrence": "rc:9",
+                 "payload": #{ "state": "ending", "last": "failed", "busy": false } })?, "action"), "none");
+    check(out, bad, "decide: a halt with no occurrence token writes nothing",
+          field(lifecycle_decide(live_store, #{ "event": "peer_changed", "source": "w1",
+                 "payload": #{ "state": "ending", "last": "failed", "busy": false } })?, "action"), "none");
+    check(out, bad, "decide: unavailable writes nothing",
+          field(lifecycle_decide(live_store, #{ "payload": #{ "state": "unavailable" } })?, "action"), "ignore");
+    check(out, bad, "decide: a gap is a gap row, never a notice",
+          field(lifecycle_decide(live_store, #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:11",
+                 "payload": #{ "state": "gap" }, "gap": #{ "reason": "missed two turns" } })?, "action"), "gap");
+
+    // ---- the resume reconcile, as its pure parts: what is open, and what each
+    // open row becomes. One direction is a journal attempt; the other is a cancel.
+    let pending = lifecycle_pending_rows(owed_store)?;
+    check(out, bad, "reconcile: the open row is the one pending row", pending.len(), 1);
+    let open_id = field(pending[0], "notice_id");
+    let written = lifecycle_mark_written(owed_store, open_id, 7, true);
+    let written_rows = lifecycle_store_list(written, "notices")?;
+    check(out, bad, "reconcile: a journaled row says written and keeps the record number",
+          [field(written_rows[0], "outcome"), field(written_rows[0], "record")], ["written", "7"]);
+    check(out, bad, "reconcile: a written row is nothing left to reconcile", lifecycle_pending_rows(written)?.len(), 0);
+    // A mark with no record number the log ever named: the row is `written` and does *not*
+    // carry a record, rather than carrying 0 — which is a real record id and would be a
+    // fabricated one. (The rendering then says the number is not stated.) Built on a store of
+    // its own, because these functions rewrite the rows they are handed.
+    let pending_only = lifecycle_store_put(lifecycle_store_empty(), "notices", [#{ "notice_id": "n1", "outcome": "pending" }]);
+    let unnumbered = lifecycle_store_list(lifecycle_mark_written(pending_only, "n1", 0, false), "notices")?;
+    check(out, bad, "reconcile: a mark with no record never stores a fabricated 0",
+          [field(unnumbered[0], "outcome"), field(unnumbered[0], "record")], ["written", ""]);
+    // An epoch nobody stated decides nothing: no live match, and no notice keyed on it.
+    let quiet = lifecycle_store_put(lifecycle_store_empty(), "adoptions",
+        [#{ "epoch": json::from_string("null")?, "worker": "w1" }]);
+    check(out, bad, "decide: an adoption that states no epoch is never matched",
+          lifecycle_epoch_live(quiet, "w1", 0)?, false);
+    check(out, bad, "decide: and no notice is keyed on an invented epoch",
+          field(lifecycle_decide(quiet, #{ "event": "peer_changed", "source": "w1", "occurrence": "rc:61",
+                 "payload": #{ "state": "ending", "last": "failed", "busy": false } })?, "action"), "none");
+    let cancelled = lifecycle_mark_cancelled(owed_store, open_id);
+    check(out, bad, "reconcile: a released epoch's open row is cancelled, never journaled",
+          field(lifecycle_store_list(cancelled, "notices")?[0], "outcome"), "cancelled");
+    let marked_store = lifecycle_store_put(lifecycle_store_empty(), "notices", [#{ "notice_id": "n2", "outcome": "pending" }]);
+    let marks = [#{ "notice_id": "n2", "outcome": "written", "record": 3, "stated": true }];
+    check(out, bad, "reconcile: marks applied by id land on the row they name",
+          field(lifecycle_store_list(lifecycle_apply_marks(marked_store, marks), "notices")?[0], "record"), "3");
+
+    // ---- blindness has one home: the ledger, because core stores a handler's notes
+    // nowhere. A scan that said nothing and a scan that saw nothing are different
+    // facts, and the store keeps which one it was.
+    let blinded = lifecycle_blind(lifecycle_store_empty(), ["w9: no live session carries this address"], ["notice 1: write came back uncertain"]);
+    check(out, bad, "blind: the last scan's notes are kept", lifecycle_blind_notes(blinded).notes, ["w9: no live session carries this address"]);
+    check(out, bad, "blind: and its uncertain list, kept apart", lifecycle_blind_notes(blinded).uncertain, ["notice 1: write came back uncertain"]);
+    check(out, bad, "blind: a store with no blind field reads as two empty lists",
+          lifecycle_blind_notes(lifecycle_store_empty()), #{ "notes": [], "uncertain": [] });
+    check(out, bad, "blind: a store that has one keeps its other lists",
+          lifecycle_store_list(blinded, "adoptions")?.len(), 0);
+
+    // ---- decoration: idempotent, and another owner is a conflict ----
+    check(out, bad, "decoration: absent means attach", lifecycle_decoration_action(None, "Tribunus"), "decorate");
+    check(out, bad, "decoration: our own matching text is not rewritten",
+          lifecycle_decoration_action(Some(#{ "controller": "coordinator", "text": "Tribunus" }), "Tribunus"), "none");
+    check(out, bad, "decoration: our own differing text is corrected, not left wrong",
+          lifecycle_decoration_action(Some(#{ "controller": "coordinator", "text": "Miles" }), "Tribunus"), "decorate");
+    check(out, bad, "decoration: another controller's text is a conflict, never taken over",
+          lifecycle_decoration_action(Some(#{ "controller": "someone-else", "text": "Miles" }), "Tribunus"), "conflict");
+
+    check(out, bad, "rank prefix: a stored prefix is kept as stored",
+          lifecycle_rank_prefix(#{ "rank": "tribunus", "prefix": "Tribunus" }), "Tribunus");
+    check(out, bad, "rank prefix: a row without one derives the vocabulary's word",
+          lifecycle_rank_prefix(#{ "rank": "tribunus" }), "Tribunus");
+    check(out, bad, "rank prefix: a word outside the vocabulary has no prefix",
+          lifecycle_rank_prefix(#{ "rank": "admiral" }), "");
+
+    // ---- cancellation: the claim comes from the log's typed word, never from a sentence ----
+    //
+    // `custody_cancel` answers a *completion* signal: on a door that formats the act's refusal
+    // instead of propagating it, `Ok` carries "exit unconfirmed; supervision retained" as well as
+    // "exit observed". So the claim is a function of the log's `cancellation` word alone, and the
+    // last check here is the one that would have caught the rule being written the other way: the
+    // door's sentence, handed to the decision by mistake, cannot authorize a stop.
+    check(out, bad, "cancel claim: only the log's `exited` lets a stop be reported",
+          lifecycle_cancel_claim(true, "exited"), "observed");
+    check(out, bad, "cancel claim: `attempted` is an unobserved exit, so supervision remains",
+          lifecycle_cancel_claim(true, "attempted"), "unobserved");
+    check(out, bad, "cancel claim: an absent outcome is unrecorded, not an unobserved exit",
+          lifecycle_cancel_claim(true, ""), "unrecorded");
+    check(out, bad, "cancel claim: a log that could not be read claims nothing, whatever it might have said",
+          lifecycle_cancel_claim(false, "exited"), "unknown");
+    check(out, bad, "cancel claim: a word that is not one of the log's two is not a stop",
+          lifecycle_cancel_claim(true, "cancelling"), "unobserved");
+    check(out, bad, "cancel claim: the door's sentence in the word slot never authorizes a stop",
+          lifecycle_cancel_claim(true, "cancellation of `op-1`: exit observed; adoption_closed false"), "unobserved");
+
+    // ---- the epoch a sentence states: the log while it has one, the ledger after ----
+    //
+    // The dispatch-level witness cannot reach this rendering: a cancel in the fixture is answered by
+    // core's refusal, which records no outcome, so no sentence with an epoch in it is ever printed.
+    // The decision is pure, so it is checked here — and the null case is the one that matters, since
+    // a null `adoption_epoch` is an absence, not a zero to fall back to.
+    let log_states = #{ "adoption_epoch": 4 };
+    let ledger_states = #{ "epoch": 3 };
+    let log_null = #{ "adoption_epoch": json::from_string("null")? };
+    let picked = lifecycle_epoch_source(log_states, ledger_states);
+    check(out, bad, "epoch source: the log's own answer wins when it states one", picked.word, "4");
+    check(out, bad, "epoch source: and is named as the log's, not the ledger's", picked.source, "the log's answer");
+    let picked = lifecycle_epoch_source(#{}, ledger_states);
+    check(out, bad, "epoch source: with the field gone from the log, the ledger states it", picked.word, "3");
+    check(out, bad, "epoch source: and the sentence says where the number came from", picked.source, "from this ledger's adoption row for it, because the log states no adoption epoch");
+    let picked = lifecycle_epoch_source(log_null, ledger_states);
+    check(out, bad, "epoch source: a null in the log is an absence, not a zero — the ledger answers", picked.word, "3");
+    let picked = lifecycle_epoch_source(#{}, #{});
+    check(out, bad, "epoch source: with neither stating one, the answer is not stated", picked.word, "not stated");
+    check(out, bad, "epoch source: and it says so about both records rather than only one", picked.source, "not stated by either the log or this ledger");
+
+    let text = "";
+    for line in out {
+        text += line + "\n";
+    }
+    if bad.len() > 0 {
+        return Err(text + "lifecycle: " + `${bad.len()}` + " check(s) failed");
+    }
+    Ok(text + "lifecycle: " + `${out.len()}` + " checks hold")
+}

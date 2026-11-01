@@ -19,7 +19,6 @@
         hyprland = pkgs.callPackage ./hyprland/package.nix { };
         librewolf = pkgs.callPackage ./librewolf/package.nix { };
         claude = pkgs.callPackage ./claude/package.nix { };
-        coordinator = pkgs.callPackage ./coordinator/package.nix { };
         godot = pkgs.callPackage ./godot/package.nix { };
         default = browser;
       });

@@ -1,0 +1,131 @@
+// tests/coordinator/rune-public-start-retry.rn — contract witness 1: the **public** `coordinator_start`
+// issued three times for one operation, across the window where the child's doorbell does not exist.
+//
+// The two fixtures beside this one each hold half of the question. `rune-held-start.rn` drives the
+// shipped tool twice and both attempts stop at the release, so the brief never has a socket to land
+// on. `rune-allow-start-retry.rn` lands a brief but asks through a fixture tool that calls the custody
+// door directly, because a workflow's Rune module is `tool_call`/`park`/`ask_model`/`ask_decision`
+// only. Neither runs the pair a caller actually makes: the shipped registry tool once, ending with the
+// barrier open and its brief unestablished, then **the same operation again** once the child's
+// doorbell exists — and then once more, so "one brief, one key" is a fact about two logs rather than
+// about a repeat nobody issued.
+//
+// Every value asserted below is read from a record, not from a sentence: the session from
+// `custody_inspect`, the rows from the ledger, the counts from the journals. The tool's own sentences
+// are checked only for what they *say* — that the barrier is open, that the brief is what is not
+// established — because those are the words a caller sees.
+
+pub fn workflow() {
+    #{
+        name: "rune-public-start-retry",
+        description: "Issue the public coordinator_start three times for one operation: once while the child's doorbell does not exist, once after it appears, and once more once the brief has settled. args: {operation, workspace, model, brief, sock_dir}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation id, which every issue repeats byte for byte" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child" },
+                "model": #{ "type": "string", "description": "The child's model key" },
+                "brief": #{ "type": "string", "description": "The assignment the door journals" },
+                "sock_dir": #{ "type": "string", "description": "The runtime root holding <session>/sock, absolute" },
+            },
+            "required": ["operation", "workspace", "model", "brief", "sock_dir"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-public-start-retry needs \`${key}\``),
+    }
+}
+
+fn field_of(raw, key) {
+    match json::from_string(`${raw}`) {
+        Ok(v) => {
+            match v.get(key) {
+                Some(x) => `${x}`,
+                None => "",
+            }
+        }
+        Err(_) => "",
+    }
+}
+
+// The public tool, one issue of it, with the whole ask spelled out every time: the map is moved into
+// `tool_call`, and rebuilding it from the same bindings is what makes "the same immutable input" a
+// claim about the bytes rather than about a variable. The line is returned rather than appended,
+// because a Rune string handed to a function is a copy and the caller's accumulation would not see it.
+async fn issue(label, operation, workspace, model, brief) {
+    match eidolon::tool_call("coordinator_start", #{
+        "operation": operation, "workspace": workspace, "model": model, "brief": brief,
+    }).await {
+        Ok(t) => Ok(`${label}-OK: ${t}\n`),
+        Err(e) => Ok(`${label}-ERR: ${e}\n`),
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    let sock_dir = needed(args, "sock_dir")?;
+    let out = "";
+
+    // ---- the first issue: hold, this ledger's row, then the barrier ----
+    //
+    // The doorbell cannot exist yet — the child's runtime opens only when the barrier does — so the
+    // brief is the act that cannot land, and the sentence must say the barrier is open anyway.
+    out += issue("P1", operation, workspace, model, brief).await?;
+
+    // The child's address, from the log rather than from the sentence above.
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": operation }).await {
+        Ok(t) => out += `P1-RECORD: ${t}\n`,
+        Err(e) => out += `P1-RECORD-ERR: ${e}\n`,
+    }
+
+    // ---- the doorbell, waited for rather than raced ----
+    let sock = "";
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": operation }).await {
+        Ok(t) => {
+            let session = field_of(t, "session");
+            if session == "" || session == "null" {
+                return Ok(`${out}P2-WAIT-ERR: the record names no child, so there is no doorbell to wait for\n`);
+            }
+            sock = `${sock_dir}/${session}/sock`;
+            out += `P2-SOCK-PATH: ${sock}\n`;
+        }
+        Err(e) => return Ok(`${out}P2-WAIT-ERR: ${e}\n`),
+    }
+    match eidolon::tool_call("coordinator_wait_for_socket", #{ "path": sock }).await {
+        Ok(t) => out += `P2-SOCK: ${t}\n`,
+        Err(e) => return Ok(`${out}P2-SOCK-ERR: ${e}\n`),
+    }
+
+    // ---- the repeat: the same operation, now that the brief has somewhere to go ----
+    out += issue("P3", operation, workspace, model, brief).await?;
+
+    // ---- and a third issue, which is the only way "no second brief" is a test ----
+    //
+    // If the repeat had minted a key, this issue would carry a second one and the child's log would
+    // hold two. It is issued against a settled operation on purpose.
+    out += issue("P4", operation, workspace, model, brief).await?;
+
+    match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => out += `P5-ROWS: ${t}\n`,
+        Err(e) => out += `P5-ROWS-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": operation }).await {
+        Ok(t) => out += `P5-RECORD: ${t}\n`,
+        Err(e) => out += `P5-RECORD-ERR: ${e}\n`,
+    }
+    // This run's own address, so the checker can tell the coordinator's journal from the child's.
+    match eidolon::tool_call("coordinator_me", #{}).await {
+        Ok(t) => out += `P6-ME: ${t}\n`,
+        Err(e) => out += `P6-ME-ERR: ${e}\n`,
+    }
+
+    Ok(out)
+}

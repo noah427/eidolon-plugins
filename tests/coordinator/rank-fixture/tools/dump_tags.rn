@@ -1,0 +1,98 @@
+// Test fixture only: the tags the roster publishes for one named session. Not shipped.
+//
+// A workflow cannot call `swarm_call` (that surface belongs to a tool file), so the read-back the
+// rank witness asserts on happens here — the same roster builder `peers` prints from.
+pub fn manifest() {
+    #{
+        name: "coordinator_dump_tags",
+        description: "Test fixture: the tags the roster publishes for one named session, as `tags <list>`, or `ABSENT <why>` when no live row carries that address.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{ "session": #{ "type": "string" } },
+            "required": ["session"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let session = match input.get("session") {
+        Some(s) => `${s}`,
+        None => return Err("coordinator_dump_tags needs `session`"),
+    };
+    let raw = match eidolon::swarm_call("roster", #{}).await {
+        Ok(v) => v,
+        Err(e) => return Ok(`ABSENT the roster could not be read (${e})`),
+    };
+    let roster = match json::from_string(raw) {
+        Ok(v) => v,
+        Err(e) => return Ok(`ABSENT the roster is not JSON (${e})`),
+    };
+    for row in rows(roster) {
+        if !(row is Object) {
+            continue;
+        }
+        let id = match row.get("session") {
+            Some(s) => {
+                if s is String {
+                    `${s}`
+                } else {
+                    ""
+                }
+            }
+            None => "",
+        };
+        if id != session {
+            continue;
+        }
+        return Ok(match row.get("tags") {
+            Some(t) => `tags ${tag_list(t)}`,
+            None => "ABSENT the row carries no tags field".to_string(),
+        });
+    }
+    Ok(`ABSENT no live row carries ${session}`)
+}
+
+// The set, spelled the way the roster spells it, without handing a Vec to the formatter.
+fn tag_list(t) {
+    let out = "[";
+    let first = true;
+    if t is Vec {
+        for tag in t {
+            if !first {
+                out += ", ";
+            }
+            first = false;
+            out += `${tag}`;
+        }
+    }
+    out + "]"
+}
+
+fn rows(roster) {
+    let out = [];
+    if roster is Vec {
+        return roster;
+    }
+    if roster is Object {
+        match roster.get("sessions") {
+            Some(s) => {
+                if s is Vec {
+                    for row in s {
+                        out.push(row);
+                    }
+                }
+            }
+            None => {}
+        }
+        match roster.get("me") {
+            Some(me) => {
+                if me is Object {
+                    out.push(me);
+                }
+            }
+            None => {}
+        }
+    }
+    out
+}

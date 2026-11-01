@@ -1,0 +1,386 @@
+// `coordinator_hook_ready` — the `plugin_ready` lifecycle handler.
+//
+// The harness calls this when a session starts or resumes, and again whenever the
+// plugin is (re)loaded. It rebuilds the watch list from this session's own durable
+// store and reports each adopted worker the live roster does not carry. It is
+// idempotent: a worker that is gone is reported as gone rather than as a failure, and
+// the watch list is kept either way.
+//
+// **It no longer touches ranks, and that is the retirement's doing.** A rank is now a
+// tag on the ranked session (`rank:<word>`, written by `coordinator_rank`), so there is
+// nothing to reassert when a session resumes: the tag is the session's own and the
+// harness keeps it beside the session's log. The `ranks` key this handler used to read
+// was written by nothing — the service could not reach plugin state, and no tool wrote
+// it — so the branch was reading an always-empty row and painting a decoration. Both
+// are gone: the key, the branch, and the decoration.
+//
+// What is left is the plugin's own ledger, keyed by the running session's attribution:
+// one `store` key holding the watch list. What this scan could not see is written into
+// the ledger too, under `blind`, because core stores a handler's `notes` nowhere.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_hook_ready",
+        description: "Lifecycle handler for `plugin_ready`: load the ledger's watch list, reconcile it against the live roster, report each adopted worker the roster does not carry as gone (which is not a failure), record what this scan could not see, and return the watch list rebuilt from the store. It does not touch ranks: a rank is a tag on the ranked session now, so there is nothing to reassert.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{},
+        },
+    }
+}
+
+pub async fn call(input) {
+    let notes = [];
+    let uncertain = [];
+
+    let loaded = load_store().await?;
+    let adoptions = lifecycle_store_list(loaded.store, "adoptions")?;
+    let watch = lifecycle_watch(adoptions);
+
+    // A roster this scan could not read is a blind scan, not a scan that saw nobody:
+    // the failure is written down, so the reading tool can say what this scan could not
+    // see, and the watch list is kept exactly as the store has it.
+    let rows = [];
+    match eidolon::swarm_call("roster", #{}).await {
+        Ok(raw) => {
+            rows = roster_rows(json::from_string(raw)?);
+        }
+        Err(e) => {
+            uncertain.push(`the roster could not be read (${e}), so nothing here is a claim about any worker's state`);
+            return finish(watch, notes, uncertain).await;
+        }
+    }
+
+    // A gone worker is reported once per adopted address, and stays watched: the
+    // store, not this scan, says who was adopted. If the roster publishes no
+    // durable address at all, say that once instead of one "gone" per worker.
+    let addresses = false;
+    for row in rows {
+        if lifecycle_text(row, "session") != "" {
+            addresses = true;
+        }
+    }
+    if watch.len() > 0 && !addresses {
+        notes.push("no row in the roster publishes a `session`: null means not established, not no-such-session, so the watch list is kept and every worker is reported in one place rather than as gone");
+    } else {
+        for worker in watch {
+            if claimants(rows, worker).len() == 0 {
+                notes.push(`${worker}: no live session carries this adopted address; it stays watched, which is not a failure`);
+            }
+        }
+    }
+
+    finish(watch, notes, uncertain).await
+}
+
+// Every return goes through here. The scan's own words are kept in the ledger
+// because they are stored nowhere else — core reads a handler's reply for `watch` and
+// `verdict` only — so a blind write that cannot land is a handler failure rather than
+// a quiet omission. The same act is in `hook_peer.rn`, and the plan's §4.3 says why.
+async fn finish(watch, notes, uncertain) {
+    let wrote = store_blind(notes, uncertain).await?;
+    if !lifecycle_true(wrote.get("ok")) {
+        return Err(`this scan's own words were not written down (${lifecycle_text(wrote, "detail")}), so no reading tool could report what it could not see: nothing in the harness stores a handler's notes, and this handler will not appear to have seen everything`);
+    }
+    Ok(#{ "watch": watch, "notes": notes, "uncertain": uncertain })
+}
+
+// ---- the store, and the pure policy this handler repeats -------------------
+//
+// Upstream compiles every `tools/*.rn` on its own and compiles `lib/` only in front
+// of workflows, so the policy cannot be imported here. Everything from
+// `lifecycle_store_empty` down is a byte-for-byte copy of `../lib/lifecycle.rn`, which
+// is the one place it is explained; `tests/coordinator/lifecycle-drift.sh` fails if
+// the two ever disagree. The `store_*` helpers are this handler's own.
+
+async fn load_store() {
+    let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
+    let reply = json::from_string(raw)?;
+    let revision = lifecycle_number(reply, "revision");
+    let store = lifecycle_store_empty();
+    match reply.get("value") {
+        Some(v) => {
+            if lifecycle_null(v) {
+                // Nothing written yet. `revision: 0, value: null` is the fact a first write
+                // compares against, not a corrupt row — and a *fresh* ledger is the ordinary
+                // case for a session whose first act is an adoption. Reading it as corruption
+                // refused every handler on a session that had not seeded a store first, which
+                // is what every test did and why this was invisible.
+            } else if v is String {
+                let got = json::from_string(`${v}`)?;
+                if got is Object {
+                    store = got;
+                } else {
+                    return Err(`the \`store\` row is not the object this ledger writes (${v}); it is refused rather than repaired or overwritten`);
+                }
+            } else {
+                return Err("the `store` row's value is not the JSON text this ledger writes; it is refused rather than repaired or overwritten");
+            }
+        }
+        None => {}
+    }
+    for key in ["adoptions", "notices", "gaps"] {
+        store = lifecycle_store_put(store, key, lifecycle_store_list(store, key)?);
+    }
+    Ok(#{ "store": store, "revision": revision })
+}
+
+// One durable write of the whole store. See `hook_peer.rn`: a compare-and-set refusal
+// is a fact (nothing was written and the store moved), and an answer that is neither
+// yes nor no is `uncertain` and never dressed as a write.
+async fn write_store(store, revision) {
+    let text = json::to_string(store)?;
+    match eidolon::plugin_state_write(#{ "key": "store", "value": text, "revision": revision }).await {
+        Ok(raw) => {
+            let check = json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?)?;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        Ok(#{ "status": "written", "revision": lifecycle_number(check, "revision") })
+                    } else {
+                        Ok(#{ "status": "uncertain", "detail": "the read-back did not carry the bytes just written" })
+                    }
+                }
+                None => Ok(#{ "status": "uncertain", "detail": "the read-back carried no value" }),
+            }
+        }
+        Err(e) => {
+            let check = match json::from_string(eidolon::plugin_state_read(#{ "key": "store" }).await?) {
+                Ok(v) => v,
+                Err(bad) => return Ok(#{ "status": "uncertain", "detail": `the write was refused (${e}) and the read-back would not parse (${bad})` }),
+            };
+            let same = false;
+            match check.get("value") {
+                Some(v) => {
+                    if v is String && `${v}` == text {
+                        same = true;
+                    }
+                }
+                None => {}
+            }
+            if same {
+                Ok(#{ "status": "uncertain", "detail": `the write answered an error (${e}) and the bytes are now at the path: it may have landed, and the next scan settles it from the store` })
+            } else {
+                Ok(#{ "status": "refused", "detail": `${e}` })
+            }
+        }
+    }
+}
+
+// This scan's own words, into the ledger, in at most two attempts.
+async fn store_blind(notes, uncertain) {
+    let attempt = 0;
+    let detail = "";
+    while attempt < 2 {
+        attempt += 1;
+        let loaded = load_store().await?;
+        let store = lifecycle_blind(loaded.store, notes, uncertain);
+        let wrote = write_store(store, loaded.revision).await?;
+        let status = lifecycle_text(wrote, "status");
+        if status == "written" {
+            return Ok(#{ "ok": true });
+        }
+        if status == "uncertain" {
+            return Ok(#{ "ok": false, "detail": lifecycle_text(wrote, "detail") });
+        }
+        detail = lifecycle_text(wrote, "detail");
+    }
+    Ok(#{ "ok": false, "detail": detail })
+}
+
+fn roster_rows(roster) {
+    let out = [];
+    if roster is Vec {
+        return roster;
+    }
+    if roster is Object {
+        match roster.get("sessions") {
+            Some(s) => {
+                if s is Vec {
+                    for row in s {
+                        out.push(row);
+                    }
+                }
+            }
+            None => {}
+        }
+        // `me` is published beside the list, not necessarily in it. The caller's own
+        // row is added when the list does not already carry it, so a watch list that
+        // names this session is reported the same way as any other adopted address.
+        match roster.get("me") {
+            Some(me) => {
+                if me is Object {
+                    let session = lifecycle_text(me, "session");
+                    let seen = false;
+                    for row in out {
+                        if lifecycle_text(row, "session") == session {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if !seen {
+                        out.push(me);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    return out;
+}
+fn claimants(rows, session) {
+    let out = [];
+    for row in rows {
+        if row is Object && lifecycle_text(row, "session") == session {
+            out.push(row);
+        }
+    }
+    out
+}
+
+// --- generated: the policy copy, from coordinator/lib/lifecycle.rn ---
+//
+// Do not edit these: they are the library's text. `--write` emits them and
+// `lifecycle-drift.sh` fails if they differ from it by one byte — the whole region
+// is compared against what the generator produces, so renaming a copy does not
+// exempt it. Edit `coordinator/lib/lifecycle.rn`, then run `--write`.
+// stamp: sha256:7ffca3fdefd8213f8ecb2d07b197687157f57cd766b6cf0a3bfdb7e80a1ba2c1
+
+fn lifecycle_stated(row, key) {
+    match row.get(key) {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+fn lifecycle_epoch_word(row, key) {
+    if !lifecycle_stated(row, key) {
+        return "not stated";
+    }
+    `${lifecycle_number(row, key)}`
+}
+fn lifecycle_store_empty() {
+    #{ "adoptions": [], "notices": [], "gaps": [] }
+}
+fn lifecycle_store_list(store, key) {
+    match store.get(key) {
+        None => Ok([]),
+        Some(v) => {
+            if v is Vec {
+                Ok(v)
+            } else {
+                Err(`the store's \`${key}\` is not a list (${v}); it is refused rather than repaired or overwritten`)
+            }
+        }
+    }
+}
+fn lifecycle_store_put(store, key, list) {
+    store.insert(key, list);
+    store
+}
+fn lifecycle_live_adoptions(adoptions) {
+    let out = [];
+    for a in adoptions {
+        if a is Object && !lifecycle_released(a) {
+            out.push(a);
+        }
+    }
+    out
+}
+fn lifecycle_watch(adoptions) {
+    let out = [];
+    for a in lifecycle_live_adoptions(adoptions) {
+        let worker = lifecycle_text(a, "worker");
+        if worker == "" {
+            continue;
+        }
+        let seen = false;
+        for w in out {
+            if w == worker {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            out.push(worker);
+        }
+    }
+    out
+}
+fn lifecycle_blind(store, notes, uncertain) {
+    store.insert("blind", #{ "notes": notes, "uncertain": uncertain });
+    store
+}
+fn lifecycle_payload(observation) {
+    match observation.get("payload") {
+        Some(p) => {
+            if p is Object {
+                p
+            } else {
+                #{}
+            }
+        }
+        None => #{},
+    }
+}
+fn lifecycle_text(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                ""
+            } else {
+                `${v}`
+            }
+        }
+        None => "",
+    }
+}
+fn lifecycle_true(v) {
+    match v {
+        Some(b) => {
+            if lifecycle_null(b) {
+                false
+            } else if b is bool {
+                b
+            } else {
+                `${b}` == "true"
+            }
+        }
+        None => false,
+    }
+}
+fn lifecycle_number(row, key) {
+    match row.get(key) {
+        Some(v) => {
+            if lifecycle_null(v) {
+                0
+            } else if v is i64 || v is u64 {
+                v
+            } else {
+                match `${v}`.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            }
+        }
+        None => 0,
+    }
+}
+fn lifecycle_released(row) {
+    if lifecycle_true(row.get("released")) {
+        return true;
+    }
+    match row.get("released_at_ms") {
+        Some(v) => !lifecycle_null(v),
+        None => false,
+    }
+}
+fn lifecycle_null(v) {
+    if v is String && `${v}` == "" {
+        return true;
+    }
+    match json::to_string(v) {
+        Ok(s) => s == "null",
+        Err(_) => false,
+    }
+}

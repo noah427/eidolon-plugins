@@ -1,0 +1,33 @@
+// Test fixture only: journal one notice under a given id, so a witness can put the
+// conversation and the ledger deliberately out of step (the crash window). Not shipped.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_journal",
+        description: "Test fixture: journal one notice through eidolon::notice and answer what the log said.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "id": #{ "type": "string" },
+                "text": #{ "type": "string" },
+            },
+        },
+    }
+}
+
+fn text_of(row, key) {
+    match row.get(key) {
+        Some(v) => `${v}`,
+        None => "",
+    }
+}
+
+pub async fn call(input) {
+    let id = text_of(input, "id");
+    let body = text_of(input, "text");
+    if id == "" {
+        return Err("coordinator_journal needs `id`");
+    }
+    eidolon::notice(#{ "id": id, "text": body, "event": "peer_changed", "source": "fixture", "occurrence": "fixture:journal" }).await
+}

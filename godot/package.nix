@@ -22,7 +22,6 @@ rustPlatform.buildRustPackage {
       ../browser/service
       ../librewolf/service
       ../claude/service
-      ../coordinator/service
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;

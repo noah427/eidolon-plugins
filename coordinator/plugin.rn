@@ -14,25 +14,30 @@ pub fn manifest() {
         // It cannot work for a session with no log, and says so rather than
         // substituting a locator: the id is what the monitor resolves later.
         description: "explicit adoption of worker sessions by a coordinator, and one notice per observed halt: who you have adopted, what each of them is doing, and the notifications still owed to them. An adoption is keyed on the session id the harness mints (the log's file stem), echoed verbatim; a session with no log has none, and then the verb refuses with the reason instead of substituting a path or a label",
-        // The monitor, declared: `eidolon plugins service approve coordinator`
-        // records the operator's yes against THIS text by hash, so an edit here
-        // asks again, and `service start` then runs it detached with readiness
-        // taken from the same `readiness` block the tools dial. It is the process
-        // that watches adopted workers and sends the notices; the tools only ask
-        // it questions, so nothing here needs a session to be awake.
-        service: #{
-            command: "eidolon-coordinator",
-            readiness: #{ port: 8095, health: "/health" },
-            ready_timeout_s: 15,
+        // The two lifecycle handlers, by the stem of the file under `tools/`. The
+        // harness registers them as `coordinator_hook_ready` and
+        // `coordinator_hook_peer` and invokes them with the observation in place of
+        // model input; adoption marks them `script_only`. `hook_ready` reconciles the
+        // ledger's watch list against the roster and `hook_peer` produces one notice per
+        // observed halt — neither sends, resumes or adopts anything, and **neither
+        // reasserts a rank any more**: a rank is a tag on the ranked session, the harness
+        // keeps it beside that session's log, and there is nothing to reattach when a
+        // session resumes.
+        lifecycle: #{
+            plugin_ready: "hook_ready",
+            peer_changed: "hook_peer",
         },
         claims: #{
-            // `rank`/`unrank`/`ranks` assign a display word; they claim no authority
-            // over the harness and none over another session. The word is the
-            // plugin's own vocabulary, persisted here, and the harness only holds
-            // the text a controller attached.
+            // `rank`/`unrank`/`ranks` set a word as a **tag on the ranked session**; they
+            // claim no authority over the harness and none over another session. The word
+            // is the plugin's own vocabulary, and the store is the session's own tags —
+            // there is no rank file here, and no process behind it.
+            //
+            // There is no `grants` claim either: nothing in this plugin reaches a secret, a
+            // file or an endpoint. The monitor that used to be declared here on
+            // 127.0.0.1:8095 is retired with its token file.
             tools: ["adopt", "release", "adoptions", "notices", "start", "cancel",
-                    "rank", "unrank", "ranks"],
-            grants: ["file:~/.config/eidolon/coordinator.token"],
+                    "rank", "unrank", "ranks", "hook_ready", "hook_peer"],
         },
     }
 }

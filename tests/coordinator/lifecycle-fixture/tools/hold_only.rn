@@ -1,0 +1,70 @@
+// Test fixture only: the **held** door and nothing else. Not shipped.
+//
+// Row 20a's two branches live behind a child that is *held when cancel happens*: core refuses
+// `custody_cancel` once a release has been attempted, so a cancel that observed an exit — or one
+// whose exit could not be observed — can only happen at the barrier. No shipped tool stops between
+// the hold and the release (`coordinator_start` writes its row and releases in the same call), so
+// the witness needs a door onto the same primitive the plugin uses and nothing more.
+//
+// This is the fixture's own file: it is copied into a throwaway config beside `dump_rows.rn` and
+// registered there, in the plugin's claims, the way every other fixture tool is. It writes no
+// ledger row — the workflow adopts the session through the shipped `coordinator_adopt` when a row
+// is what a witness needs, so the row under test is written by production code and not by this.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_hold_only",
+        description: "Test fixture: core's held door, and nothing else. Establishes a child at its startup barrier and releases nothing, so a witness can cancel one.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation id this hold belongs to." },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child." },
+                "model": #{ "type": "string", "description": "The child's model key." },
+                "brief": #{ "type": "string", "description": "The assignment the release would journal; unused here, carried because the door asks for it." },
+            },
+            "required": ["operation", "workspace", "model", "brief"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let operation = match text_of(input.get("operation")) {
+        Some(s) => s,
+        None => return Err("coordinator_hold_only needs `operation`"),
+    };
+    let workspace = match text_of(input.get("workspace")) {
+        Some(s) => s,
+        None => return Err("coordinator_hold_only needs `workspace`"),
+    };
+    let model = match text_of(input.get("model")) {
+        Some(s) => s,
+        None => return Err("coordinator_hold_only needs `model`"),
+    };
+    let brief = match text_of(input.get("brief")) {
+        Some(s) => s,
+        None => return Err("coordinator_hold_only needs `brief`"),
+    };
+    eidolon::custody_hold(#{
+        "operation": operation,
+        "workspace": workspace,
+        "model": model,
+        "brief": brief,
+    })
+    .await
+}
+
+fn text_of(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            if s == "null" || s == "" {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        None => None,
+    }
+}

@@ -1,0 +1,99 @@
+// tests/coordinator/rune-held-start.rn — drives `coordinator_start` through the three local acts,
+// then reads the two records back. Copied into the disposable config by
+// `tests/coordinator/live-rune-held-start.sh`; not shipped.
+//
+// Five calls, and the shape of each answer is the point:
+//
+//   1. the first start — hold answers, the adoption row is written, and the release is refused or
+//      unconfirmed in this environment, so the sentence must claim neither "held" nor "running";
+//   2. the same immutable input again — the row is *found*, not written a second time, and no second
+//      epoch exists;
+//   3. the canonical ledger rows as data, so "no second row" is a fact about the store and not about
+//      a sentence;
+//   4. a cancel against a start whose release was attempted — `unrecorded`, because a release that
+//      was asked for is not a held child any more;
+//   5. a visible launch — refused at the no-focus gate before any process exists, writing no row.
+//
+// Then the rows again, so a refused visible launch is shown to have added nothing.
+
+pub fn workflow() {
+    #{
+        name: "rune-held-start",
+        description: "Drive coordinator_start twice against one operation, cancel it, attempt a visible launch, and read the ledger back. args: {operation, visible_operation, workspace, model, brief}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The idempotency key, one operation" },
+                "visible_operation": #{ "type": "string", "description": "A second operation id, for the visible launch that must never exist" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child" },
+                "model": #{ "type": "string", "description": "The child's model key" },
+                "brief": #{ "type": "string", "description": "The assignment, journaled not inboxed" },
+            },
+            "required": ["operation", "visible_operation", "workspace", "model", "brief"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-held-start needs \`${key}\``),
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let visible_operation = needed(args, "visible_operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    let out = "";
+
+    let ask = #{ "operation": operation, "workspace": workspace, "model": model, "brief": brief };
+    match eidolon::tool_call("coordinator_start", ask).await {
+        Ok(t) => out += `H1-OK: ${t}\n`,
+        Err(e) => out += `H1-ERR: ${e}\n`,
+    }
+
+    let again = #{ "operation": operation, "workspace": workspace, "model": model, "brief": brief };
+    match eidolon::tool_call("coordinator_start", again).await {
+        Ok(t) => out += `H2-OK: ${t}\n`,
+        Err(e) => out += `H2-ERR: ${e}\n`,
+    }
+
+    match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => out += `H3-ROWS: ${t}\n`,
+        Err(e) => out += `H3-ERR: ${e}\n`,
+    }
+
+    // The cancel, on the operation whose release was attempted: `unrecorded`, because the log holds
+    // no cancellation for it and the verb was refused before an intent could be written.
+    match eidolon::tool_call("coordinator_cancel", #{ "operation": operation, "reason": "the fixture asks what an unrecorded cancellation says" }).await {
+        Ok(t) => out += `H4-OK: ${t}\n`,
+        Err(e) => out += `H4-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": operation }).await {
+        Ok(t) => out += `H4-RECORD: ${t}\n`,
+        Err(e) => out += `H4-RECORD-ERR: ${e}\n`,
+    }
+
+    // A visible launch: the no-focus gate refuses before any process exists, so no record and no
+    // ledger row may come of it.
+    let visible = #{ "operation": visible_operation, "workspace": workspace, "model": model, "brief": brief, "visible": true };
+    match eidolon::tool_call("coordinator_start", visible).await {
+        Ok(t) => out += `H5-OK: ${t}\n`,
+        Err(e) => out += `H5-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": visible_operation }).await {
+        Ok(t) => out += `H5-RECORD: ${t}\n`,
+        Err(e) => out += `H5-RECORD-ERR: ${e}\n`,
+    }
+
+    match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => out += `H6-ROWS: ${t}\n`,
+        Err(e) => out += `H6-ERR: ${e}\n`,
+    }
+
+    Ok(out)
+}

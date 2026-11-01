@@ -1,0 +1,45 @@
+// tests/coordinator/rune-hold-only.rn — hold one child and return, so the session can die.
+// Copied into the disposable config by `tests/coordinator/live-rune-holder-death.sh`; not shipped.
+//
+// The holder of a held child **is the session**: the child's channel is the session process's, and
+// when that process exits the channel closes and the child journals `Aborted` and exits. This is the
+// smallest workflow that produces that state — `custody_hold` and nothing else, through the fixture
+// door, so what dies is exactly what a real `coordinator_start` would have left at its barrier.
+
+pub fn workflow() {
+    #{
+        name: "rune-hold-only",
+        description: "Hold one child at its startup barrier and return, so this session's exit dies as the child's holder. args: {operation, workspace, model, brief}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation id this hold belongs to" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child" },
+                "model": #{ "type": "string", "description": "The child's model key" },
+                "brief": #{ "type": "string", "description": "The assignment the release would journal; unused here" },
+            },
+            "required": ["operation", "workspace", "model", "brief"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-hold-only needs \`${key}\``),
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    match eidolon::tool_call("coordinator_hold_only", #{
+        "operation": operation, "workspace": workspace, "model": model, "brief": brief,
+    }).await {
+        Ok(t) => Ok(`A-HELD: ${t}`),
+        Err(e) => Ok(`A-HELD-ERR: ${e}`),
+    }
+}

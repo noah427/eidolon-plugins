@@ -1,0 +1,47 @@
+// Test fixture only: does a comparison of two very large strings survive the Rune host? Not shipped.
+//
+// This exists to locate ONE defect: `coordinator_adopt` answers an empty result when its store write
+// is refused for size (`finding-adopt-empty-answer-2026-10-31.md`). The leading hypothesis is that
+// the refusal path's read-back — which compares two multi-megabyte strings — panics, and that the
+// host reports a caught panic as an empty result. This tool does the comparison and nothing else:
+// if it answers, the comparison is innocent and the defect is in `adopt.rn`'s own control flow; if it
+// answers nothing, the owning layer is the Rune string comparison or the host's panic boundary, and
+// the plugin's path is only where it is reached.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_probe_compare",
+        description: "Test fixture: build two large strings, compare them, and say what happened. args: {\"bytes\": N}",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{ "bytes": #{ "type": "number" } },
+        },
+    }
+}
+
+pub async fn call(input) {
+    // Two strings of ~1.79 MB, built the way `adopt.rn` builds its store text, compared the way
+    // `write_store` compares its read-back. No arguments: the size is the point, and this vocabulary
+    // has no string-to-number conversion to trust.
+    let chunk = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
+    let a = "";
+    let b = "";
+    for i in 0..28000 {
+        a += chunk;
+        b += chunk;
+    }
+    let eq = a == b;
+    // A second mode for the boundary question: does an INTERPOLATED error survive a call that carried
+    // a large argument? `pad` is never read beyond its length, so nothing here can be blamed for the
+    // answer; the only difference between this and the plain compare is the size of the argument.
+    let pad_len = 0;
+    match input.get("pad") {
+        Some(v) => { pad_len = `${v}`.len(); }
+        None => {}
+    }
+    if pad_len > 0 {
+        return Err(`probe boundary [${eq}] pad=${pad_len}`);
+    }
+    Ok(`compared len=${a.len()} equal=${eq}`)
+}
