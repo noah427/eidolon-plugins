@@ -127,14 +127,16 @@ fn tags_of(row) {
     out
 }
 
+// A string field, or the empty string. A JSON `null` arrives as the unit value, which has no
+// display form at all — interpolating it raised `Missing protocol function DISPLAY_FMT for Tuple`,
+// so the type is checked before the text is made rather than after.
 fn text(row, key) {
     match row.get(key) {
         Some(s) => {
-            let v = `${s}`;
-            if v == "null" || v == "" {
-                ""
+            if s is String {
+                `${s}`
             } else {
-                v
+                ""
             }
         }
         None => "",

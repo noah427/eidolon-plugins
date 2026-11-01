@@ -1,0 +1,100 @@
+// The rank witness's workflow: the plugin's own `rank`/`unrank`/`ranks` against a live session,
+// through the harness's tag door. Copied into the disposable config's copy of the plugin by
+// `tests/coordinator/run.sh`; not shipped in the plugin's own `workflows/`.
+//
+// Each line is prefixed `W<n>` so the shell asserts one sentence per act without matching a word
+// that appears in another answer. Nothing here names a port, a token or a service: the only
+// harness surface this file touches is `swarm_call` — `tag` for the door and `roster` for the
+// read-back.
+
+pub fn workflow() {
+    #{
+        name: "rank-witness",
+        description: "Drive coordinator_rank, coordinator_ranks and coordinator_unrank through the harness's tag door against a live session: place an unrelated tag, rank it, read the row, replace the rank as a family, list it, refuse an unknown word, refuse an address that is not registered, release the rank, release it again (idempotent), and rank it once more for the shell's resume check. args: live (a session address), absent (an address that is not registered)",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "live": #{ "type": "string" },
+                "absent": #{ "type": "string" },
+            },
+        },
+    }
+}
+
+pub async fn run(args) {
+    let out = "";
+    let live = text(args.get("live"));
+    let absent = text(args.get("absent"));
+    if absent == "" {
+        absent = "1793000000404";
+    }
+    if live == "" {
+        return Err("rank-witness needs `live`: the address of a session this fixture started, so the tag has a registration to live on");
+    }
+
+    // W0 — an unrelated tag, placed through the **harness's** door rather than the plugin's, so the
+    // family replacement below has something it must not touch.
+    // A workflow cannot see `swarm_call` (it is a tool-file surface), so this one act goes through
+    // the test-only fixture tool, copied in beside the plugin by the shell.
+    let w0 = match eidolon::tool_call("coordinator_seed_tag", #{ "session": live, "tag": "team:forge" }).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    };
+    out += `W0 ${w0}\n`;
+
+    // W1 — the rank lands as a tag on that session.
+    out += `W1 ${answer("coordinator_rank", #{ "session": live, "rank": "legatus" }).await}\n`;
+    // W2 — and the session's own row carries it.
+    out += `W2 ${row_tags(live).await}\n`;
+    // W3 — a second rank replaces the family rather than joining it.
+    out += `W3 ${answer("coordinator_rank", #{ "session": live, "rank": "miles" }).await}\n`;
+    // W4 — one rank stands, and the unrelated tag is still there.
+    out += `W4 ${row_tags(live).await}\n`;
+    // W5 — `ranks` reads it off the roster; there is no record of its own to disagree with.
+    out += `W5 ${answer("coordinator_ranks", #{}).await}\n`;
+    // W6 — a word outside this plugin's vocabulary is refused, not stored as a tag nobody reads.
+    out += `W6 ${answer("coordinator_rank", #{ "session": live, "rank": "admiral" }).await}\n`;
+    // W7 — an address with no live registration is refused by the door, and nothing is written for it.
+    out += `W7 ${answer("coordinator_rank", #{ "session": absent, "rank": "legatus" }).await}\n`;
+    // W8 — the release removes the family and reports the set that stands.
+    out += `W8 ${answer("coordinator_unrank", #{ "session": live }).await}\n`;
+    // W9 — the same release again is already true: reported as such, not dressed as a failure.
+    out += `W9 ${answer("coordinator_unrank", #{ "session": live }).await}\n`;
+    // W10 — rank once more, so the shell's resume check has a tag that has to survive the process.
+    out += `W10 ${answer("coordinator_rank", #{ "session": live, "rank": "legatus" }).await}\n`;
+
+    Ok(out)
+}
+
+async fn answer(tool, args) {
+    match eidolon::tool_call(tool, args).await {
+        Ok(t) => `OK ${t}`,
+        Err(e) => `ERR ${e}`,
+    }
+}
+
+// The tags the roster publishes for one session, read by the test-only fixture tool: a workflow
+// has no `swarm_call` of its own.
+async fn row_tags(session) {
+    match eidolon::tool_call("coordinator_dump_tags", #{ "session": session }).await {
+        Ok(t) => `${t}`,
+        Err(e) => `ABSENT the fixture tool refused (${e})`,
+    }
+}
+
+// A string argument, with the two spellings of *absent* (`missing`, and the JSON `null` Rune hands
+// over as the unit value) both becoming the empty string.
+fn text(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            if s == "null" {
+                ""
+            } else {
+                s
+            }
+        }
+        None => "",
+    }
+}

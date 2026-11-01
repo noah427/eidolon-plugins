@@ -1,0 +1,33 @@
+// Test fixture only: put one unrelated tag on another session's registration through the
+// harness's own tag door. Not shipped.
+//
+// The rank tools are what this fixture witnesses, so the tag the family replacement must
+// *spare* cannot come from them: it comes from the same door they use, called directly, which
+// is also the only place a fixture can reach another session's tags from a tool file.
+pub fn manifest() {
+    #{
+        name: "coordinator_seed_tag",
+        description: "Test fixture: set one tag on a named session through the harness's tag door, and return what the door answered.",
+        approval: "mutating",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "session": #{ "type": "string" },
+                "tag": #{ "type": "string" },
+            },
+            "required": ["session", "tag"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let session = match input.get("session") {
+        Some(s) => `${s}`,
+        None => return Err("coordinator_seed_tag needs `session`"),
+    };
+    let tag = match input.get("tag") {
+        Some(t) => `${t}`,
+        None => return Err("coordinator_seed_tag needs `tag`"),
+    };
+    eidolon::swarm_call("tag", #{ "session": session, "set": tag }).await
+}
