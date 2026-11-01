@@ -21,9 +21,11 @@ nothing about adoption gives a coordinator authority over anybody.
 | `coordinator_adoptions` | `tools/adoptions.rn` | what this session has adopted, and what each worker is doing now |
 | `coordinator_notices` | `tools/notices.rn` | every notice owed to this session, and what the transport reported for each |
 
-The tools are thin doors. The `coordinator` service — `eidolon-coordinator`,
-built by `package.nix` — holds the records, does the watching and sends the notices,
-so no session has to be awake for a halt to be noticed.
+The tools are thin doors onto what the harness already stores. **There is no service:**
+the monitor that used to hold adoption records and watch workers is retired, and rank is a
+tag on the ranked session rather than a word this plugin keeps. What remains is the ledger
+the tools read and write through plugin state, the custody doors a managed start goes
+through, and two lifecycle handlers.
 
 ## Managed start (isolated implementation; activation is separate)
 
@@ -295,86 +297,77 @@ than only a process death. Three rules beside that:
   durable address changes, an adoption stops resolving and is reported as unresolved
   — never silently rebound to whatever now looks similar.
 
-## The port
+## What this plugin runs
 
-The monitor binds `127.0.0.1:8095` and nothing else. That number appears in three
-places — every tool's `service()` (`base_url`), this plugin's `readiness` block, and the
-monitor's own `DEFAULT_PORT` constant — and `tests/coordinator/run.sh` checks that the
-three agree. **It is not configurable.** It used to be, through
-`EIDOLON_COORDINATOR_PORT`, and that variable is gone: nothing else in the plugin could
-follow it. `eidolon plugins service start` awaits readiness on the port this plugin
-*declares* and terminates the process when it does not answer, so a monitor listening
-on a port of its own choosing was killed fifteen seconds after a healthy start. A knob
-that destroys the service it configures is worse than no knob.
+**Nothing.** There is no monitor, no port, no token file and no service to approve or
+start. The process that used to watch adopted workers on `127.0.0.1:8095` is retired,
+and the reason is worth keeping: it was the second store of a word that belongs to the
+session. Rank is now `rank:<word>` in the ranked session's own tags, written through the
+harness's tag door (`swarm_call("tag", …)`), so the only store is the session's, the
+harness keeps it beside the session's log, and it survives a resume without anyone
+reasserting it.
 
-Two consequences worth knowing:
+What is left runs inside a session, as plugin tools and two lifecycle handlers:
 
-- **One coordinator per host, by construction.** A second monitor cannot bind 8095 and
-  exits naming the port. That is the design, not an accident of a literal.
-- **A fixture needs 8095 free.** If a coordinator is running on this host, run the
-  fixtures inside a private network namespace, where 8095 is nobody's until the fixture
-  takes it: `unshare -rn sh -c 'ip link set lo up; HOME=… bash tests/coordinator/run.sh'`
-  (with the same `HOME`/`XDG_*` variables as below). `ack-failure.sh` is the exception —
-  its subject is a store the process must *fail* to write, and a user namespace maps you
-  to uid 0, which writes into a read-only directory regardless. Run that one on a host
-  with a free 8095 and no namespace.
+- `adopt`, `release`, `adoptions`, `notices`, `start`, `cancel` — the ledger, the watch
+  list, and the custody doors a managed start goes through.
+- `rank`, `unrank`, `ranks` — a tag on a session, and a roster read.
+- `hook_ready`, `hook_peer` — the lifecycle handlers. `hook_ready` reconciles the watch
+  list against the roster; **it no longer reasserts a rank**, because a tag does not need
+  reasserting. `hook_peer` produces one notice per observed halt.
 
 ## Prerequisites
 
-- eidolon with the plugin runtime and the structured roster, and `eidolon` on `PATH`.
+- eidolon with the plugin runtime, the structured roster and **the tag door**
+  (`swarm_call("tag")`). Without it the rank tools refuse and say so; nothing else in
+  the plugin needs it.
 - `eidolon chat` with the generic `--system-append <path>` flag, if any start names a
   rank. A harness without it fails a ranked launch rather than starting the session
   without the rank text (see **Rank blocks**).
-- Rust (or Nix) to build the monitor.
+- No Rust toolchain: there is no crate here to build any more.
 
 ## Install
 
 ```bash
 eidolon plugins install <owner>/<repo> coordinator
-nix build .#coordinator            # or: cargo build -p eidolon-coordinator
 eidolon plugins trust coordinator
-for v in adopt release adoptions notices start; do
-    eidolon plugins grant "coordinator_$v" file:~/.config/eidolon/coordinator.token
-done
-eidolon plugins service approve coordinator
-eidolon plugins service start coordinator
 ```
 
-`trust` vouches the verbs and `grant` records the credential each of them spends.
-`service approve` records the operator's yes against the service declaration by
-hash, so editing `plugin.rn` asks again; the monitor makes
-`~/.config/eidolon/coordinator.token` (0600) on first run.
+`trust` vouches the verbs. There is **no `grant`** and no `service approve`/`service
+start`: no tool spends a credential or dials an endpoint, so there is nothing to grant
+and nothing to start. An older install of this plugin may still carry
+`~/.config/eidolon/coordinator.token` and a policy grant naming it; both are inert now
+and are removed in **Uninstall** below.
 
 ## Verify
 
 ```bash
-eidolon plugins service status coordinator          # the /health probe
-t=$(mktemp -d)
-HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
-  bash tests/coordinator/run.sh                     # the fixture: 53 checks
-HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
-  bash tests/coordinator/ack-failure.sh             # the process stops when it cannot write: 8 checks
-python3 tests/coordinator/rank-launch.py target/debug/eidolon-coordinator
-                                                    # the ranked launch and its binding: 6 checks
-cargo test -p eidolon-coordinator                   # the monitor's own 103 (one ignored fixture entry)
+eidolon plugins --dir <checkout>        # the plugin lists; every tool's manifest reads
+python3 tests/coordinator/lifecycle-copies.py --check   # 123 copied functions across 8 handlers
+bash tests/coordinator/lifecycle-shape.sh               # the library's own policy
+bash tests/coordinator/lifecycle-drift.sh
 ```
 
-The fixture drives the real monitor against a stand-in harness — the fixed port above,
-its own state root, a fake `eidolon` answering `peers --json` and `send --json` — and
-then checks that the shipped tools refuse, naming what is missing, against the real
-harness. It proves the plumbing, not the harness.
+The old `run.sh` and the monitor fixtures that went with it (`ack-failure.sh`,
+`roster-failure.sh`, `live-rune-path.sh`, `live-rune-start.sh`, `rank-launch.py`,
+`rank-prefix.py`, `managed-start.py`, `managed-cancel.py`) measured the monitor's
+behaviour, which no longer exists; they are removed with it rather than left red. The
+rank tools' *runtime* behaviour is witnessed against a harness carrying the tag door —
+the fixture for it lands with that witness, and until then a green listing proves the
+manifests compile and nothing more.
 
 ## Uninstall
 
 ```bash
-eidolon plugins service stop coordinator
 eidolon plugins uninstall coordinator
-rm -f ~/.config/eidolon/coordinator.token
-rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/eidolon/coordinator"
+rm -f ~/.config/eidolon/coordinator.token          # inert if an older install made one
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/eidolon/coordinator"   # the retired monitor's store
 ```
 
-The state directory holds the adoption records and the notices; deleting it is what
-ends them, and there is nothing else to clean up.
+The state directory is the retired monitor's and nothing reads it: deleting it is what
+ends the old adoption records, and no rank lives there. A rank lives in the ranked
+session's own tags, beside that session's log — uninstall this plugin and the words it
+set stay where they were put, because they were never the plugin's to keep.
 
 The rank blocks live inside the plugin folder (`ranks/`), because that folder is the
 plugin directory. `eidolon plugins uninstall` removes it, so copy any block you wrote
