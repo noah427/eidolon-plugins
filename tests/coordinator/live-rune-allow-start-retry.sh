@@ -309,9 +309,17 @@ check "Q2 the child's log holds exactly one copy of the brief" "$count_now" "1"
 say "     (the at-socket snapshot was taken but is not used as evidence: it races the repeat)"
 case "$(printf '%s' "$first_answer" | sed -n 's/.*\(brief delivery is unconfirmed\).*/unconfirmed/p')" in
     unconfirmed)
-        say "     situation: the first ask answered \`Unknown\` — no durable acceptance and no evidence of"
-        say "     absence — so on the door's own account the first send journaled nothing and the single"
-        say "     copy in the log is the repeat's. Nothing was duplicated; the key was already persisted."
+        # The clause this used to lean on — "no durable acceptance and no evidence of absence" — is
+        # the door declining to say whether anything was journaled. It is compatible with either
+        # situation, so it cannot be the evidence for one of them. What carries the conclusion is the
+        # rest of the same sentence: a connect-time failure, so nothing ever reached a log.
+        say "     situation: the first ask answered \`Unknown\`. What supports \"the first send journaled"
+        say "     nothing\" is the rest of that same sentence — \`connecting to …/sock: No such file or"
+        say "     directory (os error 2)\`, a **connect-time** failure, so the send never left the process"
+        say "     and no log could have been written to. \`no durable acceptance and no evidence of"
+        say "     absence\` is the door declining to say whether anything landed, and is not evidence that"
+        say "     nothing did. The single copy in the log is the repeat's; nothing was duplicated and the"
+        say "     key was already persisted."
         ;;
     *)
         say "     situation: not established from a typed answer; see the finding"
