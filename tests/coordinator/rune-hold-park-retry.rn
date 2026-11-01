@@ -1,0 +1,107 @@
+// tests/coordinator/rune-hold-park-retry.rn — contract witness 2: the retry after a holder's death,
+// from **the same session's resumed log**.
+//
+// `live-rune-holder-death.sh` already shows that a *different* session presenting the same operation
+// gets a fresh admission, because `claim_launch` skips every record whose `request.caller` is not the
+// caller and the custody rows live in the holder's own journal. The lane's other sentence — "a retry
+// after that death is a refusal that claims nothing" — is about a retry from the **same** session, and
+// nothing had run it. This workflow is the shape that can: it holds the child, then **parks**, which is
+// where the holder stops being alive; the run exits parked, the held child's channel closes and it
+// aborts; and `workflow resume` on that same log re-enters here, past the park, to issue the retry.
+//
+// Steps 1 is memoized by the run's own step id, so the resume **replays** the hold rather than firing a
+// second one: the only new act in the resumed pass is the retry. That is what makes the second pass a
+// test of the retry and not of a re-hold.
+//
+// Everything asserted by the driver comes from a record: the child from the child's own
+// `managed-start/v1` receipt, the state from `custody_inspect`, the ledger from the plugin's rows, the
+// number of custody rows from the renderer's own lines. The tool's sentences are checked for what they
+// say and nothing more.
+
+pub fn workflow() {
+    #{
+        name: "rune-hold-park-retry",
+        description: "Hold one child, park (the holder exits here), then — resumed in the same session's log — retry the same operation through the public coordinator_start and read both records back. args: {operation, workspace, model, brief}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation id, which the retry repeats byte for byte" },
+                "workspace": #{ "type": "string", "description": "An existing directory for the child" },
+                "model": #{ "type": "string", "description": "The child's model key" },
+                "brief": #{ "type": "string", "description": "The assignment the release would journal" },
+            },
+            "required": ["operation", "workspace", "model", "brief"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-hold-park-retry needs \`${key}\``),
+    }
+}
+
+fn field_of(raw, key) {
+    match json::from_string(`${raw}`) {
+        Ok(v) => {
+            match v.get(key) {
+                Some(x) => `${x}`,
+                None => "",
+            }
+        }
+        Err(_) => "",
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    let out = "";
+
+    // ---- step 1: the hold. Memoized, so the resumed pass replays it and holds nothing ----
+    let child = "";
+    match eidolon::tool_call("coordinator_hold_only", #{
+        "operation": operation, "workspace": workspace, "model": model, "brief": brief,
+    }).await {
+        Ok(t) => {
+            child = field_of(t, "session");
+            out += `H1-HELD: ${t}\n`;
+        }
+        Err(e) => return Ok(`${out}H1-HELD-ERR: ${e}\n`),
+    }
+    if child == "" || child == "null" {
+        return Ok(`${out}H1-NO-CHILD: the hold answered no session, so there is nothing whose death to witness\n`);
+    }
+
+    // ---- step 2: the park, and the whole point of this file ----
+    //
+    // On the parking pass this never resolves: the run token is pulled down and the interpreter
+    // drops at the await, so the process exits — which is the holder's death. On the resume the
+    // recorded answer returns and the program goes on to the retry.
+    let answer = eidolon::park("holder-death fixture: the holder exits at this park; resume this same session's log to retry the operation").await?;
+    out += `H2-ANSWER: ${answer}\n`;
+
+    // ---- step 3: the retry, from this session and this log, through the public tool ----
+    match eidolon::tool_call("coordinator_start", #{
+        "operation": operation, "workspace": workspace, "model": model, "brief": brief,
+    }).await {
+        Ok(t) => out += `R1-OK: ${t}\n`,
+        Err(e) => out += `R1-ERR: ${e}\n`,
+    }
+
+    // ---- step 4 and 5: what the two records say afterwards ----
+    match eidolon::tool_call("coordinator_dump_record", #{ "operation": operation }).await {
+        Ok(t) => out += `R2-RECORD: ${t}\n`,
+        Err(e) => out += `R2-RECORD-ERR: ${e}\n`,
+    }
+    match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => out += `R3-ROWS: ${t}\n`,
+        Err(e) => out += `R3-ROWS-ERR: ${e}\n`,
+    }
+
+    Ok(out)
+}
