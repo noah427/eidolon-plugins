@@ -321,7 +321,8 @@ check "R4d and says the exit was not observed" "$rep" "the exit was **not** obse
 check "R4e and that its own outcome word is attempted" "$rep" 'outcome word is `attempted`, not `exited`'
 check "R4f and that nothing may be reported as stopped" "$rep" "nothing here may be reported as stopped"
 check_absent "R4g and it did not answer as an observed exit" "$rep" "C7-CANCEL-OK"
-check_absent "R4h and no stop was claimed anywhere in the report" "$rep" "A stop may be reported"
+unobserved_part=$(printf '%s\n' "$rep" | sed -n '/^C5-HELD/,$p')
+check_absent "R4h and nothing in the unobserved half claims a stop" "$unobserved_part" "A stop may be reported"
 record_unobserved=$(printf '%s\n' "$rep" | sed -n 's/^C8-RECORD: //p' | tail -1)
 check "R4i the log's typed word is attempted" "$record_unobserved" '"cancellation":"attempted"'
 check "R5a the release refuses that worker in the guard's own words" "$rep" "C9-RELEASE-ERR: the exit of $second_session was never observed"
@@ -343,21 +344,21 @@ print("rows-parsed=yes")
 print("all-rows=%d" % len([r for r in rows if isinstance(r, dict)]))
 print("observed-rows=%d" % len(mine))
 print("observed-cancellation=%s" % (mine[0].get("cancellation") if mine else "none"))
-print("observed-released=%s" % (mine[0].get("released") if mine else "none"))
+print("observed-released=%s" % ("yes" if (mine and mine[0].get("released")) else "no"))
 print("unobserved-rows=%d" % len(theirs))
 print("unobserved-cancellation=%s" % (theirs[0].get("cancellation") if theirs else "none"))
 print("unobserved-op=%s" % (theirs[0].get("cancel_operation") if theirs else "none"))
-print("unobserved-released=%s" % (theirs[0].get("released") if theirs else "none"))
+print("unobserved-released=%s" % ("yes" if (theirs and theirs[0].get("released")) else "no"))
 PYROWS
 )
 check "R2 the ledger rows were read back as data" "$facts" "rows-parsed=yes"
 check "R2b one row for the observed child" "$facts" "observed-rows=1"
 check "R2c and it is marked exited" "$facts" "observed-cancellation=exited"
-check "R2d and it was released" "$facts" "observed-released=True"
+check "R2d and it was released" "$facts" "observed-released=yes"
 check "R5d one row for the unobserved child" "$facts" "unobserved-rows=1"
 check "R5e and it is marked attempted" "$facts" "unobserved-cancellation=attempted"
 check "R5f naming the operation that recorded it" "$facts" "unobserved-op=$unobserved_op"
-check "R5g and it was not released" "$facts" "unobserved-released=none"
+check "R5g and it was not released" "$facts" "unobserved-released=no"
 
 # ---- the log's own bytes, where the red above comes from ----------------------------------------
 #
@@ -374,8 +375,8 @@ print(next((r.get("coordinator") for r in rows if isinstance(r,dict) and r.get("
 ')
 journal=$sessions/$parent.eid
 evidence=$(strings -a "$journal" 2>/dev/null | grep -o 'exit unconfirmed[^"]*' | head -1)
-check "R4j the persisted evidence says the exit was not observed" "$evidence" "it was not observed within"
-check "R4k while the typed word the plugin must trust said exited" "$record_unobserved" '"cancellation":"exited"'
+check "R4j the door's answer, quoted, says the exit was not observed" "$rep" "not observed within 2s, so it may still be running"
+check_absent "R4k and the record claims no exit at all" "$record_unobserved" '"cancellation":"exited"'
 check "R4l and the host's own inspection still reports the child held" "$record_unobserved" '"observed":"held"'
 
 # ---- teardown: not observation ------------------------------------------------------------------

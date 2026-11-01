@@ -109,7 +109,16 @@ pub async fn call(input) {
         // The epoch the refusal sentence states, from the log while core still carries the field and
         // from this ledger afterwards — the same treatment `adoptions.rn` gives a start row, because
         // a reader who is told which row to retry wants to know *which* one.
-        let epoch = epoch_and_source(worker, view).await?;
+        //
+        // **No `?` here.** `epoch_and_source` answers a map, not a `Result` — the same shape
+        // `start_epoch_and_source` has in `adoptions.rn` — and a `?` on it is a Rune runtime error
+        // ("Type `::std::object::Object` is not supported as try operand"), not a compilation
+        // failure. This branch could not run at all until core stopped recording an unobserved exit
+        // as `exited` (2026-10-31, core `537d999`), so the mistake was invisible while it was
+        // unreachable; this fixture's first run of the branch is what found it. `epoch_and_source`
+        // is total for the same reason: a sentence built while reporting a refusal must not replace
+        // it with a second failure.
+        let epoch = epoch_and_source(worker, view).await;
         // Assembled in a fragment of its own: a template string that is itself interpolated into
         // another one is where the vocabulary traps live (see the lane's vocabulary note).
         let kept = "";
@@ -142,10 +151,16 @@ pub async fn call(input) {
 async fn epoch_and_source(worker, view) {
     let ledger = #{};
     if worker != "" {
-        let loaded = load_store().await?;
-        match lifecycle_find_adoption(store_list(loaded.store, "adoptions"), worker) {
-            Some(r) => ledger = r,
-            None => {}
+        // An unreadable ledger leaves the epoch to the log or to "not stated"; it does not turn a
+        // cancellation refusal into a different error, and this function therefore never fails.
+        match load_store().await {
+            Ok(loaded) => {
+                match lifecycle_find_adoption(store_list(loaded.store, "adoptions"), worker) {
+                    Some(r) => ledger = r,
+                    None => {}
+                }
+            }
+            Err(_) => {}
         }
     }
     lifecycle_epoch_source(view, ledger)
