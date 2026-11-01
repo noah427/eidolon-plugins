@@ -9,8 +9,13 @@
 // code — and cancels it.
 //
 // Two operations, in one session, because the holder is the session: the first child is cancelled
-// and observed; the second is stopped by the fixture while the workflow is between calls, so the
+// and observed; the second is stopped by the fixture before the cancel is issued, so the
 // cancellation's exit cannot be observed and the door answers the other way.
+//
+// The stop is not a race. The workflow does not cancel the second child until the fixture's watcher
+// has published its own marker saying it read a pid, checked it, stopped it and read the stop back
+// — `coordinator_wait_for_stop` is that wait. Without it, a green line would be green for whichever
+// of two processes happened to run first.
 //
 // Then both records and both ledger rows are dumped, so the claims are checked against the log's
 // typed fields and the ledger's own bytes rather than against the plugin's prose.
@@ -18,17 +23,18 @@
 pub fn workflow() {
     #{
         name: "rune-cancel-rows",
-        description: "Hold two children, adopt them, cancel one that exits and one whose exit cannot be observed, then read both records and the ledger. args: {observed_op, unobserved_op, workspace, model}",
+        description: "Hold two children, adopt them, cancel one that exits and one whose exit cannot be observed, then read both records and the ledger. args: {observed_op, unobserved_op, stop_marker, workspace, model}",
         approval: "mutating",
         params: #{
             "type": "object",
             "properties": #{
                 "observed_op": #{ "type": "string", "description": "Operation for the child whose exit is observed" },
                 "unobserved_op": #{ "type": "string", "description": "Operation for the child the fixture stops before the cancel" },
+                "stop_marker": #{ "type": "string", "description": "The fixture watcher's marker file, absolute; the workflow does not cancel the second child until it exists" },
                 "workspace": #{ "type": "string", "description": "An existing directory for the children" },
                 "model": #{ "type": "string", "description": "The children's model key" },
             },
-            "required": ["observed_op", "unobserved_op", "workspace", "model"],
+            "required": ["observed_op", "unobserved_op", "stop_marker", "workspace", "model"],
         },
     }
 }
@@ -57,6 +63,7 @@ fn session_of(answer) {
 pub async fn run(args) {
     let observed_op = needed(args, "observed_op")?;
     let unobserved_op = needed(args, "unobserved_op")?;
+    let stop_marker = needed(args, "stop_marker")?;
     let workspace = needed(args, "workspace")?;
     let model = needed(args, "model")?;
     let out = "";
@@ -111,8 +118,16 @@ pub async fn run(args) {
             Err(e) => out += `C6-ADOPT-ERR: ${e}\n`,
         }
     }
-    // The fixture's own watcher stops this child here: it waits for the held marker in the child's
-    // journal and then signals it, so the cancel below finds a child that cannot exit.
+    // The fixture's watcher stops this child, and this waits for the watcher's own word before the
+    // cancel is issued: `Held` is journaled before the child reports it to the parent, so the pid is
+    // already written down by the time the hold answers, and the watcher is polling from before the
+    // run starts. A refusal here is not a reason to cancel anyway — an exit observed after a
+    // cancelling nobody arranged would be the wrong witness, so the error is carried into the
+    // report and the driver fails on it.
+    match eidolon::tool_call("coordinator_wait_for_stop", #{ "path": stop_marker }).await {
+        Ok(t) => out += `C6b-STOPPED: ${t}\n`,
+        Err(e) => out += `C6b-STOP-ERR: ${e}\n`,
+    }
     match eidolon::tool_call("coordinator_cancel", #{ "operation": unobserved_op, "reason": "the fixture asks the stopped child to stop" }).await {
         Ok(t) => out += `C7-CANCEL-OK: ${t}\n`,
         Err(e) => out += `C7-CANCEL-ERR: ${e}\n`,

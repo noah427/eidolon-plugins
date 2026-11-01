@@ -1,0 +1,95 @@
+// Test fixture only: wait until the fixture's watcher has said that it stopped a child. Not shipped.
+//
+// WHY THIS EXISTS. Row 20a `unobserved` needs the *fixture* to stop a held child before the
+// plugin's `coordinator_cancel` runs, so the cancel finds a child that cannot exit inside
+// `CANCEL_EXIT_WAIT` and the log records `attempted`. Two orders are possible and only one of them
+// is a witness:
+//
+//   the cancel races the watcher -> whichever wins is luck. When the cancel wins, the child exits
+//   cleanly and the run goes red at a check that cannot say whether the plugin is wrong or the
+//   fixture was slow. When the *watcher* wins, the run is green — but green for a reason nobody
+//   controlled, and a green line whose cause is timing is not evidence.
+//
+//   the workflow waits for the watcher's own word -> the stop has happened before the cancel is
+//   issued, every time. This file is that wait.
+//
+// The watcher writes its marker only after it has read the pid from the child's own held receipt
+// (`managed-start/v1`, journaled with the child's pid before it reports held to the parent),
+// checked `/proc/<pid>/cmdline` against the pinned binary and the operation, sent `SIGSTOP`, and
+// read `/proc/<pid>/stat` back as `T`. So a marker is a fact about a stopped child, not an
+// intention to stop one.
+//
+// Rune on this host exposes no sleep, so this is a bounded busy poll rather than a timed wait. The
+// bound is a parameter: the caller chooses how long to wait, and a timeout is a loud refusal that
+// names what it was waiting for, never a silent fall-through to the cancel.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_wait_for_stop",
+        description: "Test fixture: wait (bounded) until the fixture's watcher has stopped the held child, and answer the watcher's marker. Refuses loudly on timeout.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "path": #{ "type": "string", "description": "The watcher's marker file, absolute." },
+                "tries": #{ "type": "number", "description": "How many reads to attempt before refusing. Default 1000000." },
+            },
+            "required": ["path"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let path = match text_of(input.get("path")) {
+        Some(s) => s,
+        None => return Err("coordinator_wait_for_stop needs `path`"),
+    };
+    let tries = match number_of(input.get("tries")) {
+        Some(n) => n,
+        None => 1000000,
+    };
+    let n = 0;
+    let last = "";
+    while n < tries {
+        n += 1;
+        // A fresh string each iteration: `fs_read` takes its path by value, and a loop that hands
+        // it the same binding twice is taking a value that has already been moved (Rune answers
+        // "Cannot take, value is M-…"). The bound is what ends this, so the copy is not waste.
+        match eidolon::fs_read(`${path}`, None, None).await {
+            Ok(t) => return Ok(`watcher marker: ${t}`),
+            Err(e) => last = `${e}`,
+        }
+    }
+    Err(`coordinator_wait_for_stop gave up after ${n} reads of \`${path}\`: the fixture's watcher never said it stopped the child, so \`coordinator_cancel\` must not be called — an exit observed here would be an exit nobody arranged. Last read error: ${last}`)
+}
+
+fn text_of(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            if s == "null" || s == "" {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        None => None,
+    }
+}
+
+fn number_of(v) {
+    match v {
+        Some(x) => {
+            let s = `${x}`;
+            if s == "null" || s == "" {
+                None
+            } else {
+                match json::from_string(s) {
+                    Ok(n) => Some(n),
+                    Err(_) => None,
+                }
+            }
+        }
+        None => None,
+    }
+}
