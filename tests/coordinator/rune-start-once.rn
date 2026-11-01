@@ -1,0 +1,52 @@
+// tests/coordinator/rune-start-once.rn — one `coordinator_start`, and the answer verbatim.
+// Copied into the disposable config by `tests/coordinator/live-rune-holder-death.sh`; not shipped.
+//
+// The second session of the holder-death witness runs this with **byte-identical arguments** to the
+// first session's hold. It is the shipped tool, unmodified: whatever it answers is the tree's answer,
+// and the fixture's job is to say which answer it got rather than to expect one.
+
+pub fn workflow() {
+    #{
+        name: "rune-start-once",
+        description: "Call the shipped coordinator_start once and answer what it said. args: {operation, workspace, model, brief}",
+        approval: "mutating",
+        params: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The same operation id the first session held" },
+                "workspace": #{ "type": "string", "description": "The same workspace" },
+                "model": #{ "type": "string", "description": "The same model key" },
+                "brief": #{ "type": "string", "description": "The same brief bytes" },
+            },
+            "required": ["operation", "workspace", "model", "brief"],
+        },
+    }
+}
+
+fn needed(args, key) {
+    match args.get(key) {
+        Some(v) => Ok(`${v}`),
+        None => Err(`rune-start-once needs \`${key}\``),
+    }
+}
+
+pub async fn run(args) {
+    let operation = needed(args, "operation")?;
+    let workspace = needed(args, "workspace")?;
+    let model = needed(args, "model")?;
+    let brief = needed(args, "brief")?;
+    let out = "";
+    match eidolon::tool_call("coordinator_start", #{
+        "operation": operation, "workspace": workspace, "model": model, "brief": brief,
+    }).await {
+        Ok(t) => out += `B-START-OK: ${t}\n`,
+        Err(e) => out += `B-START-ERR: ${e}\n`,
+    }
+    // The ledger after the retry, as data: whether the first attempt's row is still here and whether
+    // a second one appeared are facts the fixture does not infer from the sentence above.
+    match eidolon::tool_call("coordinator_dump_rows", #{}).await {
+        Ok(t) => out += `B-ROWS: ${t}\n`,
+        Err(e) => out += `B-ROWS-ERR: ${e}\n`,
+    }
+    Ok(out)
+}
