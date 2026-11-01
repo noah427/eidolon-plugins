@@ -19,9 +19,15 @@
 #     new one. That is why the checks below assert the facts of what happened instead of the
 #     expectation, and why the last section says plainly which shape this is.
 #
-# Both runs use the same fixture HOME, so the plugin's ledger (which is the plugin's, not a
-# session's) is shared between them — that is the whole point: the second attempt can see the first
-# attempt's row even though it cannot see the first session's custody log.
+# Both runs use the same fixture HOME — but the plugin's ledger is **not** shared between them. Plugin
+# state is keyed `(plugin, session, key)` (`crates/rune/src/host.rs`, `plugin_state::read`), which on
+# disk is `plugin-state/coordinator/<session>/store.json`: each session writes a store of its own and
+# neither can read the other's rows. An earlier version of this comment said the ledger was the
+# plugin's and shared, and no check here could tell the difference — session one holds only, so it
+# writes no row at all, and `rows=1 / first-rows=0` is the same answer under either keying. The
+# consequence for the question below is that a cross-session disagreement between a ledger row and a
+# custody log cannot be produced this way at all; the `conflict` branch and that disposition live in
+# `live-rune-start-conflict.sh`.
 #
 # Local only: nothing installed, no operator config, no monitor, no compositor. The harness is the
 # binary in EIDOLON_BIN and never PATH's — a refusal to find it is a SKIP (3).
