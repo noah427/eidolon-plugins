@@ -1,0 +1,30 @@
+// Test fixture only: core's custody record for one operation, as data. Not shipped.
+//
+// `coordinator_cancel` reads the record's typed `cancellation` word and reports it in prose, and a
+// witness that asserted only on that prose would be asserting on the plugin's own rendering of a
+// fact it is supposed to be reading. This returns the door's answer verbatim — `operation`, `phase`,
+// `session`, `cancellation`, `observed` — so a check can ask the log itself, the way `dump_rows`
+// asks the ledger.
+
+pub fn manifest() {
+    #{
+        name: "coordinator_dump_record",
+        description: "Test fixture: core's custody record for one operation, as JSON. Reads the door and returns what it answered.",
+        approval: "read_only",
+        input_schema: #{
+            "type": "object",
+            "properties": #{
+                "operation": #{ "type": "string", "description": "The operation to ask about." },
+            },
+            "required": ["operation"],
+        },
+    }
+}
+
+pub async fn call(input) {
+    let operation = match input.get("operation") {
+        Some(v) => `${v}`,
+        None => return Err("coordinator_dump_record needs `operation`"),
+    };
+    eidolon::custody_inspect(#{ "operation": operation }).await
+}

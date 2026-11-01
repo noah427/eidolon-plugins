@@ -78,6 +78,24 @@ MANIFEST = {
         "lifecycle_released",
         "lifecycle_null",
     ],
+    # The start port: it writes the ledger row itself, before core's release, so it carries the
+    # store's readers, the two finders (its own row by operation, then any row by worker), and the
+    # epoch readers the refusal sentences quote.
+    "start.rn": [
+        "lifecycle_stated",
+        "lifecycle_true",
+        "lifecycle_epoch_word",
+        "lifecycle_store_empty",
+        "lifecycle_store_list",
+        "lifecycle_store_put",
+        "lifecycle_live_adoptions",
+        "lifecycle_find_adoption",
+        "lifecycle_find_any",
+        "lifecycle_text",
+        "lifecycle_number",
+        "lifecycle_released",
+        "lifecycle_null",
+    ],
     "hook_peer.rn": [
         "lifecycle_blind",
         "lifecycle_notice_id",

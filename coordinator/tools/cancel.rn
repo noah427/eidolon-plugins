@@ -2,8 +2,9 @@
 //
 // The architecture cut (operator ruling 2026-10-29) gives core the generic half: `eidolon::
 // custody_cancel` writes the cancellation intent durably and asks the OS half that owns the
-// child for its exit. This plugin no longer dials the monitor for it (`start.rn` still does; the
-// start port is blocked on `prepare`/`release_barrier`), and it can see no pid, no descriptor
+// child for its exit. This plugin dials no monitor for it, and `start.rn` no longer dials one
+// either — its port onto the held door and the release is done, so nothing in this plugin calls a
+// service — and it can see no pid, no descriptor
 // and no path — only the two answers below.
 //
 // The rule this file exists to keep: **a stop is reported only when the log says the exit was
