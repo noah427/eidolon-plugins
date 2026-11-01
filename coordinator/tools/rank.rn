@@ -1,20 +1,32 @@
-// `coordinator_rank`: assign a rank to a session, explicitly, by the durable address
-// the harness publishes for it.
+// `coordinator_rank`: give a session a rank, as **a tag the session itself carries**.
 //
-// The word becomes a **prefix on a roster row** — the harness composes it with the
-// label the session writes about itself, and the label stays editable throughout.
-// It is not a permission, a role, an adoption or a reporting line: nothing in the
-// harness reads it back, and no reader may take it for authority. What the words are
-// is this plugin's own vocabulary (`imperator`, `legatus`, `tribunus`, `centurio`,
-// `miles`); the harness has no rank enum, no rank journal record and no rank flag.
+// There is no ledger behind this and no service in front of it. The word becomes
+// `rank:<word>` among the ranked session's own tags — stored by the harness, shown on
+// its roster row, and durable because the harness keeps a session's authored tags
+// beside the session's log — while the session's own label and every tag this plugin
+// did not name are left exactly as they stand.
 //
-// The assigning side is never an argument: this session's own durable address is read
-// from the roster and handed to the service as `caller`, so a model cannot assign on
-// somebody else's behalf.
+// The replacement is a **family** replacement, not a remove-and-add: every tag
+// beginning `rank:` goes and the new one arrives in the same act, so two coordinators
+// assigning at once leave one rank standing rather than two. That is why the call
+// carries a prefix at all, and it is the one place this tool's vocabulary reaches the
+// harness — as a literal string the harness matches and attaches no meaning to.
+//
+// It is presentation and nothing else: no permission, no role, no adoption, no
+// reporting line, and no reader may take it for any of those. What the words are is
+// this plugin's own convention (`ranks/`); the harness has no rank enum, no rank
+// journal record and no rank flag.
+//
+// The assigning side is not an argument, and it is not recorded: a rank is a tag on
+// the session it belongs to, the act is performed by that session's own process over
+// its own door, and a tag has no owner to name. A session with **no live registration
+// is refused** with that reason rather than queued: a tag belongs to a registration,
+// and durability across a resume is the record beside the log — not a pending
+// assignment for a process that is not there.
 pub fn manifest() {
     #{
         name: "coordinator_rank",
-        description: "Assign a rank to a session by its durable address: the rank becomes a presentation prefix on that session's roster row, composed by the harness with the label the session writes for itself. Presentation only — no permission, no role, no adoption, and nothing the harness reads back. The assignment is durable here (resuming a session keeps it, a new session gets none) and is reasserted against each live registration of exactly that session id; a second live row claiming the address, or a decoration another owner already attached, is reported rather than taken over.",
+        description: "Give a session a rank: `rank:<word>` joins that session's own tags, replacing any rank tag it already carried and leaving its label and every other tag untouched. Presentation only — no permission, no role, no adoption, nothing the harness reads back. The tag is durable and survives the session's resume. A session with no live registration is refused, because a tag belongs to a registration.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
@@ -51,92 +63,49 @@ pub async fn call(input) {
         Some(e) => return Err(e),
         None => {}
     }
-    let caller = my_address().await?;
-    call_service("rank", #{
-        "caller": caller,
+    // Lowercased because a tag is one word and the convention spells it lower; the
+    // *vocabulary* is not widened by an argument, so an unknown word is refused rather
+    // than stored as a tag nobody reads.
+    let word = rank.trim().to_lowercase();
+    if !is_rank(word) {
+        return Err(`\`${rank}\` is not one of this plugin's ranks: imperator, legatus, tribunus, centurio, miles. The vocabulary lives in this plugin (\`ranks/\`) and an argument does not add to it`);
+    }
+    let said = match eidolon::swarm_call("tag", #{
         "session": session,
-        "rank": rank,
+        "set": `rank:${word}`,
+        "remove_prefix": "rank:",
     })
-    .await
-}
-
-// Everything below is the same in every coordinator_*.rn: upstream eidolon
-// compiles each tool file on its own, and a tool file is meant to be handed over
-// whole.
-
-// This session's own durable address, as the harness publishes it. There is no
-// other source for it in this file: not an argument, not an environment
-// variable, not a name somebody typed.
-async fn my_address() {
-    let raw = match eidolon::swarm_call("roster", #{}).await {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}`)),
+        .await
+    {
+        Ok(v) => `${v}`,
+        Err(e) => return Err(`the rank was not set: ${e}`),
     };
-    let roster = match json::from_string(raw) {
-        Ok(v) => v,
-        Err(e) => return Err(no_roster(`${e}; \`swarm_call("roster")\` answered: ${raw}`)),
-    };
-    let me = match my_row(roster) {
-        Some(r) => r,
-        None => {
-            return Err(no_roster(
-                "the roster carries no row for this session: `me` is null or absent, and nothing else in it marks which row is the caller — so this plugin cannot tell which address is the one it would adopt from",
-            ))
-        }
-    };
-    match me.get("session") {
-        Some(s) => {
-            let addr = `${s}`;
-            if addr == "" || addr == "null" {
-                return Err(no_roster(
-                    "this session has no durable address: the roster publishes `session` as null, and null means not established — not no-such-session. The harness has not minted an id into a log yet, and an adoption is keyed on that address, so none can be made until it exists",
-                ))
-            }
-            Ok(addr)
-        }
-        None => Err(no_roster("this session's own row carries no `session` field at all")),
-    }
+    `${said}. The session's own label and every tag outside \`rank:\` are untouched; a reader of \`eidolon peers\` sees the tag, not a decoration, and it outlives a resume`
 }
 
-// This session's own row: a `me` object beside the list, or the one row that
-// marks itself. Either shape is the harness's to choose; neither existing is a
-// refusal, never a guess from the first row and never a name.
-fn my_row(roster) {
-    if roster is Object {
-        match roster.get("me") {
-            Some(m) => {
-                // `me` is null when the caller has no registration of its own —
-                // `eidolon peers --json` is such a scan. Null is not a row.
-                if m is Object {
-                    return Some(m);
-                }
-                return None;
-            }
-            None => {}
-        }
+// One of the five words this plugin ships a block for. Not a harness enum: the harness
+// stores whatever tag it is given, and this list is the plugin's own convention.
+fn is_rank(word) {
+    if word == "imperator" {
+        return true;
     }
-    if roster is Vec {
-        for row in roster {
-            match row.get("me") {
-                Some(flag) => {
-                    if `${flag}` == "true" {
-                        return Some(row);
-                    }
-                }
-                None => {}
-            }
-        }
+    if word == "legatus" {
+        return true;
     }
-    None
+    if word == "tribunus" {
+        return true;
+    }
+    if word == "centurio" {
+        return true;
+    }
+    if word == "miles" {
+        return true;
+    }
+    false
 }
 
-// The refusal a harness without the structured roster gets, naming exactly what is
-// missing rather than degrading to something that would look like a working
-// adoption. This plugin reads session state as data: it will not parse `peers`'
-// prose, and it will not read the presence directory itself.
-fn no_roster(why) {
-    `this session has no durable seat in the roster (${why}), so an adoption cannot be recorded: it is keyed on the address the harness publishes for the adopting session, and that address is what the monitor resolves later. The plugin will not invent one — not a registration id, a name, a tag, a cwd or the first row — and will not parse \`peers\`' prose. Needed from the harness: this session's own row marked in \`swarm_call("roster", #{})\` (a \`me\` field beside the list, or \`me: true\` on the row), and a non-null \`session\`. Both asked of the core lane 2026-10-10; the field name will not change.`
-}
+// Everything below is the same in every coordinator_*.rn: upstream eidolon compiles each
+// tool file on its own, so a tool file is handed over whole.
 
 fn text_of(v) {
     match v {
@@ -153,8 +122,8 @@ fn text_of(v) {
     }
 }
 
-// A newline in an address or a name would forge a roster row or split a notice;
-// a NUL or a tab is not a thing an address has. Refused before anything is sent.
+// A newline in an address would forge a roster row or split a notice; a NUL or a tab is
+// not a thing an address has. Refused before anything is sent.
 fn refuse_control_chars(field, s) {
     if s.contains("\n") {
         return Some(`${field} contains a newline, which would forge a row rather than name a session`);
@@ -166,38 +135,4 @@ fn refuse_control_chars(field, s) {
         return Some(`${field} contains a tab`);
     }
     None
-}
-
-// The monitor service (../service). Everything that decides anything lives there,
-// so that the record and the notice have one implementation and the tools stay
-// thin doors onto it.
-fn service() {
-    #{
-        name: "coordinator",
-        base_url: "http://127.0.0.1:8095",
-        token_file: "~/.config/eidolon/coordinator.token",
-        auth: #{ header: "Authorization", prefix: "Bearer " },
-        timeout_s: 30,
-    }
-}
-
-// POST {method, args} to /call; the answer is {ok, result} or {ok: false, error}.
-async fn call_service(method, args) {
-    let body = json::to_string(#{ "method": method, "args": args })?;
-    let sent = match eidolon::api_request(service(), "POST", "/call", Some(body)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(`the coordinator monitor is not answering on 127.0.0.1:8095 — it is the process that holds the adoption records and watches the workers, and eidolon does not start it for you: \`eidolon plugins service approve coordinator\` once, then \`eidolon plugins service start coordinator\`; see the plugin's README (Prerequisites). The dial failed with: ${e}`);
-        }
-    };
-    let reply = json::from_string(sent)?;
-    if reply.status != 200 {
-        return Err(`the coordinator monitor answered ${reply.status}: ${reply.body}`);
-    }
-    let out = json::from_string(reply.body)?;
-    if out.ok {
-        Ok(out.result)
-    } else {
-        Err(out.error)
-    }
 }

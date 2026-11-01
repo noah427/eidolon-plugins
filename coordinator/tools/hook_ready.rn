@@ -2,22 +2,26 @@
 //
 // The harness calls this when a session starts or resumes, and again whenever the
 // plugin is (re)loaded. It rebuilds the watch list from this session's own durable
-// store and reasserts each stored rank's presentation prefix on the live row of
-// exactly the session it was assigned to. It is idempotent: a decoration that
-// already says what the store says is not rewritten, a worker that is gone is
-// reported as gone rather than as a failure, and a decoration another controller
-// holds is a conflict to report, never to take over.
+// store and reports each adopted worker the live roster does not carry. It is
+// idempotent: a worker that is gone is reported as gone rather than as a failure, and
+// the watch list is kept either way.
 //
-// The store is the plugin's own state, keyed by the running session's attribution:
-// the ledger's one `store` key (the watch list, which is its `adoptions` list) and
-// `ranks`, which stays a key of its own because nothing in the ledger's guarantee
-// depends on it. What this scan could not see is written into the ledger too, under
-// `blind`, because core stores a handler's `notes` nowhere.
+// **It no longer touches ranks, and that is the retirement's doing.** A rank is now a
+// tag on the ranked session (`rank:<word>`, written by `coordinator_rank`), so there is
+// nothing to reassert when a session resumes: the tag is the session's own and the
+// harness keeps it beside the session's log. The `ranks` key this handler used to read
+// was written by nothing — the service could not reach plugin state, and no tool wrote
+// it — so the branch was reading an always-empty row and painting a decoration. Both
+// are gone: the key, the branch, and the decoration.
+//
+// What is left is the plugin's own ledger, keyed by the running session's attribution:
+// one `store` key holding the watch list. What this scan could not see is written into
+// the ledger too, under `blind`, because core stores a handler's `notes` nowhere.
 
 pub fn manifest() {
     #{
         name: "coordinator_hook_ready",
-        description: "Lifecycle handler for `plugin_ready`: load the ledger's watch list and the stored ranks, reconcile the live roster against them, reapply each stored rank's decoration to the session it was assigned to when that decoration is ours or absent, report a decoration held by another owner and a session that is gone, record what this scan could not see, and return the full watch list rebuilt from the store.",
+        description: "Lifecycle handler for `plugin_ready`: load the ledger's watch list, reconcile it against the live roster, report each adopted worker the roster does not carry as gone (which is not a failure), record what this scan could not see, and return the watch list rebuilt from the store. It does not touch ranks: a rank is a tag on the ranked session now, so there is nothing to reassert.",
         approval: "mutating",
         input_schema: #{
             "type": "object",
@@ -32,69 +36,19 @@ pub async fn call(input) {
 
     let loaded = load_store().await?;
     let adoptions = lifecycle_store_list(loaded.store, "adoptions")?;
-    let ranks = load("ranks").await?;
     let watch = lifecycle_watch(adoptions);
 
-    // A roster this scan could not read is a blind scan, not a scan that saw nobody.
-    // Every stored rank is left exactly as it stands — reasserting one from an empty
-    // list would attach nothing and report nothing — and the failure is written down
-    // so the reading tools can say what this scan could not see.
+    // A roster this scan could not read is a blind scan, not a scan that saw nobody:
+    // the failure is written down, so the reading tool can say what this scan could not
+    // see, and the watch list is kept exactly as the store has it.
     let rows = [];
     match eidolon::swarm_call("roster", #{}).await {
         Ok(raw) => {
             rows = roster_rows(json::from_string(raw)?);
         }
         Err(e) => {
-            uncertain.push(`the roster could not be read (${e}), so no stored rank was reasserted on this scan, and nothing it says is a claim about any worker's state`);
+            uncertain.push(`the roster could not be read (${e}), so nothing here is a claim about any worker's state`);
             return finish(watch, notes, uncertain).await;
-        }
-    }
-
-    for assignment in ranks.rows {
-        if !(assignment is Object) {
-            notes.push("a rank row is not an object; nothing attached");
-            continue;
-        }
-        let session = lifecycle_text(assignment, "session");
-        let prefix = lifecycle_rank_prefix(assignment);
-        if session == "" {
-            notes.push("a rank row carries no session; nothing to decorate");
-            continue;
-        }
-        if prefix == "" {
-            notes.push(`${session}: rank \`${lifecycle_text(assignment, "rank")}\` has no known prefix; nothing attached`);
-            continue;
-        }
-        let claimants = claimants(rows, session);
-        if claimants.len() == 0 {
-            notes.push(`${session}: assigned ${prefix}, but no live session carries this address; nothing attached, and the assignment is kept`);
-            continue;
-        }
-        if claimants.len() > 1 {
-            notes.push(`${session}: ${claimants.len()} live sessions claim this address; refusing to guess which one carries ${prefix}`);
-            continue;
-        }
-        let row = claimants[0];
-        let action = lifecycle_decoration_action(row.get("decoration"), prefix);
-        if action == "conflict" {
-            let owner = "";
-            match row.get("decoration") {
-                Some(d) => {
-                    if d is Object {
-                        owner = lifecycle_text(d, "controller");
-                    }
-                }
-                None => {}
-            }
-            notes.push(`${session}: another controller (${owner}) already holds the decoration; not taking it over, so ${prefix} is not attached`);
-            continue;
-        }
-        if action == "none" {
-            continue;
-        }
-        match eidolon::swarm_call("decorate", #{ "text": prefix, "controller": "coordinator", "expected": session }).await {
-            Ok(_) => notes.push(`${session}: decoration ${prefix} attached`),
-            Err(e) => notes.push(`${session}: decoration refused: ${e}`),
         }
     }
 
@@ -138,39 +92,8 @@ async fn finish(watch, notes, uncertain) {
 // of workflows, so the policy cannot be imported here. Everything from
 // `lifecycle_store_empty` down is a byte-for-byte copy of `../lib/lifecycle.rn`, which
 // is the one place it is explained; `tests/coordinator/lifecycle-drift.sh` fails if
-// the two ever disagree. `load` is here for `ranks`, which stays a key of its own:
-// nothing in the ledger's guarantee depends on it, and it changes on a different
-// rhythm. The three `store_*` helpers are this handler's own.
+// the two ever disagree. The `store_*` helpers are this handler's own.
 
-async fn load(key) {
-    let raw = eidolon::plugin_state_read(#{ "key": key }).await?;
-    let reply = json::from_string(raw)?;
-    let revision = match reply.get("revision") {
-        Some(v) => v,
-        None => 0,
-    };
-    let rows = match reply.get("value") {
-        Some(v) => {
-            if v is String {
-                let parsed = json::from_string(`${v}`)?;
-                if parsed is Vec {
-                    parsed
-                } else {
-                    return Err(`the \`${key}\` row is not a JSON array; it is refused rather than repaired or overwritten`);
-                }
-            } else {
-                []
-            }
-        }
-        None => [],
-    };
-    Ok(#{ "rows": rows, "revision": revision })
-}
-
-// The ledger, as it stands on disk: the one `store` key and the revision a write has
-// to hand back. An absent key is a store with no rows, not a corrupt one; a key that
-// holds something which is not this store's object is refused rather than repaired.
-// `hook_peer.rn` carries the same two functions, with the reasoning.
 async fn load_store() {
     let raw = eidolon::plugin_state_read(#{ "key": "store" }).await?;
     let reply = json::from_string(raw)?;
@@ -282,9 +205,9 @@ fn roster_rows(roster) {
             }
             None => {}
         }
-        // `me` is published beside the list, not necessarily in it. A rank on this
-        // session is still a rank this handler owes, so the caller's own row is
-        // added when the list does not already carry it.
+        // `me` is published beside the list, not necessarily in it. The caller's own
+        // row is added when the list does not already carry it, so a watch list that
+        // names this session is reported the same way as any other adopted address.
         match roster.get("me") {
             Some(me) => {
                 if me is Object {
@@ -387,41 +310,6 @@ fn lifecycle_watch(adoptions) {
 fn lifecycle_blind(store, notes, uncertain) {
     store.insert("blind", #{ "notes": notes, "uncertain": uncertain });
     store
-}
-fn lifecycle_decoration_action(decoration, prefix) {
-    match decoration {
-        Some(d) => {
-            if !(d is Object) {
-                return "decorate";
-            }
-            let owner = lifecycle_text(d, "controller");
-            let text = lifecycle_text(d, "text");
-            if owner != "coordinator" {
-                return "conflict";
-            }
-            if text == prefix {
-                return "none";
-            }
-            "decorate"
-        }
-        None => "decorate",
-    }
-}
-fn lifecycle_rank_prefix(row) {
-    let stored = lifecycle_text(row, "prefix");
-    if stored != "" {
-        return stored;
-    }
-    lifecycle_prefix_of(lifecycle_text(row, "rank"))
-}
-fn lifecycle_prefix_of(rank) {
-    let w = rank.trim().to_lowercase();
-    if w == "imperator" { return "Imperator"; }
-    if w == "legatus" { return "Legatus"; }
-    if w == "tribunus" { return "Tribunus"; }
-    if w == "centurio" { return "Centurio"; }
-    if w == "miles" { return "Miles"; }
-    ""
 }
 fn lifecycle_payload(observation) {
     match observation.get("payload") {
