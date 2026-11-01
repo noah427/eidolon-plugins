@@ -25,8 +25,10 @@
 //
 // When the exit is not observed, supervision is retained in **this plugin's own ledger**: the
 // live adoption row for the worker carries core's word and the reason, and `coordinator_release`
-// refuses that worker until an exit is observed. The guard is the retired service's own
-// (`service/src/lib.rs:1067`), preserved at the owner this ruling gives it.
+// refuses that worker until an exit is observed. The guard is the retired service's own, kept at
+// the owner this ruling gives it; its original text is in this repository's history, in
+// `coordinator/service/src/lib.rs` (deleted at `14f1c4c`), at the line that refused release on an
+// unobserved exit.
 
 pub fn manifest() {
     #{

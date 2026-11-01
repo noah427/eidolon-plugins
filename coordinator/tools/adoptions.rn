@@ -58,7 +58,7 @@ pub async fn call(input) {
     }
 
     if unseen != "" {
-        out += `the monitor cannot see the workers: ${unseen}\nNothing below is a claim about any worker's state.\n`;
+        out += `the roster could not be read, so nothing below was checked against it: ${unseen}\nNothing below is a claim about any worker's state.\n`;
     } else if rows.len() > 0 && !addresses {
         out += "the roster publishes no `session` for any live row: a session with no log has no id to name, so no adoption can be resolved to one. Null means not established, not no-such-session.\n";
     }

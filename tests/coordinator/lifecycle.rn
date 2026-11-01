@@ -5,10 +5,10 @@
 // library in front and this program calls it directly. No harness primitive, no
 // roster, no store, no peer: every check is a function of values written here.
 //
-// The notice-id vectors are computed from the service's `notice_id` algorithm
-// (`coordinator/service/src/lib.rs`): FNV-1a 64 over the four parts, 0x1f before
-// each, lowercase 16-digit hex. The Rust tests do not print an expected id, so
-// these were computed independently from that source, not copied from a run.
+// The notice-id vectors are computed from the retired service's `notice_id` algorithm — its source
+// is in this repository's history, `coordinator/service/src/lib.rs`, deleted at `14f1c4c`: FNV-1a 64
+// over the four parts, 0x1f before each, lowercase 16-digit hex. The Rust tests do not print an
+// expected id, so these were computed independently from that source, not copied from a run.
 
 fn field(row, key) {
     match row.get(key) {

@@ -25,7 +25,6 @@ rustPlatform.buildRustPackage {
       # manifest, so each package's source has to carry all of them.
       ../browser/service
       ../godot/service
-      ../coordinator/service
       ../librewolf/service
     ];
   };

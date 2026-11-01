@@ -1,11 +1,12 @@
 # The coordinator fixtures that remain
 
 The monitor this directory used to measure is retired, and its fixtures went with it:
-`run.sh`, `ack-failure.sh`, `roster-failure.sh`, `live-rune-path.sh`, `live-rune-start.sh`,
+`ack-failure.sh`, `roster-failure.sh`, `live-rune-path.sh`, `live-rune-start.sh`,
 `rank-launch.py`, `rank-prefix.py`, `managed-start.py` and `managed-cancel.py` all built or
 dialled `eidolon-coordinator` on `127.0.0.1:8095`, with its token and its own store. None of
 that exists now — rank is a tag on the ranked session and the tools reach only plugin state
 and the custody doors — so a green run of them would have been a green run of nothing.
+`run.sh` stayed, rewritten onto the harness-only subject; it is described below.
 
 What is here still measures the plugin itself, and needs no port, no token and no service:
 

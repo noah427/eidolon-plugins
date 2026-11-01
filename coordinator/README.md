@@ -1,10 +1,11 @@
 # coordinator
 
 Explicit adoption of worker sessions by a coordinator, and one notice per observed
-halt. A coordinator session says "I adopt that session"; the monitor watches it
-from then on and sends the coordinator **one notice per observed halt**, with the
-worker's address, the name the coordinator gave it, the state, the last outcome and
-the ending record it was keyed on.
+halt. A coordinator session says "I adopt that session"; this plugin keeps that
+ledger, and its `hook_peer` lifecycle handler sends the coordinator **one notice per
+observed halt**, with the worker's address, the name the coordinator gave it, the
+state, the last outcome and the ending record it was keyed on. Nothing scans from
+outside a session: there is no monitor, no port and no service.
 
 Adoption is an act, not a label. No tag, no name and no shared directory produces
 one, and none of them routes anything: a `coordinator` tag is a string the harness
@@ -19,7 +20,7 @@ nothing about adoption gives a coordinator authority over anybody.
 | `coordinator_adopt` | `tools/adopt.rn` | adopt one worker, by durable address, as this session |
 | `coordinator_release` | `tools/release.rn` | end one adoption: monitoring stops, unsent notices are cancelled, the record stays as history |
 | `coordinator_adoptions` | `tools/adoptions.rn` | what this session has adopted, and what each worker is doing now |
-| `coordinator_notices` | `tools/notices.rn` | every notice owed to this session, and what the transport reported for each |
+| `coordinator_notices` | `tools/notices.rn` | every notice owed to this session, and whether its row is journaled or still open |
 
 The tools are thin doors onto what the harness already stores. **There is no service:**
 the monitor that used to hold adoption records and watch workers is retired, and rank is a
@@ -31,11 +32,11 @@ through, and two lifecycle handlers.
 
 `coordinator_start` takes an operation id, existing workspace, explicit model,
 optional persona and brief. The registry dispatcher admits the call; its Rune
-wrapper derives the caller from the roster, never from model input. The service
-uses the same authenticated API boundary as adoption, not a second admission
-mechanism. Token possession is transport auth, not proof of a caller's role.
-`EIDOLON_COORDINATOR_BIN` must name a harness with the enforced startup hold.
-The current child is persistent headless chat, not a desktop-visibility claim.
+wrapper derives the caller from the roster, never from model input. The door reaches
+core's custody API — the same admitted tool path as adoption, and no second admission
+mechanism — and there is no service on the other side of it: nothing here takes a
+token, and `EIDOLON_COORDINATOR_BIN`, which older installs may still set, is read by
+nothing. The child is persistent headless chat, not a desktop-visibility claim.
 
 Durable intent precedes launch; durable adoption precedes release. The brief is
 one **correlated delivery**: a key is minted once, stored on the operation before
@@ -52,25 +53,26 @@ operation re-sends under the same key, which the recipient deduplicates, and
 retrying an operation whose record is already journaled sends nothing at all.
 
 Because a record in a log starts no turn, the start path does not stop there: once
-the brief is journaled and the child is running, the monitor sends **one ordinary
+the brief is journaled and the child is running, the door sends **one ordinary
 wake** — inbox mail carrying no brief bytes and no delivery key, whose text names
 the operation and the record in the worker's own log. Its answer is kept as
 `Answered` (`delivered`/`queued` have arrived, and are never sent again;
 `failed`/`refused`/`partial` are re-attempted) or `Undeliverable`, which says the
 record is in the log and the accepted work has still not begun — repeating the
 operation re-attempts the wake and never a second brief. `delivered`/`queued` mean
-the mail is in the worker's inbox; none of these words means a turn started. After
-monitor restart, missing process/channel receipts mean Unknown, not permission to respawn.
-Monitor death closes the chat's owned stdin; the child exits at its input boundary
-and journals the closure. No automatic recovery budget, context compaction,
-retirement policy or live deployment is implied.
+the mail is in the worker's inbox; none of these words means a turn started. After a
+restart the wake's state is read back from the launch's own durable row (`WakeState`),
+and a receipt the row does not hold is Unknown — never permission to respawn. The
+child's own stdin is the thing that ends a headless run: a child whose owner goes away
+exits at its input boundary and journals the closure. No automatic recovery budget,
+context compaction, retirement policy or live deployment is implied.
 
 ### Current operational limits
 
-The registry tool derives the caller from the roster; the service authenticates
-transport, not the caller's identity. Its API must remain behind the admitted tool
-path for agent use. Starts are serialized under the store Gate and process-host
-lock: one start can delay other mutations and monitor scans while awaiting a child.
+The registry tool derives the caller from the roster; the door behind it authenticates
+transport, not the caller's identity, and the plugin's own admission is what keeps an
+agent's start on the admitted tool path. A start waits on the child it is holding: one
+start can delay the other custody acts of the same session while it awaits one.
 
 `coordinator_cancel` is narrower than termination: it closes only the private
 channel/stdin of this service instance's still-owned child, and refuses any release
@@ -135,10 +137,10 @@ the resolved system prompt before the session exists, so the harness's
 persona; it is **not** a persona rewrite (never folded into `--persona`, whose
 semantics are the persona note's), and it enforces nothing.
 
-The binding is the part that matters. When the launch is prepared the monitor reads
+The binding is the part that matters. When the launch is prepared the door reads
 the block's bytes, hashes them (SHA-256), and puts **the rank name and that digest**
 into the operation's immutable request before the intent is durably recorded. A
-caller names the rank and never the digest: a digest the monitor did not compute
+caller names the rank and never the digest: a digest the door did not compute
 from the file is refused. The block is read again immediately before the child is
 spawned, and bytes that no longer hash to the recorded digest refuse the spawn with
 `the <rank> rank block … changed after this launch was prepared`. A retry of the
@@ -158,7 +160,7 @@ editing a block after a launch was prepared, which is the case the binding exist
 and which is refused by name.
 
 `--system-append` is the core/CLI lane's flag, and it is **per subcommand**. Before
-spawning a ranked child the monitor asks the harness (`chat --help`) whether that
+spawning a ranked child the door asks the harness (`chat --help`) whether that
 subcommand carries the flag, and a harness whose `chat` does not is refused by name
 rather than started unranked:
 
@@ -177,6 +179,14 @@ in the CLI. Nothing here folds rank text into `--persona` to work around it, and
 ranked start is never reported as managed when it cannot be delivered.
 
 ## What a notice is, and what it is not
+
+**Read this as the rules the retired monitor worked out, not as a description of a
+running process.** The subject moved with the subject, not away: `hook_peer` decides
+the same things, in `lib/lifecycle.rn`, and journals the notice through
+`eidolon::notice` into this session's own log. There is no transport, no attempt count
+and no `delivered`/`queued` word on that path — a row is `journaled` or `pending`, and
+`notices.rn`'s own sentences are the authority on what each means. What follows is
+kept because the reasons still bind the handler.
 
 - **One per occurrence.** A notice is keyed on the worker, the adoption epoch and the
   harness's ending evidence. For a turn the journal settled, that is **`outcome_at`** —
@@ -200,7 +210,7 @@ ranked start is never reported as managed when it cannot be delivered.
   not published an ending yet), `0` is *established and empty* (its last ending came
   from a journaled settle), and `>= 1` is an unjournaled ending. The harness writes the
   ending word and this count together, out of one projection, so an `errored` ending
-  with `0` or with no count at all cannot come from this build: the monitor reports that
+  with `0` or with no count at all cannot come from this build: the handler reports that
   as an older writer's row and announces nothing, rather than guessing which halt it
   was. The count is an occurrence ordinal, **not an error signal** — it also covers a
   cancellation that journaled no settle — so it is `last` that names the kind. Keying on
@@ -214,11 +224,17 @@ ranked start is never reported as managed when it cannot be delivered.
   the file still holds the notice as pending, and only a restart that re-reads the file
   can say what really landed. A restart then attempts the same `notice_id` rather than
   inventing a second notice — that is the intended behaviour, and the retry-after-reload
-  half of it is what the monitor's tests show; a real process restart and retry has not
-  been run. A notice that arrived, was queued, or was partly delivered is never sent
+  half of it is what the lifecycle fixtures show; a real process restart and retry has
+  not been run. A notice that arrived, was queued, or was partly delivered is never sent
   again.
 
 ## The store itself
+
+**This is the store the monitor kept, and nothing reads it now.** It is described here
+because it is what the uninstall step deletes and because the rules below shaped the
+ledger the tools keep today; the tools' durable state is plugin state
+(`plugin_state_read`/`plugin_state_write`, one row per key, compare-and-set), not this
+file.
 
 One JSON file under `${XDG_STATE_HOME:-$HOME/.local/state}/eidolon/coordinator/`,
 replaced by writing a temporary file beside it, **flushing it to the disk**, renaming it
@@ -277,20 +293,21 @@ than only a process death. Three rules beside that:
   and never silently rebound; the adoption has to be released and made again.
 - **Two live sessions can carry one id** (files that arrived from another sessions
   directory or machine). The harness refuses that, naming both, rather than picking
-  one. The monitor surfaces that refusal verbatim as the notice's outcome (`refused`)
-  and does not retry it — the record is safe either way, because the id is stored
-  opaquely.
+  one. The handler surfaces that refusal verbatim — the row stays `pending` with the
+  log's own words, which is an open obligation and not a delivery — and it is never
+  retried as a second notice under a different id, because the id is stored opaquely.
 - **Release and offline-adoption semantics are provisional.** Ending an epoch,
   cancelling what it still owed, keeping the record as history and starting a new epoch
   on re-adoption are implemented as described above, but they are **not operator-ruled
   yet** — nor is whether an address with no live session may be adopted at all (this
   build records it and says "no live session carries this address"). Treat them as
   unfinished until they are ruled.
-- **The token is transport auth, not role auth.** The caller is bound to the adopting
-  session only because `tools/adopt.rn` reads this session's own row from the roster
-  and never from its input — a model cannot name a coordinator. A process that reads
-  the token can speak to the service directly, and the service takes the `caller` it
-  is given. What is enforceable is this plugin's door; that is what is claimed.
+- **The caller is bound to the adopting session by this plugin's own door, not by a
+  credential.** The binding holds only because `tools/adopt.rn` reads this session's own
+  row from the roster and never from its input — a model cannot name a coordinator.
+  There is no token any more: older installs may still carry
+  `~/.config/eidolon/coordinator.token`, and nothing reads it. What is enforceable is
+  this plugin's door; that is what is claimed.
 - **An address is opaque and provisional.** Echoed verbatim, never canonicalised;
   `id` is the ephemeral registration locator and is never used to match a worker
   (only, as above, to key an errored ending). If the harness's spelling of the
@@ -315,6 +332,13 @@ What is left runs inside a session, as plugin tools and two lifecycle handlers:
 - `hook_ready`, `hook_peer` — the lifecycle handlers. `hook_ready` reconciles the watch
   list against the roster; **it no longer reasserts a rank**, because a tag does not need
   reasserting. `hook_peer` produces one notice per observed halt.
+
+One sharp edge, because it is the only way a rank disappears with no act that names a
+rank: a session's own `label` call writes its **whole** tag set. Setting or clearing a
+cosmetic tag there therefore drops a `rank:` tag it was given — the ruling allows it (a
+session may change its own tags), and nothing on this side can stop it. The rank tools
+never go through `label`: `rank` replaces the `rank:` family, `unrank` removes it, and
+neither touches any other tag.
 
 ## Prerequisites
 
@@ -346,15 +370,15 @@ eidolon plugins --dir <checkout>        # the plugin lists; every tool's manifes
 python3 tests/coordinator/lifecycle-copies.py --check   # 123 copied functions across 8 handlers
 bash tests/coordinator/lifecycle-shape.sh               # the library's own policy
 bash tests/coordinator/lifecycle-drift.sh
+EIDOLON_BIN=<a built eidolon> bash tests/coordinator/run.sh   # 22 checks; the rank witness
 ```
 
-The old `run.sh` and the monitor fixtures that went with it (`ack-failure.sh`,
-`roster-failure.sh`, `live-rune-path.sh`, `live-rune-start.sh`, `rank-launch.py`,
-`rank-prefix.py`, `managed-start.py`, `managed-cancel.py`) measured the monitor's
-behaviour, which no longer exists; they are removed with it rather than left red. The
-rank tools' *runtime* behaviour is witnessed against a harness carrying the tag door —
-the fixture for it lands with that witness, and until then a green listing proves the
-manifests compile and nothing more.
+The monitor's own fixtures (`ack-failure.sh`, `roster-failure.sh`, `live-rune-path.sh`,
+`live-rune-start.sh`, `rank-launch.py`, `rank-prefix.py`, `managed-start.py`,
+`managed-cancel.py`) measured behaviour that no longer exists; they are removed with it
+rather than left red. `run.sh` is not one of them: it was rewritten onto the harness-only
+subject and is the fixture that exercises `rank`/`ranks`/`unrank` against a live
+registration — a green listing alone proves only what the manifests compile to.
 
 ## Uninstall
 
