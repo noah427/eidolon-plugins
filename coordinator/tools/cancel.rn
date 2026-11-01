@@ -111,11 +111,15 @@ pub async fn call(input) {
         // a reader who is told which row to retry wants to know *which* one.
         //
         // **No `?` here.** `epoch_and_source` answers a map, not a `Result` — the same shape
-        // `start_epoch_and_source` has in `adoptions.rn` — and a `?` on it is a Rune runtime error
-        // ("Type `::std::object::Object` is not supported as try operand"), not a compilation
-        // failure. This branch could not run at all until core stopped recording an unobserved exit
-        // as `exited` (2026-10-31, core `537d999`), so the mistake was invisible while it was
-        // unreachable; this fixture's first run of the branch is what found it. `epoch_and_source`
+        // `start_epoch_and_source` has in `adoptions.rn` — and a `?` on it is a Rune **runtime**
+        // error ("Type `::std::object::Object` is not supported as try operand"), invisible at
+        // compile time, not a compilation failure. This branch was **unreached by every path run so
+        // far** rather than unreachable: core persists the intent as `Attempted` *before* it calls
+        // the host, so a crash between the two leaves it durable, and a resumed session that cancels
+        // again gets `check_cancel`'s refusal and then `custody_inspect` answering `attempted`,
+        // which lands here. What no run had done until this fixture's first run of the branch is go
+        // down that path — and while core still recorded an unobserved exit as `exited` (before
+        // `537d999`) the ordinary in-process path did not reach it either. `epoch_and_source`
         // is total for the same reason: a sentence built while reporting a refusal must not replace
         // it with a second failure.
         let epoch = epoch_and_source(worker, view).await;

@@ -5,6 +5,12 @@
 #   HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
 #     EIDOLON_BIN=/path/to/eidolon bash tests/coordinator/live-rune-cancel-rows.sh
 #
+# That is the whole invocation: none of those directories has to exist first. This script makes every
+# one it needs before it drives anything, and if one cannot be created or written it **refuses by
+# name (exit 2) before any product check runs** — see the setup block below, which exists because
+# this fixture once let its own missing `$XDG_STATE_HOME` become product failures. From a cold
+# `mktemp -d` the invocation above reaches **35 checks, 0 FAIL, exit 0**.
+#
 # WHY. Core refuses a cancellation once a release has been attempted, so the two answers this file
 # witnesses can only happen at a **held** child: `observed` (the exit was seen) and `unobserved` (the
 # intent is durable and the exit was not seen). While every door a plugin could reach ran hold and
@@ -111,8 +117,35 @@ print("" if v is None else v)
 ' "$2"
 }
 
+# ---- setup: every directory this fixture needs, made before anything is driven ---------------------
+#
+# The documented invocation hands over three paths that need not exist, and they are the fixture's
+# business, not the port's. Run cold without `$XDG_STATE_HOME`, the watcher cannot write its log or
+# its marker, the workflow waits at a stop that never comes, and the run reports **17 product FAILs**
+# (R4a–R5g) for a missing `mkdir -p` — a broken setup wearing a broken port's clothes. So each one is
+# made here, and a directory that cannot be made or written **stops the run by name (exit 2) before
+# the plugin is copied, before the workflow is driven, and before any product check is counted**. A
+# witness that converts its own missing directory into a failure of the thing under test is worse
+# than one that refuses, and this is the refusal.
+setup_refuse() { # setup_refuse <path> <reason>
+    printf 'refusing: %s %s\n' "$1" "$2" >&2
+    printf '  nothing was run and no product check was counted; this is the fixture'"'"'s setup, not the port.\n' >&2
+    printf '  the documented invocation is: t=$(mktemp -d); HOME=$t XDG_CONFIG_HOME=$t/cfg \\\n' >&2
+    printf '    XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data EIDOLON_BIN=/path/to/eidolon bash %s\n' "$0" >&2
+    exit 2
+}
+for d in "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"; do
+    mkdir -p "$d" 2>/dev/null
+    if [ ! -d "$d" ]; then setup_refuse "$d" "does not exist and \`mkdir -p\` could not create it"; fi
+    if ! : >"$d/.fixture-writable" 2>/dev/null; then
+        setup_refuse "$d" "exists but is not writable (this fixture writes its own log, marker and ledger there)"
+    fi
+    rm -f "$d/.fixture-writable"
+done
+
 say "=== the harness under test ==="
 say_bin
+say "setup: config=$XDG_CONFIG_HOME state=$XDG_STATE_HOME data=$XDG_DATA_HOME (created where absent)"
 
 # ---- the plugin, copied byte for byte, plus the fixture's own tools -------------------------------
 plug=$XDG_CONFIG_HOME/eidolon/plugins/coordinator
@@ -340,25 +373,39 @@ except Exception:
     print("rows-parsed=no"); raise SystemExit
 mine = [r for r in rows if isinstance(r, dict) and r.get("worker") == first]
 theirs = [r for r in rows if isinstance(r, dict) and r.get("worker") == second]
+def released(r):
+    # A `yes|no` pair here would collapse two different facts: a row that says `released: false` and a
+    # row that says nothing about release at all. On this tree the unobserved row carries no
+    # `released` key, while the observed one carries `released: true`, and telling a reader which of
+    # those it saw is worth three words.
+    if not r:
+        return "no-row"
+    if "released" not in r:
+        return "absent"
+    return "true" if r["released"] else "false"
+
 print("rows-parsed=yes")
 print("all-rows=%d" % len([r for r in rows if isinstance(r, dict)]))
 print("observed-rows=%d" % len(mine))
 print("observed-cancellation=%s" % (mine[0].get("cancellation") if mine else "none"))
-print("observed-released=%s" % ("yes" if (mine and mine[0].get("released")) else "no"))
+print("observed-released=%s" % released(mine[0] if mine else None))
 print("unobserved-rows=%d" % len(theirs))
 print("unobserved-cancellation=%s" % (theirs[0].get("cancellation") if theirs else "none"))
 print("unobserved-op=%s" % (theirs[0].get("cancel_operation") if theirs else "none"))
-print("unobserved-released=%s" % ("yes" if (theirs and theirs[0].get("released")) else "no"))
+print("unobserved-released=%s" % released(theirs[0] if theirs else None))
 PYROWS
 )
 check "R2 the ledger rows were read back as data" "$facts" "rows-parsed=yes"
 check "R2b one row for the observed child" "$facts" "observed-rows=1"
 check "R2c and it is marked exited" "$facts" "observed-cancellation=exited"
-check "R2d and it was released" "$facts" "observed-released=yes"
+check "R2d and it was released" "$facts" "observed-released=true"
 check "R5d one row for the unobserved child" "$facts" "unobserved-rows=1"
 check "R5e and it is marked attempted" "$facts" "unobserved-cancellation=attempted"
 check "R5f naming the operation that recorded it" "$facts" "unobserved-op=$unobserved_op"
-check "R5g and it was not released" "$facts" "unobserved-released=no"
+# The guard is the *property* — this row is not released — and the token printed beside it says
+# whether that is an explicit `false` or the field being absent, which the old `yes|no` could not.
+# R5d carries the other half (a row exists at all), so `no-row` cannot pass here unnoticed.
+check_absent "R5g and it was not released" "$facts" "unobserved-released=true"
 
 # ---- the log's own bytes, where the red above comes from ----------------------------------------
 #
@@ -375,7 +422,13 @@ print(next((r.get("coordinator") for r in rows if isinstance(r,dict) and r.get("
 ')
 journal=$sessions/$parent.eid
 evidence=$(strings -a "$journal" 2>/dev/null | grep -o 'exit unconfirmed[^"]*' | head -1)
-check "R4j the door's answer, quoted, says the exit was not observed" "$rep" "not observed within 2s, so it may still be running"
+# The `2s` in the door's sentence is `CANCEL_EXIT_WAIT` in core, and retyping it here reds this check
+# when that constant changes — a fixture failing over its own copy of a number, not over the port. So
+# the needle is the evidence string the run itself left in the parent journal (gathered above), and
+# the check is what its name claims: the answer the report quotes *is* the door's own sentence. An
+# empty gather cannot make this vacuous: the fallback needle is text no report contains.
+check "R4j the door's answer, quoted, says the exit was not observed" "$rep" \
+    "${evidence:-R4j found no evidence string in the parent journal, so there is nothing to quote}"
 check_absent "R4k and the record claims no exit at all" "$record_unobserved" '"cancellation":"exited"'
 check "R4l and the host's own inspection still reports the child held" "$record_unobserved" '"observed":"held"'
 
