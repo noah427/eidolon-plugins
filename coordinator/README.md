@@ -77,8 +77,19 @@ HOME=$t XDG_CONFIG_HOME=$t/cfg XDG_STATE_HOME=$t/state XDG_DATA_HOME=$t/data \
 doors read it from this plugin's own root at launch, hash the exact bytes into
 the launch's immutable record, and append them through the CLI's generic
 `--system-append`; a rank with no written block appends nothing and is not an
-error. The five files ship as placeholders that say they are unwritten. See
-`ranks/README.md`.
+error. The five files now carry the rank text (duties, autonomy, the
+delegation rule, reporting and blockers) and are the payload core loads — no
+copy step. See `ranks/README.md`.
+
+**Permission presets are proposed, not shipped.** `RANK-PRESETS.md` has the
+matrix, its justification, the honest limitation of the seven-class
+vocabulary, and the minimum core seam that would make a per-rank preset file
+something core actually reads. Nothing in this plugin can set a session's
+capabilities today: the custody door's `StartAsk` has no `holds` field, the
+launched child is given no role or holds, and no Rune-visible door calls
+`set_holds_at`. A preset file shipped now would be dead configuration, so none
+is shipped.
+
 
 ## What this plugin does not decide
 

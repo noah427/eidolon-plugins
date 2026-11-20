@@ -16,10 +16,14 @@ sits *beside* the persona; it is not a persona rewrite, and it enforces nothing.
 Nothing in this plugin launches a session any more: the launcher is core's custody
 door, and this directory is the text it reads.
 
-Each block ships as a placeholder that says it is unwritten. Nothing is appended
-while a file holds only whitespace and the placeholder comment — and a rank with no
-file at all appends nothing either. **A rank with no written block is not an
-error**: it is a session that was told no rank text.
+The five blocks in this directory are **written**: they carry the rank's duties, its
+autonomy, the delegation rule and its reporting line, and they are what the custody
+door appends. Nothing in this plugin launches a session any more: the launcher is
+core's custody door, and this directory is the text it reads.
+
+A file that holds only whitespace and HTML comments is treated as unwritten and
+appends nothing, so an unwritten block is not an error either — it is a session
+that was told no rank text.
 
 The SHA-256 of the block's exact bytes is put into the launch's immutable record
 when the launch is prepared, and read again immediately before the child is
@@ -27,5 +31,6 @@ spawned. Editing a block after preparing a launch makes that operation's retry a
 refusal (`the … rank block changed after this launch was prepared`), never a child
 told different text. To change a rank's text, start a new operation.
 
-Replace the placeholder comment with the rank's words; the whole file is appended
-verbatim, comments included, so do not leave the comment beside them.
+The whole file is appended verbatim, comments included, so do not leave a comment
+beside the words.
+
