@@ -1,15 +1,20 @@
 # Rank blocks
 
 One file per rank: `imperator.md`, `legatus.md`, `tribunus.md`, `miles.md`, and
-optionally `centurio.md`. The names are the operator's convention; the coordinator
-does not add, rename or infer a rank, and this directory holds no doctrine of its
-own.
+optionally `centurio.md`. The names are the operator's convention and match the five words
+`tools/rank.rn` accepts; the coordinator does not add, rename or infer a rank, and
+this directory holds no doctrine of its own.
+Core's own rank vocabulary (`crates/cli/src/custody_host.rs`, `RANKS`) is the same
+five words, and it refuses an unknown one by name rather than treating it as a rank.
 
-A block's **bytes** are what a session of that rank is told: `coordinator_start`
-with `rank: "<name>"` passes the file to the CLI as `--system-append <path>`, which
-appends it to the resolved system prompt before the session exists, so the
-harness's `SessionStart` record captures it. The rank addition sits *beside* the
-persona; it is not a persona rewrite, and it enforces nothing.
+A block's **bytes** are what a session of that rank is told. The harness's custody
+doors read them — `<plugin root>/ranks/<name>.md`, for the plugin that owns the
+launch — when a launch names a rank, and pass the bytes through the CLI's generic
+`--system-append`, so the block is appended to the resolved system prompt before the
+session exists and the harness's `SessionStart` record captures it. The rank addition
+sits *beside* the persona; it is not a persona rewrite, and it enforces nothing.
+Nothing in this plugin launches a session any more: the launcher is core's custody
+door, and this directory is the text it reads.
 
 Each block ships as a placeholder that says it is unwritten. Nothing is appended
 while a file holds only whitespace and the placeholder comment — and a rank with no
