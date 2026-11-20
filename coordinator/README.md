@@ -16,9 +16,9 @@ token and no supervision here. Those moved into the harness, where they belong:
 What is left is small on purpose. A rank is a word, a word is a tag on the
 session it names, and a tag is storage and display: it is not a permission, not
 an adoption, not a reporting line, and the harness reads `rank:` as a string and
-attaches no meaning to it. `roles.rn` beside this file is the same five words in
-the role table's own spelling — a vocabulary to **copy** into the operator's
-`roles.rn`, not a payload the harness reads from here.
+attaches no meaning to it. The five words are already core's own role vocabulary:
+core's role table ships them and draws each one's chip, so no file has to be
+copied anywhere for that presentation to work.
 
 | tool | file | does |
 |---|---|---|
@@ -45,25 +45,13 @@ eidolon plugins trust coordinator
 vouches the three verbs. Installing is not trusting and trusting is not
 installing — the listing says which of the two happened.
 
-Then, if you want the words in the role table's own spelling (a role's `rank:`
-field publishing `rank:<word>` at start), copy the vocabulary in:
-
-```bash
-cp ~/.config/eidolon/plugins/coordinator/roles.rn ~/.config/eidolon/roles.rn
-# or merge its five entries into the roles.rn that is already there
-```
-
-`:reload_ui` in a running session re-reads `roles.rn` beside `ui.rn`. Nothing is
-copied for you: `roles.rn` is the operator's one file and the harness never reads
-it out of a plugin directory.
-
 ## Verify
 
 ```bash
 eidolon plugins --dir ~/.config/eidolon/plugins
 ```
 
-The listing must show `coordinator 0.2.0`, `payloads  ranks tools`, the three
+The listing must show `coordinator 0.2.0`, `payloads  tools`, the three
 verbs `coordinator_rank`, `coordinator_ranks`, `coordinator_unrank`, and **no**
 `service` line and **no** `lifecycle` line. Then, from a session:
 

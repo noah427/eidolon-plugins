@@ -20,7 +20,7 @@ pub fn manifest() {
     #{
         name: "coordinator",
         version: "0.2.0",
-        description: "the coordinator's rank vocabulary, as roles: the five words (imperator, legatus, tribunus, centurio, miles), the `rank:` tag that publishes one on a session, and the `ranks/<word>.md` blocks the harness appends to a session launched at that rank. `roles.rn` beside this file is the same vocabulary in the role table's own spelling, for copying into ~/.config/eidolon/roles.rn — the harness does not read it from here. No service, no ledger, no lifecycle handler, no supervision: the harness owns all of that",
+        description: "the coordinator's rank vocabulary, as roles: the five words (imperator, legatus, tribunus, centurio, miles), the `rank:` tag that publishes one on a session, and the `ranks/<word>.md` blocks the harness appends to a session launched at that rank. The same five words are already core's own role vocabulary, which draws each rank's chip; this plugin ships no role table and nothing here is meant to be copied into `~/.config/eidolon/roles.rn`. No service, no ledger, no lifecycle handler, no supervision: the harness owns all of that",
         claims: #{
             // `rank`/`unrank`/`ranks` set and read a word as a **tag on the ranked
             // session**; they claim no authority over the harness and none over

@@ -104,10 +104,11 @@ mkdir -p "$plug/workflows"
 cp -r "$repo/coordinator/." "$plug/"
 cp "$here/rank-witness.rn" "$plug/workflows/rank-witness.rn"
 # Two test-only tools, never shipped: one places a tag through the harness's door and one reads a
-# row's tags, because a workflow has no `swarm_call` of its own. Registered the way the other
-# fixtures register their seed tools — by editing this fixture's *copy* of the manifest.
+# row's tags, because a workflow has no `swarm_call` of its own. Registered by editing this
+# fixture's *copy* of the manifest — the shipped manifest names only the three rank verbs, so the
+# pattern below has to be the list that is actually there.
 cp "$here/rank-fixture/tools/seed_tag.rn" "$here/rank-fixture/tools/dump_tags.rn" "$plug/tools/"
-sed -i 's/"rank", "unrank", "ranks", "hook_ready", "hook_peer"\]/"rank", "unrank", "ranks", "hook_ready", "hook_peer", "seed_tag", "dump_tags"]/' "$plug/plugin.rn"
+sed -i 's/"rank", "ranks", "unrank"\]/"rank", "ranks", "unrank", "seed_tag", "dump_tags"]/' "$plug/plugin.rn"
 grep -q 'seed_tag' "$plug/plugin.rn" || { say "FAIL the fixture tools are not registered"; exit 1; }
 "$EID" plugins trust coordinator >/dev/null
 
