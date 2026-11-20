@@ -1,9 +1,75 @@
-# Rank permission presets — proposal, and the seam that is missing
+# Rank presets — the operator's matrix, as implemented
 
-Status: **proposal for review**, written 2026-11-17 on branch
-`feat/coordinator-roles-only`. Nothing here is installed, and the operator has not ruled
-on the matrix. The parent session owns the vault's final specification; this file is the
-technical proposal and the evidence behind it.
+Status: **implemented** on `feat/coordinator-roles-only` (manifest `presets:` block) together
+with the core seam on `feat/permissions-enforcement` (branch off core `ab66e0a`). The sets in
+`plugin.rn` are the operator's decision, taken by Noah on the parent session's
+recommendation; this file is the technical record of *how* they are delivered and what is
+still missing. Core's specification lives in the vault and the core tree; this is the
+offering's half, not a second authority.
+
+## The sets, as written in `plugin.rn`
+
+| rank | fs.read | fs.write | shell.run | net.reach | peers.message | workers.spawn | workers.edit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| imperator | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| legatus | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| tribunus | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| centurio | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
+| miles | ✓ | ✓ | ✓ | — | ✓ | — | — |
+
+Shared top sets are intentional: the matrix is a **delegation ceiling**, and above Tribunus a
+rank's difference is the brief and who it reports to — prompt text — not a gratuitous bit.
+`net.reach` is withheld from Centurio and Miles; `workers.spawn`/`workers.edit` from Miles, so
+"Miles does not recruit" is a missing class rather than a sentence in a prompt. No wording in
+`ranks/*.md` adds a class: the blocks are guidance, and the harness enforces the set.
+
+## What carries them now
+
+1. **Payload.** The `presets:` block in `plugin.rn`: word → `capabilities` (wire spellings) plus
+   `prompt` (a path inside this directory, `ranks/<word>.md`). Not a second holds file: the
+   prompt block and the grants are two fields of one definition, so a rank cannot drift from
+   its text.
+2. **Admission.** `eidolon_rune::plugins::discover` reads the block and refuses the **whole
+   plugin** for an unknown class name, a word that is not one word, a duplicate spelling, or a
+   prompt path that is absolute or climbs out of this directory. A partly-loaded grant would
+   be a grant nobody reviewed.
+3. **Resolution.** `eidolon_core::preset` holds `Preset` (offering, word, set, prompt
+   reference), `PresetCatalog` (`plugin:word` or an unambiguous bare word; unknown and
+   ambiguous both refuse), `HeldCell` (the session's live effective set) and
+   `resolve_launch`/`resolve_edit` (the subset rules).
+4. **Launch.** `eidolon run|chat|tui --preset coordinator:miles` resolves the preset, reads and
+   journals the block, appends it to the system prompt, and journals the effective set as
+   `RecordKind::Capabilities`. `--holds` may narrow it and may not widen it; `--holds ""` is an
+   explicit empty grant. A resume states nothing and reads the record back, so authority and
+   prompt survive the reopen.
+5. **Enforcement.** The dispatcher refuses a call whose tool declares a class the session does
+   not hold, before the gate and before any side effect; the Rune host refuses the same
+   classes for a script's direct `eidolon::fs_write` / `shell` / `web_*` / `peer_send` /
+   `swarm_call` / `custody_*`. Both read one cell, as do the roster row and the journal record.
+6. **Workers.** `spawn_agent` declares `requires: [workers.spawn, shell.run, fs.write]` and
+   launches its child with `--holds` equal to its own resolved set through
+   `eidolon::child_holds`; a wider request is refused there, by the same
+   `resolve_launch(... Grantor::Agent(...))` the operator's launch uses.
+
+## What is honestly not done
+
+- **The custody door refuses a preset by name.** `custody_doors::StartAsk` carries `preset`,
+  and the door answers with a refusal explaining that `LaunchRequest` is a bitcode struct
+  inside a journaled custody row: carrying a preset and its prompt digest needs an appended
+  `CustodyKind` record, not a new field. The check exists everywhere else; the door will not
+  start a child whose grant nobody compared.
+- **`shell.run` is not confinement.** It reaches the filesystem and the network whatever else
+  the set says. The classes gate harness calls — which tool, which primitive — and the
+  operator knows that, which is why `--holds` says so in its own help.
+- **A process outside the harness is outside the check.** `--holds` is an argument; a session
+  that shells out to `eidolon` can type its own. The enforced launches are the ones the
+  harness performs on a session's behalf, against the session's durable set.
+- **A cross-process shrink lands at the target's next launch or resume.** The cell makes an
+  in-process change immediate; the peers page's edit of another running session is a roster
+  fact that session reads when it next resolves its grant.
+- **`roles.rn`'s `holds` still wins over the owner preset** for a session that states nothing,
+  and an unconfigured session still falls back to `all_v1` — which is why existing logs and
+  sessions keep working unchanged.
 
 ## What is real today
 

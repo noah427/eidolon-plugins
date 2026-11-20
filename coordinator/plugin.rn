@@ -19,7 +19,7 @@
 pub fn manifest() {
     #{
         name: "coordinator",
-        version: "0.2.0",
+        version: "0.3.0",
         description: "the coordinator's rank vocabulary, as roles: the five words (imperator, legatus, tribunus, centurio, miles), the `rank:` tag that publishes one on a session, and the `ranks/<word>.md` blocks the harness appends to a session launched at that rank. The same five words are already core's own role vocabulary, which draws each rank's chip; this plugin ships no role table and nothing here is meant to be copied into `~/.config/eidolon/roles.rn`. No service, no ledger, no lifecycle handler, no supervision: the harness owns all of that",
         claims: #{
             // `rank`/`unrank`/`ranks` set and read a word as a **tag on the ranked
@@ -33,6 +33,53 @@ pub fn manifest() {
             // here on 127.0.0.1:8095 is retired, token and all, and the
             // `lifecycle` block that armed two handlers is gone with it.
             tools: ["rank", "ranks", "unrank"],
+        },
+        // **The five ranks as launch presets**, which is the whole of what this
+        // plugin contributes to a permission decision: a word, the tool classes a
+        // session launched at that word holds, and the block it is told. The
+        // operator decided these sets; this file is where that decision is written
+        // down so the harness can resolve it, and nowhere else.
+        //
+        // The harness reads this block at admission, refuses the whole plugin if a
+        // class name is not one of the seven, a word is not one word, or a prompt path
+        // leaves this directory, and then hands the definitions to the one resolution
+        // an operator's `--preset`, a custody door and a spawned worker all share
+        // (`eidolon_core::preset`). A preset is a **ceiling a brief may narrow**:
+        // `--holds` beside it can only take classes away, a worker may only be given
+        // a subset of what its parent holds, and no part of this block is read as
+        // authority at call time — the dispatcher and the Rune host enforce the
+        // session's own resolved set, and this file cannot widen it.
+        //
+        // The sets are the operator's, class by class: every rank produces or verifies
+        // work in the tree, so `fs.read`/`fs.write`/`shell.run` are held by all five;
+        // every rank must report up and answer a blocker, so all five hold
+        // `peers.message`; `workers.spawn`/`workers.edit` are what separate "does the
+        // work" from "runs a team", and a Miles holds neither; `net.reach` is the one
+        // coarse class withheld from a bounded executor and from a Centurio, who
+        // executes with a team rather than integrating across sources. Above Tribunus
+        // the ranks share one set on purpose — the difference there is the brief and
+        // who it reports to, which is prompt text, not a capability.
+        presets: #{
+            "imperator": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "net.reach", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/imperator.md",
+            },
+            "legatus": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "net.reach", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/legatus.md",
+            },
+            "tribunus": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "net.reach", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/tribunus.md",
+            },
+            "centurio": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/centurio.md",
+            },
+            "miles": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "peers.message"],
+                prompt: "ranks/miles.md",
+            },
         },
     }
 }
