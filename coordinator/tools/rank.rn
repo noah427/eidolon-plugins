@@ -12,10 +12,12 @@
 // carries a prefix at all, and it is the one place this tool's vocabulary reaches the
 // harness — as a literal string the harness matches and attaches no meaning to.
 //
-// It is presentation and nothing else: no permission, no role, no adoption, no
-// reporting line, and no reader may take it for any of those. What the words are is
-// this plugin's own convention (`ranks/`); the harness has no rank enum, no rank
-// journal record and no rank flag.
+// It is presentation and nothing else: no permission, no adoption, no reporting line,
+// and no reader may take it for any of those. What the words are is this plugin's own
+// convention (`ranks/`); the harness has no rank enum, no rank journal record and no
+// rank flag. A word that is also a role word in the operator's `roles.rn` still draws
+// that role's chip, and that is presentation too: which words exist and what each one
+// names is the operator's table's business, not a judgement this tag carries.
 //
 // The assigning side is not an argument, and it is not recorded: a rank is a tag on
 // the session it belongs to, the act is performed by that session's own process over
@@ -26,7 +28,7 @@
 pub fn manifest() {
     #{
         name: "coordinator_rank",
-        description: "Give a session a rank: `rank:<word>` joins that session's own tags, replacing any rank tag it already carried and leaving its label and every other tag untouched. Presentation only — no permission, no role, no adoption, nothing the harness reads back. The tag is durable and survives the session's resume. A session with no live registration is refused, because a tag belongs to a registration.",
+        description: "Give a session a rank: `rank:<word>` joins that session's own tags, replacing any rank tag it already carried and leaving its label and every other tag untouched. Presentation only — no permission, no adoption, nothing the harness reads back, though a word the operator's `roles.rn` also declares draws that role's chip. The tag is durable and survives the session's resume. A session with no live registration is refused, because a tag belongs to a registration.",
         approval: "mutating",
         input_schema: #{
             "type": "object",

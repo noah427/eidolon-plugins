@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # guard.sh: sourced by the runner before it copies anything. Refuses unless HOME
 # and XDG_CONFIG_HOME are throwaway directories: this harness copies the plugin
-# into the config it is given, vouches for it there, writes a token file, starts
-# the monitor on a port of its own, and drives its doors.
+# into the config it is given, vouches for it there, starts one mock session under
+# its own XDG_RUNTIME_DIR, and drives the rank tools against that session's
+# registration. No port is bound and no token is written.
 _under_tmp() {
     case $(realpath -m "$1") in
     /tmp/* | /var/tmp/*) return 0 ;;
@@ -19,7 +20,7 @@ require_temp_config() {
         return 1
     fi
     if ! _under_tmp "$home"; then
-        echo "refusing: HOME ($home) is not under /tmp or \$TMPDIR; the monitor writes its token and state beneath it" >&2
+        echo "refusing: HOME ($home) is not under /tmp or \$TMPDIR; the mock session's log, tags and the plugin's trust record are written beneath it" >&2
         return 1
     fi
     return 0

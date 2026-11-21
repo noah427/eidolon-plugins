@@ -1,43 +1,85 @@
 // The manifest for `coordinator` — the directory's name is the namespace every
-// verb it ships is registered under (`coordinator_adopt`, ...), so this file says
+// verb it ships is registered under (`coordinator_rank`, ...), so this file says
 // only what the plugin says about itself.
 //
-// No role lives in this file and no authority is claimed by it. A label or a tag
-// is storage and display, and the adoption this plugin records is an explicit act
-// of one session about another — never an effect of a word somebody typed.
+// **This plugin is roles.** It ships no service, keeps no ledger, offers no
+// lifecycle handler, starts nothing and watches nothing. Everything the tree
+// around it used to do itself now belongs to somebody else: supervision and the
+// custody state machine are `eidolon_core::custody` behind the custody doors,
+// the words a session can be called by are the operator's `roles.rn`
+// (`eidolon_tui::roles`), and the text a session of a given rank is told is
+// `ranks/<word>.md` here — read by the custody doors at launch, not by a tool.
+//
+// What is left is the vocabulary and the one act the vocabulary needs: a word
+// put on a session and taken off it again, as a `rank:` tag on the ranked
+// session. No role lives in this file and no authority is claimed by it — a
+// label or a tag is storage and display, a rank is not a permission, an
+// adoption or a reporting line, and the harness reads `rank:` as a string and
+// attaches no meaning to it.
 pub fn manifest() {
     #{
         name: "coordinator",
-        version: "0.1.0",
-        // The address is the id the harness mints for a session — the log's file
-        // stem — so an adoption can be recorded as soon as the session has a log.
-        // It cannot work for a session with no log, and says so rather than
-        // substituting a locator: the id is what the monitor resolves later.
-        description: "explicit adoption of worker sessions by a coordinator, and one notice per observed halt: who you have adopted, what each of them is doing, and the notifications still owed to them. An adoption is keyed on the session id the harness mints (the log's file stem), echoed verbatim; a session with no log has none, and then the verb refuses with the reason instead of substituting a path or a label",
-        // The two lifecycle handlers, by the stem of the file under `tools/`. The
-        // harness registers them as `coordinator_hook_ready` and
-        // `coordinator_hook_peer` and invokes them with the observation in place of
-        // model input; adoption marks them `script_only`. `hook_ready` reconciles the
-        // ledger's watch list against the roster and `hook_peer` produces one notice per
-        // observed halt — neither sends, resumes or adopts anything, and **neither
-        // reasserts a rank any more**: a rank is a tag on the ranked session, the harness
-        // keeps it beside that session's log, and there is nothing to reattach when a
-        // session resumes.
-        lifecycle: #{
-            plugin_ready: "hook_ready",
-            peer_changed: "hook_peer",
-        },
+        version: "0.3.0",
+        description: "the coordinator's rank vocabulary, as roles: the five words (imperator, legatus, tribunus, centurio, miles), the `rank:` tag that publishes one on a session, and the `ranks/<word>.md` blocks the harness appends to a session launched at that rank. The same five words are already core's own role vocabulary, which draws each rank's chip; this plugin ships no role table and nothing here is meant to be copied into `~/.config/eidolon/roles.rn`. No service, no ledger, no lifecycle handler, no supervision: the harness owns all of that",
         claims: #{
-            // `rank`/`unrank`/`ranks` set a word as a **tag on the ranked session**; they
-            // claim no authority over the harness and none over another session. The word
-            // is the plugin's own vocabulary, and the store is the session's own tags —
-            // there is no rank file here, and no process behind it.
+            // `rank`/`unrank`/`ranks` set and read a word as a **tag on the ranked
+            // session**; they claim no authority over the harness and none over
+            // another session. The word is this plugin's own vocabulary and the
+            // store is the session's own tags: there is no rank file here, no
+            // process behind it and nothing to keep in step with it.
             //
-            // There is no `grants` claim either: nothing in this plugin reaches a secret, a
-            // file or an endpoint. The monitor that used to be declared here on
-            // 127.0.0.1:8095 is retired with its token file.
-            tools: ["adopt", "release", "adoptions", "notices", "start", "cancel",
-                    "rank", "unrank", "ranks", "hook_ready", "hook_peer"],
+            // There is no `grants` claim either: nothing in this plugin reaches a
+            // secret, a file or an endpoint. The monitor that was once declared
+            // here on 127.0.0.1:8095 is retired, token and all, and the
+            // `lifecycle` block that armed two handlers is gone with it.
+            tools: ["rank", "ranks", "unrank"],
+        },
+        // **The five ranks as launch presets**, which is the whole of what this
+        // plugin contributes to a permission decision: a word, the tool classes a
+        // session launched at that word holds, and the block it is told. The
+        // operator decided these sets; this file is where that decision is written
+        // down so the harness can resolve it, and nowhere else.
+        //
+        // The harness reads this block at admission, refuses the whole plugin if a
+        // class name is not one of the seven, a word is not one word, or a prompt path
+        // leaves this directory, and then hands the definitions to the one resolution
+        // an operator's `--preset`, a custody door and a spawned worker all share
+        // (`eidolon_core::preset`). A preset is a **ceiling a brief may narrow**:
+        // `--holds` beside it can only take classes away, a worker may only be given
+        // a subset of what its parent holds, and no part of this block is read as
+        // authority at call time — the dispatcher and the Rune host enforce the
+        // session's own resolved set, and this file cannot widen it.
+        //
+        // The sets are the operator's, class by class: every rank produces or verifies
+        // work in the tree, so `fs.read`/`fs.write`/`shell.run` are held by all five;
+        // every rank must report up and answer a blocker, so all five hold
+        // `peers.message`; `workers.spawn`/`workers.edit` are what separate "does the
+        // work" from "runs a team", and a Miles holds neither; `net.reach` is the one
+        // coarse class withheld from a bounded executor and from a Centurio, who
+        // executes with a team rather than integrating across sources. Above Tribunus
+        // the ranks share one set on purpose — the difference there is the brief and
+        // who it reports to, which is prompt text, not a capability.
+        presets: #{
+            "imperator": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "net.reach", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/imperator.md",
+            },
+            "legatus": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "net.reach", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/legatus.md",
+            },
+            "tribunus": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "net.reach", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/tribunus.md",
+            },
+            "centurio": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "peers.message", "workers.spawn", "workers.edit"],
+                prompt: "ranks/centurio.md",
+            },
+            "miles": #{
+                capabilities: ["fs.read", "fs.write", "shell.run", "peers.message"],
+                prompt: "ranks/miles.md",
+            },
         },
     }
 }
